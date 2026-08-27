@@ -386,7 +386,7 @@ def cmd_enter(args) -> int:
             return REFUSED
         done = store.closed_steps(conn, row["run_id"])
         missing = [d for d in s.deps if d not in done]
-        if missing and not args.force:
+        if missing and not args.force_deps:
             store.log_step(conn, row["run_id"], s.id, "refused",
                            f"deps open: {','.join(missing)}")
             _err(f"⛔ REFUSED: '{s.id}' depends on unclosed step(s): {', '.join(missing)}")
@@ -425,7 +425,7 @@ def cmd_enter(args) -> int:
             "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'entered'",
             (row["run_id"],)).fetchall()}
         store.log_step(conn, row["run_id"], s.id, "entered",
-                       "forced" if (missing and args.force) else None)
+                       "forced past open deps" if (missing and args.force_deps) else None)
         store.touch_run(conn, row["run_id"], current_step=s.id)
         print(f"▶ entered {s.id} ({s.title})")
         # phase_start fires when the phase's FIRST step is entered — i.e. no step of this
@@ -1119,15 +1119,17 @@ def cmd_close_run(args) -> int:
         # Optional steps and untaken exclusive branches are not owed. Demanding them is
         # what made the transcribed 111-step flow impossible to close.
         missing = [sid for sid in f.required_steps(row["variant"]) if sid not in done]
-        if missing and not args.force:
+        if missing and not args.force_steps:
             _err(
                 f"⛔ REFUSED: {len(missing)} step(s) still open: "
                 f"{', '.join(missing[:8])}{' …' if len(missing) > 8 else ''}\n"
-                f"    Pass --force to close anyway (recorded as a violation)."
+                f"    Pass --force-steps to close anyway (recorded as a breach).\n"
+                f"    That authorises leaving WORK undone — it does not also excuse an\n"
+                f"    undischarged obligation, which needs --force-obligations."
             )
             return REFUSED
         owed = store.open_obligations(conn, row["run_id"])
-        if owed and not args.force:
+        if owed and not args.force_obligations:
             _err(
                 f"⛔ REFUSED: {len(owed)} obligation(s) not discharged:\n"
                 + "\n".join(f"    {r['hook_id']}  (raised at {r['trigger_kind']} "
@@ -1153,12 +1155,41 @@ def cmd_close_run(args) -> int:
 
 # ------------------------------------------------------------------ parser
 
+class _Parser(argparse.ArgumentParser):
+    """Argparse, with two defaults corrected because both broke this engine's own promises.
+
+    NO PREFIX ABBREVIATION. Argparse accepts any unambiguous prefix, so retiring a vague flag
+    name does not actually retire it: `--force` still resolved to `--force-deps` on the one
+    subcommand that had a single match, while erroring on the one that had two. The old name
+    therefore kept working in half the places and the retirement was cosmetic — and worse, it
+    behaved differently per subcommand.
+
+    USAGE ERRORS EXIT 1, NOT 2. Argparse exits 2 on a bad invocation, and 2 already means
+    "the spec is invalid" here. An unknown flag reported as an invalid spec sends the reader
+    looking in the wrong file — and "the exit code is the product" cannot be true while one
+    code means two unrelated things.
+    """
+    def __init__(self, *a, **kw) -> None:
+        # Forced here rather than passed at each construction site, because subparsers do NOT
+        # inherit it — and a setting that holds on the top-level parser while silently lapsing
+        # on every subcommand is worse than not setting it: the retired name then works in
+        # exactly the places nobody checked.
+        kw["allow_abbrev"] = False
+        super().__init__(*a, **kw)
+
+    # argparse names this method; the casing is not ours to choose.
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        raise SystemExit(USAGE)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="harness",
         description="harness-engine — declare a flow, get exit-code enforcement.",
     )
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
 
     sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
     sub.add_parser("abilities", help="list installed abilities").set_defaults(fn=cmd_abilities)
@@ -1188,7 +1219,8 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("enter", help="enter a step")
     e.add_argument("--run", required=True)
     e.add_argument("--step", required=True)
-    e.add_argument("--force", action="store_true")
+    e.add_argument("--force-deps", action="store_true",
+                   help="enter despite unclosed dependencies (logged as forced)")
     e.set_defaults(fn=cmd_enter)
 
     c = sub.add_parser("close-step", help="close a step (exit 3 if incomplete)")
@@ -1275,7 +1307,14 @@ def build_parser() -> argparse.ArgumentParser:
     cr = sub.add_parser("close-run", help="close a run (exit 3 if steps remain)")
     cr.add_argument("--run", required=True)
     cr.add_argument("--result", default="completed")
-    cr.add_argument("--force", action="store_true")
+    # TWO flags, deliberately, and no combined one. They authorise different things:
+    # leaving work undone, versus leaving a recorded commitment unmet. One switch made
+    # whoever reached for it grant both — usually while meaning only the first — and the
+    # familiar short name is what would keep doing that, so it is not kept as an alias.
+    cr.add_argument("--force-steps", action="store_true",
+                    help="close despite required steps still open (recorded as a breach)")
+    cr.add_argument("--force-obligations", action="store_true",
+                    help="close despite undischarged obligations (recorded as a breach)")
     cr.set_defaults(fn=cmd_close_run)
 
     return p

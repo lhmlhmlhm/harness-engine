@@ -1212,7 +1212,11 @@ steps:
     try:
         assert rc(["open", "__fo__", "--scope", "s", "--run", "fo"], env) == OK
         assert rc(["close-step", "--run", "fo", "--step", "A"], env) == OK
-        assert rc(["close-run", "--run", "fo", "--force"], env) == OK
+        # BOTH, because this run has open steps AND an owed obligation — and the whole point
+        # of the split is that authorising one does not authorise the other.
+        assert rc(["close-run", "--run", "fo", "--force-steps"], env) == REFUSED
+        assert rc(["close-run", "--run", "fo", "--force-steps",
+                   "--force-obligations"], env) == OK
         assert "undischarged_obligations" in run(["audit"], env).stdout
     finally:
         _rm(d)
@@ -1430,9 +1434,19 @@ def test_domain_analysis_decides_the_flow(env):
     assert "analysis_ran=False" in obs
     assert rc(["close-run", "--run", "seam"], env) == REFUSED
 
-    assert rc(["discharge", "--run", "seam", "--hook", "blast-radius-absent",
-               "--evidence", "scope is not a repository"], env) == OK
-    assert rc(["close-run", "--run", "seam", "--force"], env) == OK
+    # TWO obligations, not one — a scope that is not a repository makes both the blast-radius
+    # analysis and the decision pipeline unable to run, and each of those raises its own. This
+    # assertion is here because the test previously discharged one and let a combined --force
+    # excuse the other, so a second obligation appearing went unnoticed: exactly the silence the
+    # flag split removes.
+    owed = [ln.split()[2] for ln in run(["obligations", "--run", "seam"], env).stdout.splitlines()
+            if ln.strip().startswith("⏳")]
+    assert set(owed) == {"blast-radius-absent", "decision-gate-vacuous"}, owed
+    for hook_id in owed:
+        assert rc(["discharge", "--run", "seam", "--hook", hook_id,
+                   "--evidence", "scope is not a repository"], env) == OK
+    # Steps are still open, so this authorises leaving WORK undone — and nothing else.
+    assert rc(["close-run", "--run", "seam", "--force-steps"], env) == OK
 
 
 def test_guard_pointing_at_ungated_step_is_rejected(env):
@@ -1676,7 +1690,7 @@ def test_close_run_refuses_while_steps_remain(env):
 
 def test_forced_close_is_recorded_as_a_violation(env):
     assert rc(["open", "delivery", "--scope", "/r", "--run", "cr2"], env) == OK
-    assert rc(["close-run", "--run", "cr2", "--force"], env) == OK
+    assert rc(["close-run", "--run", "cr2", "--force-steps"], env) == OK
     assert "forced_close" in run(["audit"], env).stdout
     # A forced close is a BREACH — something got through, marked. This is also the one place
     # that pins the ledger's DEFAULT severity: this call site passes none, so a default of
@@ -1693,7 +1707,7 @@ def test_forced_close_is_recorded_as_a_violation(env):
 def test_closing_a_run_frees_the_scope(env):
     assert rc(["open", "delivery", "--scope", "/repo/s", "--run", "s1"], env) == OK
     assert rc(["open", "delivery", "--scope", "/repo/s", "--run", "s2"], env) == REFUSED
-    assert rc(["close-run", "--run", "s1", "--force"], env) == OK
+    assert rc(["close-run", "--run", "s1", "--force-steps"], env) == OK
     assert rc(["open", "delivery", "--scope", "/repo/s", "--run", "s2"], env) == OK
 
 
@@ -2682,7 +2696,7 @@ def test_a_symlinked_location_still_matches_its_scope(env, tmp_path):
         assert rc(["open", "gtlink", "--scope", str(link), "--run", "gl"], env) == OK
         assert _gt(env, "shell", {"command": "git commit -m x"}, str(real)) == BLOCKED
         # …and the other way round.
-        assert rc(["close-run", "--run", "gl", "--force"], env) == OK
+        assert rc(["close-run", "--run", "gl", "--force-steps"], env) == OK
         assert rc(["open", "gtlink", "--scope", str(real), "--run", "gl2"], env) == OK
         assert _gt(env, "shell", {"command": "git commit -m x"}, str(link)) == BLOCKED
     finally:
@@ -2793,7 +2807,7 @@ def test_only_a_closed_run_may_be_purged_and_the_purge_is_recorded(env):
     assert rc(["open", "delivery", "--scope", "/purge-me", "--run", "pg"], env) == OK
     r = run(["purge-run", "--run", "pg", "--reason", "test"], env)
     assert r.returncode == REFUSED and "Only a closed run" in r.stderr
-    assert rc(["close-run", "--run", "pg", "--force"], env) == OK
+    assert rc(["close-run", "--run", "pg", "--force-steps"], env) == OK
     audit = run(["audit"], env).stdout
     assert "forced_close" in audit
     out = run(["purge-run", "--run", "pg", "--reason", "residue from a wiring smoke test"], env)
@@ -3018,3 +3032,87 @@ def test_a_review_side_ability_runs_end_to_end_with_its_guard(
     assert untaken in skipped, (untaken, sorted(skipped))
     assert untaken not in closed
     assert len(closed) + len(skipped) == len(flow["steps"]), (sorted(closed), sorted(skipped))
+
+
+def test_forcing_one_thing_does_not_authorise_the_other(env):
+    """Two flags, and neither stands in for the other. That is the entire point of the split.
+
+    One switch made whoever reached for it grant both — usually while meaning only the first.
+    The failure mode is quiet: a test in this very suite discharged one obligation and let a
+    combined force excuse a second one it had never noticed existed, and nothing said so. So
+    there is no combined flag and no alias: the familiar short name is what would keep doing it.
+    """
+    d = _spec(env, "twoflags", """
+facts: {providers: [run_progress]}
+phases: [{id: p1}]
+steps:
+  - id: A
+    phase: p1
+    completion: {type: attest}
+  - id: B
+    phase: p1
+    deps: [A]
+    completion: {type: attest}
+hooks:
+  - id: owed
+    trigger: phase_start
+    phase: p1
+    when: {fact: violation_count, count_gte: 0}
+    mode: contract
+    obligation: true
+    contract: "discharge me"
+""")
+    try:
+        assert rc(["open", "twoflags", "--scope", "tf", "--run", "tf"], env) == OK
+        assert rc(["enter", "--run", "tf", "--step", "A"], env) == OK      # raises the obligation
+        # Both problems present: an open step AND an owed obligation.
+        r = run(["close-run", "--run", "tf"], env)
+        assert r.returncode == REFUSED and "still open" in r.stderr
+        # Forcing STEPS says nothing about the obligation — and the refusal names the other flag.
+        r = run(["close-run", "--run", "tf", "--force-steps"], env)
+        assert r.returncode == REFUSED
+        assert "obligation" in r.stderr and "discharge" in r.stderr
+        # Forcing OBLIGATIONS says nothing about the open steps.
+        r = run(["close-run", "--run", "tf", "--force-obligations"], env)
+        assert r.returncode == REFUSED
+        assert "still open" in r.stderr and "--force-steps" in r.stderr
+        # There is no combined flag, and no alias for the old name.
+        assert rc(["close-run", "--run", "tf", "--force"], env) == USAGE
+        # Both, explicitly.
+        assert rc(["close-run", "--run", "tf", "--force-steps",
+                   "--force-obligations"], env) == OK
+        audit = run(["audit"], env).stdout
+        assert "forced_close" in audit and "undischarged_obligations" in audit
+    finally:
+        _rm(d)
+
+
+def test_entering_past_open_deps_says_what_it_forces(env):
+    """`enter --force` was single-purpose but vaguely named; the log entry now says which
+    check was bypassed, so reading the ledger afterwards does not require guessing."""
+    import sqlite3
+    d = _spec(env, "forcedeps", """
+phases: [{id: p1}]
+steps:
+  - id: A
+    phase: p1
+    completion: {type: attest}
+  - id: B
+    phase: p1
+    deps: [A]
+    completion: {type: attest}
+""")
+    try:
+        assert rc(["open", "forcedeps", "--scope", "fd", "--run", "fd"], env) == OK
+        assert rc(["enter", "--run", "fd", "--step", "B"], env) == REFUSED
+        assert rc(["enter", "--run", "fd", "--step", "B", "--force"], env) == USAGE
+        assert rc(["enter", "--run", "fd", "--step", "B", "--force-deps"], env) == OK
+        c = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db")
+        try:
+            note = c.execute("SELECT detail FROM step_log WHERE run_id='fd' AND step_id='B' "
+                             "AND event='entered'").fetchone()[0]
+        finally:
+            c.close()
+        assert note == "forced past open deps", note
+    finally:
+        _rm(d)

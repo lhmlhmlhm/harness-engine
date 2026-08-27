@@ -322,7 +322,7 @@ v1 的四个缺口都补上了，那条 111 步的真实流程现在**能真正�
 
 ```
 驱动结果：closed=82  skipped=29  gated=6  人类发言=4
-close-run → exit 0（未用 --force）
+close-run → exit 0（未用任何 --force-* flag）
 audit → unwitnessed: 0，无 forced_close
 ```
 
