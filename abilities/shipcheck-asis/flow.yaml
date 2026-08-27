@@ -86,6 +86,63 @@ hooks:
     「没跑」和「跑了没发现问题」在下游长得一样，所以必须显式销账：
       harness discharge --run {{run_id}} --hook blast-radius-absent \\
         --evidence "<为什么可以不跑>"
+# ── decision_gate：那 2,614 行分析算出的裁决，真的被条件读到 ──
+# 这个 provider 曾声明 6 个事实却零引用 —— 按需 gather 生效后它永远不会被调用，
+# 于是 1,224 行复制进来的工具是死接线。**声明了却不生效**，正是本引擎要消灭的形态。
+- id: decision-gate-blocking
+  trigger: phase_end
+  phase: verification
+  when:
+    fact: blocking_count
+    count_gte: 1
+  mode: contract
+  obligation: true
+  contract: |
+    分类器判出 {{fact.blocking_count}} 项阻断级发现（{{fact.blocking_ids}}）。
+    阻断级不是「注意一下」，是「这次不该往下走」。逐项处理掉，或说明为何它在本次
+    改动下不成立，然后销账：
+      harness discharge --run {{run_id}} --hook decision-gate-blocking \
+        --evidence "<每一项怎么处理的>"
+- id: decision-gate-vacuous
+  trigger: phase_end
+  phase: verification
+  when:
+    fact: pipeline_ran
+    equals: false
+  mode: contract
+  obligation: true
+  contract: |
+    裁决流水线没跑起来（工具缺失或 scope 不是目录），所以裁决是空的 —— 而空裁决在
+    下游读起来就是「干净」。这是最坏的一种结果形态：**它和真正的没有阻断项完全一样**。
+    显式销账，说明是环境问题还是本次不适用：
+      harness discharge --run {{run_id}} --hook decision-gate-vacuous \
+        --evidence "<为什么没跑 / 为什么可以不跑>"
+# ── review_comments：意见归类，同理 ──
+- id: review-comments-actionable
+  trigger: phase_end
+  phase: observation
+  when:
+    fact: actionable_count
+    count_gte: 1
+  mode: contract
+  obligation: true
+  contract: |
+    分类器判出 {{fact.actionable_count}} 条「该处理」的意见（{{fact.actionable_ids}}），
+    另有 {{fact.noise_count}} 条归为固有噪声。**该处理的那些不会因为被归类而消失。**
+    修掉它们（会进入修订层），或逐条说明为何不适用，然后销账：
+      harness discharge --run {{run_id}} --hook review-comments-actionable \
+        --evidence "<每条怎么处理的>"
+- id: review-comments-vacuous
+  trigger: phase_end
+  phase: observation
+  when:
+    fact: classifier_ran
+    equals: false
+  mode: contract
+  obligation: false
+  contract: |
+    意见分类器没跑（没有评审，或工具不可用）。零意见和「没查过意见」在下游长得一样，
+    所以这里显式记一笔。无评审的本地交付属正常情形，本条不阻断。
 config:
   auto_confirm_config: false
   cleanup_entry_auto: false

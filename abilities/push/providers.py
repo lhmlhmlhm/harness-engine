@@ -94,3 +94,65 @@ def _plan_taxonomy(ctx: dict) -> dict:
         "tags": [str(t) for t in (tg.get("tags") or [])],
         "unknown_paths": [str(u) for u in (tg.get("unknown") or [])],
     }
+
+
+@facts.provider("workspace_taxonomy", schema={
+    # Whether the run has said what workspace it is about yet. Derivation over a missing
+    # workspace is not "resolved to the default" — it is "not answerable", and the two must
+    # not look alike.
+    "workspace_declared": "bool",
+    "derived_executor": "str",
+    "derived_executor_reason": "str",
+    # Whether the derivation agrees with the shape the run was OPENED as. Computed here
+    # rather than in a condition because a condition compares a fact to a literal, and this
+    # is a comparison between two moving values.
+    "variant_agrees": "bool",
+})
+def _workspace_taxonomy(ctx: dict) -> dict:
+    """Derive the execution mode from the workspace the RUN RECORDED, not from its scope.
+
+    WHY A SECOND PROVIDER RATHER THAN A PARAMETER ON THE FIRST.
+
+    `plan_taxonomy` reads `ctx["scope"]`, which is correct for an ability whose scope IS a
+    workspace. For an ability whose scope is a plan being written, that same call feeds a plan
+    identifier to a path matcher: nothing ever matches, every plan resolves to the default, and
+    the output still says "derived". That is the worst shape a wrong answer can take — it is
+    indistinguishable from a right one. (It shipped that way once and was caught only by driving
+    the flow end to end.)
+
+    The workspace such a flow is about is COLLECTED BY THE FLOW, so the honest source is the
+    run's own evidence. That also fixes a transcription gap: the reference system lists
+    `workspace` among the universal blocks its core collects, and the transcription had omitted
+    it entirely — which is precisely why nothing could read it.
+
+    `variant_agrees` is the payoff. The pinned variant is whatever the opener chose; this is an
+    INDEPENDENT derivation of the same question, made once the flow knows enough to answer it.
+    A step-level reconciliation trusts the agent to record the truthful value; this does not.
+    """
+    from engine import store
+    run_id = str(ctx.get("run_id") or "")
+    conn = store.connect(read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT value FROM evidence WHERE run_id = ? AND kind = 'workspace' ORDER BY id",
+            (run_id,),
+        ).fetchall()
+        run_row = store.get_run(conn, run_id)
+        pinned = (run_row["variant"] if run_row else None) or ""
+    finally:
+        conn.close()
+
+    if not rows:
+        # Not answerable. Reporting a default here would manufacture an answer.
+        return {"workspace_declared": False, "derived_executor": "",
+                "derived_executor_reason": "no workspace recorded yet",
+                "variant_agrees": True}      # nothing to disagree with
+    ws = str(rows[-1]["value"])
+    ex = _run_json(_TAXONOMY, "executor", "--workspace", ws, "--format", "json")
+    got = str(ex.get("executor") or "")
+    return {
+        "workspace_declared": True,
+        "derived_executor": got,
+        "derived_executor_reason": f"{ws} → {ex.get('reason') or '?'}",
+        "variant_agrees": (got == pinned) if pinned else True,
+    }

@@ -37,7 +37,11 @@ variants:
   # 把「open 时钉的」与「流程后来查明的」对账。
 
 facts:
-  providers: [plan_taxonomy]
+  # 借 push 注册的 provider（见 requires），但**不是** plan_taxonomy —— 那个从 scope 读
+  # 工作区，而本流程的 scope 是一份待写的方案。喂给它只会让任何方案都不命中、一律落默认，
+  # 而输出仍写着「derived」。workspace_taxonomy 改从 run 自己记录的 workspace 证据派生
+  # （G03 记，见下），这也是唯一能在本流程里回答这个问题的时点。
+  providers: [workspace_taxonomy]
 
 prose:
   root: prose/
@@ -124,10 +128,14 @@ steps:
         - type: evidence
           kind: open_question
           min_count: 1
+        # workspace 是通用块的一部分（源系统明列），而转写里曾整个漏掉 —— 于是
+        # 「这个方案关于哪个工作区」在流程里无处可读，本层的变体核对也就无从做起。
+        - type: evidence
+          kind: workspace
     directive: |
-      产出：所有变体共用的那几块 —— 目标、背景、约束、以及「待确认事项」清单
-      完成：目标、背景、至少一条待确认事项都已记录
-      注意：一条都没有通常意味着还没想清楚，而不是真的没有不确定
+      产出：所有变体共用的那几块 —— 目标、背景、约束、待确认事项，以及**本方案针对的工作区**
+      完成：目标、背景、至少一条待确认事项、工作区都已记录
+      注意：待确认事项一条都没有，通常意味着还没想清楚，而不是真的没有不确定
 
   - id: G04
     phase: gather
@@ -335,6 +343,28 @@ hooks:
   # 本流程的 scope 是一份待写的方案，把它喂给按路径匹配的分类器**永远**不命中 ——
   # 那个 hook 在这里会每次都触发，而每次都触发的告警不是信号，是噪声，
   # 并且它会把「真的没被覆盖」淹掉。所以这条留在 push，不在这里。
+
+  # G02 用 evidence_matches_variant 核对「记录的 executor」与「open 时钉的变体」，
+  # 而那条**信 agent 记了真话**。这一条从 run 记录的 workspace 独立再算一次，
+  # 两者不符时报出来 —— 一个信记录、一个信派生，同一个问题两条互不依赖的路径。
+  - id: variant-disagrees-with-workspace
+    trigger: phase_start
+    phase: draft
+    when:
+      all_of:
+        - fact: workspace_declared
+          equals: true
+        - fact: variant_agrees
+          equals: false
+    mode: contract
+    obligation: true
+    contract: |
+      从本方案记录的工作区独立派生出的 executor 是 {{fact.derived_executor}}
+      （{{fact.derived_executor_reason}}），而本次 run 是按 {{fact.run_variant}} 开的。
+      两者不符意味着这个 run 一开始就走错了形态 —— 关掉它、用正确的 --variant 重开。
+      若确实要按当前形态走（例如显式覆盖派生结果），说明理由后销账：
+      harness discharge --run {{run_id}} --hook variant-disagrees-with-workspace \
+        --evidence "<为什么以当前形态为准>"
 
   - id: non-default-variant-notice
     trigger: phase_start

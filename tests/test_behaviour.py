@@ -2319,18 +2319,23 @@ def test_two_abilities_share_one_registry_without_copying_it(env):
     assert not os.path.exists(os.path.join(base, "tools"))
     assert pl.requires == ("push",)
 
-    # Same provider, same declared facts, same variant vocabulary.
-    assert pl.facts_providers == pu.facts_providers
-    assert pl.facts_schema == pu.facts_schema
+    # NOT the same provider, and that is the sharper version of the claim. The two abilities
+    # ask the same question of the same registry from DIFFERENT inputs: one's scope IS the
+    # workspace, the other's is a plan being written and must read the workspace the flow
+    # recorded. Demanding one provider serve both is what produced a derivation that fed a plan
+    # identifier to a path matcher and reported the result as "derived".
+    assert pl.facts_providers != pu.facts_providers
     assert pl.variants == pu.variants and pl.default_variant == pu.default_variant
 
-    # And, the point of all of it: the SAME answer for the same input.
+    # The point of all of it: one registry, so the same input yields the same answer — and
+    # the shared vocabulary is the ability's declared variants, not a copied table.
     for ws in ("/Users/x/.kiro/skills/ux/output/proj", "/tmp/an-ordinary-package"):
-        ctx = {"run_id": "t", "scope": ws, "scope_kind": "s", "ability": "t"}
-        a = facts.gather_all(pl.facts_providers, ctx)["executor"]
-        b = facts.gather_all(pu.facts_providers, ctx)["executor"]
-        assert a == b, (ws, a, b)
-        assert a in pl.variants
+        got = facts.gather_all(pu.facts_providers,
+                               {"run_id": "t", "scope": ws, "scope_kind": "s",
+                                "ability": "t"})["executor"]
+        assert got in pl.variants and got in pu.variants, (ws, got)
+    # Both providers live in ONE file owned by one ability; the consumer copies nothing.
+    assert (Path(str(pu.source)).parent / "providers.py").is_file()
 
 
 def test_requiring_an_uninstalled_ability_is_fatal(env):
@@ -2376,13 +2381,21 @@ steps: [{id: A, phase: p1}]
 """)
     try:
         # Simulate a cold process: drop the borrowed registration and the load marker.
-        factsmod._PROVIDERS.pop("plan_taxonomy", None)
+        # Drop EVERY provider the owning ability registers, or re-importing it at the end
+        # raises on the ones still present — and that failure would look like this test's
+        # subject rather than its cleanup.
+        borrowed = [n for n in list(factsmod._PROVIDERS)
+                    if n in ("plan_taxonomy", "workspace_taxonomy")]
+        for n in borrowed:
+            factsmod._PROVIDERS.pop(n, None)
         flowmod._EXTENSIONS_LOADED.discard("push")
         r = run(["validate", "borrower"], env)
         assert r.returncode == BAD_SPEC, r.stdout + r.stderr
         assert "not registered" in r.stderr
     finally:
         _rm(d)
+        for n in ("plan_taxonomy", "workspace_taxonomy"):
+            factsmod._PROVIDERS.pop(n, None)
         flowmod._EXTENSIONS_LOADED.discard("push")
         flowmod.load("push")   # re-register for the rest of the session
 
@@ -2794,3 +2807,33 @@ def test_only_a_closed_run_may_be_purged_and_the_purge_is_recorded(env):
     assert len(rows) == 1 and "smoke test" in rows[0][1]
     assert '"violation": 1' in rows[0][2], rows[0][2]
     assert rc(["purge-run", "--run", "pg", "--reason", "again"], env) == USAGE   # gone
+
+
+def test_no_ability_declares_a_provider_nothing_reads(env):
+    """A declared provider whose facts no condition reads is DEAD WIRING.
+
+    It is not a performance problem — lazy gathering means an unread provider costs nothing to
+    run. It is a truthfulness problem, and the same one this engine exists to remove: something
+    declared, looking connected, that never takes effect. Two providers sat like this while
+    1,224 lines of copied tooling behind them could never be reached, and a third became dead
+    as a side effect of fixing an unrelated bug — none of which any test noticed.
+    """
+    import re as _re
+    from engine import conditions, flow as flowmod
+    for name in flowmod.available_abilities():
+        f = flowmod.load(name)
+        if not f.facts_providers or f.facts_providers == ("static",):
+            continue
+        read: set[str] = set()
+        for h in f.hooks:
+            if h.when is not None:
+                read |= conditions.facts_referenced(h.when)
+            read |= set(_re.findall(r"\{\{\s*fact\.([A-Za-z0-9_]+)\s*\}\}", h.body or ""))
+        if f.variant_spec.get("fact"):
+            read.add(f.variant_spec["fact"])
+        for provider in f.facts_providers:
+            owned = {k for k, v in f.facts_owner.items() if v == provider}
+            assert owned & read, (
+                f"ability '{name}' declares provider '{provider}' ({len(owned)} facts) but no "
+                f"condition or template reads any of them — either wire it or drop it"
+            )
