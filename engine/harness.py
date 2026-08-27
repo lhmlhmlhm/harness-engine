@@ -1,0 +1,1292 @@
+"""harness — the CLI. This is the engine's entire surface.
+
+EXIT CODES ARE THE PRODUCT. An ability declares a flow; what it gets back is a set of
+commands that refuse, with a number a tool can branch on:
+
+    0  ok / allowed
+    1  usage or environment error
+    2  the flow spec itself is invalid (fail-closed; the store is never touched)
+    3  REFUSED — a rule was not satisfied (deps open, predicate false, gate unproven)
+    4  BLOCKED — a guarded action was attempted without its gate
+
+3 and 4 are split because they have different audiences. 3 answers the ability's own
+driver ("you cannot close this step yet"); 4 answers an external tool hook ("do not let
+this command run"). A hook only needs to branch on 4, so it never has to parse text.
+
+Nothing in this file names a step, a phase, an action, or an ability. Grep it and see —
+`tests/test_engine_purity.py` does exactly that, and fails if the grep finds anything.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import uuid
+from pathlib import Path
+
+from . import flow as flowmod
+from . import conditions, facts, hooks as hookmod, predicates, proof, prose, store
+
+OK, USAGE, BAD_SPEC, REFUSED, BLOCKED = 0, 1, 2, 3, 4
+
+
+def _err(msg: str) -> None:
+    sys.stderr.write(msg.rstrip() + "\n")
+
+
+# ------------------------------------------------------------------ helpers
+
+def _load_flow_or_exit(ability: str) -> flowmod.Flow:
+    try:
+        return flowmod.load(ability)
+    except flowmod.FlowError as exc:
+        _err(f"⛔ invalid flow spec\n{exc}")
+        raise SystemExit(BAD_SPEC)
+
+
+def _run_or_exit(conn, run_id: str):
+    row = store.get_run(conn, run_id)
+    if row is None:
+        _err(f"⛔ no run {run_id!r}. list them with: harness status")
+        raise SystemExit(USAGE)
+    return row
+
+
+def _flow_for_run(conn, row) -> flowmod.Flow:
+    f = _load_flow_or_exit(row["ability"])
+    if f.digest != row["flow_digest"]:
+        # Not fatal: editing a flow mid-run is normal during development. But it must
+        # be visible, because a step that vanished from the spec silently changes what
+        # "complete" means for a run already in flight.
+        _err(
+            f"⚠️  flow '{row['ability']}' changed since this run opened "
+            f"({row['flow_digest']} → {f.digest}). Step semantics may have moved."
+        )
+    return f
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_init(args) -> int:
+    path = store.init()
+    conn = store.connect()
+    try:
+        tables = sorted(store.core_tables(conn))
+    finally:
+        conn.close()
+    print(f"✅ store ready: {path}")
+    print(f"   tables ({len(tables)}): {', '.join(tables)}")
+    abilities = flowmod.available_abilities()
+    print(f"   abilities ({len(abilities)}): {', '.join(abilities) or '(none)'}")
+    return OK
+
+
+def cmd_abilities(args) -> int:
+    names = flowmod.available_abilities()
+    if not names:
+        print("(no abilities installed under abilities/)")
+        return OK
+    for name in names:
+        try:
+            f = flowmod.load(name)
+        except flowmod.FlowError as exc:
+            print(f"❌ {name}: INVALID — {str(exc).splitlines()[0]}")
+            continue
+        gated = sum(1 for s in f.steps.values() if s.gate != flowmod.GATE_NONE)
+        checked = sum(1 for s in f.steps.values()
+                      if s.completion.get("type") != "attest")
+        print(f"✅ {name}  ({f.title})")
+        stages = sum(len(f.phase_stages.get(p, ())) for p in f.phases)
+        opt = sum(1 for s in f.steps.values() if s.optional)
+        print(f"     scope={f.scope_kind}  phases={len(f.phases)}  stages={stages}"
+              f"  steps={len(f.steps)} ({len(f.required_steps())} required, {opt} optional)")
+        print(f"     gated={gated}  machine-checked={checked}  guards={len(f.guards)}"
+              f"  exclusive-groups={len(f.exclusive_groups)}")
+        conditional = sum(1 for h in f.hooks if h.when is not None)
+        obliged = sum(1 for h in f.hooks if h.obligation)
+        print(f"     facts={'+'.join(f.facts_providers)}({len(f.facts_schema)} declared)"
+              f"  hooks={len(f.hooks)} ({conditional} conditional, {obliged} obligation)")
+    return OK
+
+
+def cmd_validate(args) -> int:
+    """Validate one or all flow specs. Intended for CI on an ability's own repo."""
+    names = [args.ability] if args.ability else flowmod.available_abilities()
+    bad = 0
+    for name in names:
+        try:
+            f = flowmod.load(name)
+        except flowmod.FlowError as exc:
+            _err(f"❌ {name}\n{exc}")
+            bad += 1
+            continue
+        errs, warns = prose.validate_all(f)
+        for wmsg in warns:
+            _err(f"⚠️  {name}: {wmsg}")
+        if errs:
+            for e in errs:
+                _err(f"❌ {name}: {e}")
+            bad += 1
+            continue
+        cov = prose.coverage(f)
+        print(f"✅ {name}: {len(f.steps)} steps, {len(f.phases)} phases, "
+              f"{len(f.guards)} guard(s); order ok")
+        # Report criterion STRENGTH, not just "not attest". A flow can be 100% non-attest and
+        # still be almost entirely self-reported; printing "machine-checked: N/N" would be
+        # true and would mean far less than it sounds.
+        import collections as _c
+        tiers = _c.Counter(predicates.strength(st.completion) for st in f.steps.values())
+        NAMES = {3: "derived", 2: "value-checked", 1: "record-exists", 0: "UNCHECKED"}
+        print("   criteria: " + " · ".join(
+            f"{NAMES[t]}×{tiers.get(t, 0)}" for t in (3, 2, 1, 0)))
+        weak = [st.id for st in f.steps.values() if predicates.strength(st.completion) == 0]
+        if weak:
+            print(f"   ⚠️  {len(weak)} step(s) check nothing: {', '.join(weak[:10])}")
+        # COMPLETENESS, alongside strength. They are different failures and one hides the
+        # other: a step that produces three artifacts and pins the strongest ONE scores well on
+        # strength while two thirds of its output goes unchecked. Counting pinned artifacts is
+        # what makes that visible — and what makes dropping one show up as a number moving.
+        pinned = [len([r for r in predicates.requirements(st.completion)
+                       if r["what"] == "evidence"]) for st in f.steps.values()]
+        multi = sum(1 for n in pinned if n >= 2)
+        print(f"   artifacts: {sum(pinned)} pinned across {len(pinned)} steps"
+              f" ({multi} step(s) pin ≥2)")
+        no_goal = [x for x in f.phases if x not in f.phase_goals]
+        gs = "/".join(f"{k}:{NAMES[predicates.strength(v)]}"
+                      for k, v in f.phase_goals.items())
+        print(f"   goals: {len(f.phase_goals)}/{len(f.phases)} phases"
+              + (f" — MISSING on {', '.join(no_goal)}" if no_goal else "")
+              + (f"  [{gs}]" if gs else ""))
+        print(f"   prose: directive {cov['directive']}/{cov['steps']}"
+              f" · guide {cov['guide']}/{cov['steps']}"
+              f" (own section {cov['own_section']})"
+              f" · topics cited {cov['topics_cited']}")
+    return BAD_SPEC if bad else OK
+
+
+def cmd_open(args) -> int:
+    f = _load_flow_or_exit(args.ability)
+    run_id = args.run or f"{args.ability}-{uuid.uuid4().hex[:12]}"
+    conn = store.connect()
+    try:
+        if store.get_run(conn, run_id) is not None:
+            _err(f"⛔ run {run_id!r} already exists")
+            return USAGE
+        existing = store.open_runs_in_scope(conn, f.scope_kind, args.scope)
+        if existing and not args.allow_concurrent:
+            # Refuse rather than pick. Two open runs in one scope is precisely the
+            # state in which a guard cannot tell which run owns an action, and the
+            # cheapest place to prevent that is here, before the second one exists.
+            ids = ", ".join(r["run_id"] for r in existing)
+            _err(
+                f"⛔ scope {f.scope_kind}={args.scope!r} already has "
+                f"{len(existing)} open run(s): {ids}\n"
+                f"  Two open runs in one scope make guards ambiguous.\n"
+                f"  Close the other one, or pass --allow-concurrent to accept that\n"
+                f"  guards in this scope will refuse to adjudicate."
+            )
+            return REFUSED
+        # Resolve the variant ONCE, here, and record it. Explicit beats derived beats default:
+        # a caller who knows must be able to say so, and a derivation must be overridable
+        # because the thing it reads can be wrong in ways only a person can see.
+        variant = None
+        if f.variants:
+            if args.variant:
+                if args.variant not in f.variants:
+                    _err(f"⛔ unknown variant {args.variant!r}.\n"
+                         f"    declared: {', '.join(f.variants)}")
+                    return USAGE
+                variant = args.variant
+                source = "explicit"
+            elif f.variant_spec.get("fact"):
+                key = f.variant_spec["fact"]
+                try:
+                    vals = facts.gather_all(f.facts_providers, {
+                        "run_id": run_id, "scope": args.scope,
+                        "scope_kind": f.scope_kind, "ability": args.ability})
+                except facts.FactsError as exc:
+                    _err(f"⛔ cannot resolve the variant: {exc}\n"
+                         f"    Pass --variant explicitly, or fix the provider. Falling back to "
+                         f"a default here would pin the wrong shape silently.")
+                    return REFUSED
+                got = str(vals.get(key, ""))
+                if got not in f.variants:
+                    _err(f"⛔ fact {key!r} resolved to {got!r}, which is not a declared "
+                         f"variant ({', '.join(f.variants)}).\n"
+                         f"    Pass --variant explicitly if this is intentional.")
+                    return REFUSED
+                variant, source = got, f"derived from fact '{key}'"
+            else:
+                variant, source = f.default_variant, "default"
+        store.open_run(
+            conn, run_id=run_id, ability=args.ability, flow_digest=f.digest,
+            title=args.title, scope_kind=f.scope_kind, scope_key=args.scope,
+            variant=variant,
+            metadata={"allow_concurrent": bool(args.allow_concurrent)},
+        )
+        if variant:
+            n_out = sum(1 for x in f.steps if not f.applicable(x, variant))
+            print(f"   variant {variant}  ({source}) — {n_out} step(s) not applicable")
+        first = f.order[0] if f.order else None
+        if first:
+            store.touch_run(conn, run_id, current_step=first)
+    finally:
+        conn.close()
+    print(f"✅ opened {run_id}  ability={args.ability}  {f.scope_kind}={args.scope}")
+    if f.order:
+        print(f"   first step: {f.order[0]}  ({f.step(f.order[0]).title})")
+    return OK
+
+
+def cmd_status(args) -> int:
+    conn = store.connect(read_only=True)
+    try:
+        if args.run:
+            row = _run_or_exit(conn, args.run)
+            f = _flow_for_run(conn, row)
+            done = store.closed_steps(conn, row["run_id"])
+            print(f"run     {row['run_id']}")
+            print(f"ability {row['ability']}  ({f.title})")
+            print(f"scope   {row['scope_kind']}={row['scope_key']}")
+            print(f"status  {row['status']}" + (f" → {row['result']}" if row["result"] else ""))
+            opt = sum(1 for s in f.steps.values() if s.optional)
+            print(f"steps   {len(done)}/{len(f.steps)} accounted for"
+                  f"  ({len(f.required_steps())} required, {opt} optional)")
+            for phase in f.phases:
+                stages = f.stages_of(phase)
+                if stages == [None]:
+                    steps = f.steps_in_phase(phase)
+                    marks = "".join(_mark(s, done) for s in steps)
+                    print(f"  {marks:<14} {phase} ({f.phase_titles[phase]})")
+                else:
+                    print(f"  {phase} ({f.phase_titles[phase]})")
+                    for stage in stages:
+                        steps = f.steps_in_stage(phase, stage)
+                        if not steps:
+                            continue
+                        marks = "".join(_mark(s, done) for s in steps)
+                        print(f"    {marks:<14} {stage or '(unstaged)'}")
+            owed = [s for s in f.required_steps(row["variant"]) if s not in done]
+            print(f"owed    {len(owed)} required step(s) remain" if owed
+                  else "owed    nothing — closeable")
+            nxt = [s for s in f.order
+                   if s not in done and f.applicable(s, row["variant"])]
+            if nxt:
+                print(f"next    {nxt[0]}  ({f.step(nxt[0]).title})")
+            v = store.violations(conn, row["run_id"])
+            if v:
+                print(f"⚠️  {len(v)} violation(s): "
+                      f"{', '.join(sorted({r['code'] for r in v}))}")
+            return OK
+        rows = conn.execute("SELECT * FROM v_open_runs ORDER BY updated_at DESC").fetchall()
+        if not rows:
+            print("(no open runs)")
+            return OK
+        for r in rows:
+            print(f"{r['run_id']}  {r['ability']:<14} "
+                  f"{r['scope_kind']}={r['scope_key']:<28} step={r['current_step']}")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_next(args) -> int:
+    conn = store.connect(read_only=True)
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        done = store.closed_steps(conn, row["run_id"])
+        pending = [sid for sid in f.order
+                   if sid not in done and f.applicable(sid, row["variant"])]
+        if not pending:
+            print("✅ all steps closed")
+            return OK
+        sid = pending[0]
+        s = f.step(sid)
+        blocked = [d for d in s.deps if d not in done]
+        print(f"▶ {s.id}  {s.title}")
+        print(f"  phase      {s.phase} ({f.phase_titles[s.phase]})")
+        print(f"  autonomy   {s.autonomy}")
+        if s.stage:
+            print(f"  stage      {s.stage}")
+        print(f"  gate       {s.gate}"
+              + ("  (strict witness — no downgrade)" if s.strict_witness else ""))
+        print(f"  completion {s.completion.get('type')}")
+        for req in predicates.requirements(s.completion):
+            if req["what"] == "evidence":
+                bits = [f"kind '{req['kind']}'"]
+                if req.get("min_count"): bits.append(f"x{req['min_count']}")
+                if "must_equal" in req: bits.append(f"== {req['must_equal']!r}")
+                if req.get("must_be_one_of"):
+                    bits.append(("every row ∈ " if req.get("every_row") else "∈ ")
+                                + str(req["must_be_one_of"]))
+                if req.get("note"): bits.append(f"({req['note']})")
+                print(f"    · record evidence {' '.join(bits)}")
+            elif req["what"] == "gate":
+                print(f"    · {req['detail']}")
+            else:
+                print(f"    · {req['detail']}")
+        if s.repeatable:
+            used = store.step_attempts(conn, args.run, s.id) if False else None
+            print(f"  ↻ repeatable"
+                  + (f", budget {s.budget} (on exhaustion: {s.on_exhausted})"
+                     if s.budget else " (no budget)"))
+        if s.optional:
+            print(f"  ⏭  OPTIONAL — may be skipped: "
+                  f"harness skip --run {args.run} --step {s.id} --reason <why>")
+        grp = f.group_of(s.id)
+        if grp:
+            print(f"  ⚡ one of: {', '.join(grp)} — closing one skips the rest")
+        if blocked:
+            print(f"  ⛔ blocked on: {', '.join(blocked)}")
+        if s.directive:
+            print("  ── directive ──")
+            for line in s.directive.splitlines():
+                print(f"  {line}")
+        # Deliberately the POINTER, not the text. Dumping a document on every `next`
+        # would drown the driver and defeat the point of tiering it.
+        try:
+            r = prose.resolve_guide(f, s.id)
+        except prose.ProseError as exc:
+            _err(f"  ⚠️  guide unresolvable: {exc}")
+            r = None
+        if r is not None:
+            where = "whole file" if r.whole_file else f"section '{r.anchor}'"
+            print(f"  ── guide ({r.level}-level, {where}) ──")
+            print(f"  {r.path.name}   →  harness show --run {args.run} --step {s.id}")
+        if s.topics:
+            print(f"  ── topics (read only if you hit trouble) ──")
+            for name in s.topics:
+                print(f"  {name}   →  harness show --run {args.run} --step {s.id} "
+                      f"--topic {name}")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_enter(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        s = f.step(args.step)
+        if not f.applicable(s.id, row["variant"]):
+            # Not a choice to refuse — under this variant the step is not part of the flow.
+            # Allowing it (even with a warning) is what makes a mode-specific step runnable in
+            # the wrong mode, close cleanly, and read afterwards exactly like a correct run.
+            _err(f"⛔ REFUSED: '{s.id}' is not part of this flow.\n"
+                 f"    This run's variant is {row['variant']!r}; '{s.id}' belongs to "
+                 f"{', '.join(s.variants)} only.\n"
+                 f"    Not skippable either — a skip records a decision, and there is no "
+                 f"decision to record about a step that does not apply.")
+            return REFUSED
+        done = store.closed_steps(conn, row["run_id"])
+        missing = [d for d in s.deps if d not in done]
+        if missing and not args.force:
+            store.log_step(conn, row["run_id"], s.id, "refused",
+                           f"deps open: {','.join(missing)}")
+            _err(f"⛔ REFUSED: '{s.id}' depends on unclosed step(s): {', '.join(missing)}")
+            return REFUSED
+        attempts = store.step_attempts(conn, row["run_id"], s.id)
+        if attempts and not s.repeatable:
+            _err(
+                f"⛔ REFUSED: '{s.id}' has already been entered and is not repeatable.\n"
+                f"    Declare `repeatable: true` in the flow if this step really may run again."
+            )
+            return REFUSED
+        if s.budget and attempts >= s.budget:
+            if s.on_exhausted == "refuse":
+                store.record_violation(conn, row["run_id"], s.id, "budget_exhausted",
+                                       f"{attempts} attempt(s), budget {s.budget}",
+                                       severity="blocked")
+                _err(
+                    f"⛔ REFUSED: '{s.id}' has used its budget of {s.budget} attempt(s).\n"
+                    f"    The flow declares on_exhausted: refuse — repeating past the budget\n"
+                    f"    is not a matter of trying harder. Change approach, or raise the\n"
+                    f"    budget in the spec if {s.budget} was simply the wrong number."
+                )
+                return REFUSED
+            g = store.get_gate(conn, row["run_id"], s.id)
+            if g is None or g["decision"] not in ("affirm", "preauth"):
+                _err(
+                    f"⛔ REFUSED: '{s.id}' has used its budget of {s.budget} attempt(s).\n"
+                    f"    The flow declares on_exhausted: escalate — a human must approve\n"
+                    f"    further attempts:\n"
+                    f"      harness gate --run {row['run_id']} --step {s.id} "
+                    f"--decision affirm --evidence \"<why keep going>\""
+                )
+                return REFUSED
+        prior = store.closed_steps(conn, row["run_id"])
+        entered_before = {r["step_id"] for r in conn.execute(
+            "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'entered'",
+            (row["run_id"],)).fetchall()}
+        store.log_step(conn, row["run_id"], s.id, "entered",
+                       "forced" if (missing and args.force) else None)
+        store.touch_run(conn, row["run_id"], current_step=s.id)
+        print(f"▶ entered {s.id} ({s.title})")
+        # phase_start fires when the phase's FIRST step is entered — i.e. no step of this
+        # phase had been entered or closed before now.
+        phase_ids = {x.id for x in f.steps_in_phase(s.phase)}
+        if not (phase_ids & (prior | entered_before)):
+            return _fire(conn, f, row, "phase_start", s.phase)
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_close_step(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        s = f.step(args.step)
+
+        done = store.closed_steps(conn, row["run_id"])
+        missing = [d for d in s.deps if d not in done]
+        if missing:
+            store.log_step(conn, row["run_id"], s.id, "refused",
+                           f"deps open: {','.join(missing)}")
+            _err(f"⛔ REFUSED: '{s.id}' depends on unclosed step(s): {', '.join(missing)}")
+            return REFUSED
+
+        ok, why = predicates.check(conn, row["run_id"], s, s.completion)
+        if not ok:
+            store.log_step(conn, row["run_id"], s.id, "refused", why.splitlines()[0])
+            _err(f"⛔ REFUSED: '{s.id}' is not complete.\n    {why}")
+            return REFUSED
+
+        store.log_step(conn, row["run_id"], s.id, "closed", why)
+
+        # An exclusive group resolves the moment one branch closes: its siblings are
+        # recorded as skipped so nothing downstream waits on a branch that will never run.
+        siblings_skipped = []
+        grp = f.group_of(s.id)
+        if grp:
+            for sib in grp:
+                if sib != s.id and sib not in done:
+                    store.log_step(conn, row["run_id"], sib, "skipped",
+                                   f"exclusive group resolved by {s.id}")
+                    siblings_skipped.append(sib)
+        done = done | {s.id} | set(siblings_skipped)
+
+        remaining = [sid for sid in f.order if sid not in done]
+        store.touch_run(conn, row["run_id"],
+                        current_step=remaining[0] if remaining else None)
+        print(f"✅ closed {s.id} ({s.title}) — {why.splitlines()[0]}")
+        rc_hooks = _fire(conn, f, row, "step_close", s.id)
+        # phase_end fires once every REQUIRED step of the phase is accounted for.
+        req_in_phase = [x for x in f.required_steps(row["variant"])
+                        if f.step(x).phase == s.phase]
+        if req_in_phase and all(x in done for x in req_in_phase):
+            rc2 = _fire(conn, f, row, "phase_end", s.phase)
+            rc_hooks = rc_hooks or rc2
+        if siblings_skipped:
+            print(f"   ↳ exclusive group resolved; skipped {', '.join(siblings_skipped)}")
+        if remaining:
+            print(f"   next: {remaining[0]} ({f.step(remaining[0]).title})")
+        return rc_hooks
+    finally:
+        conn.close()
+
+
+def cmd_gate(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        s = f.step(args.step)
+
+        if s.gate == flowmod.GATE_NONE:
+            _err(f"⛔ step '{s.id}' declares no gate — nothing to record")
+            return USAGE
+
+        if args.decision == "preauth":
+            key = s.preauth_key
+            if key is None:
+                store.record_violation(conn, row["run_id"], s.id, "unauthorised_preauth",
+                                       f"preauth used on gate '{s.gate}'",
+                                       severity="blocked")
+                _err(
+                    f"⛔ REFUSED: '{s.id}' has gate '{s.gate}', which requires a human.\n"
+                    f"    'preauth' is only accepted on a '{flowmod.GATE_PREAUTH_PREFIX}<key>' gate.\n"
+                    f"    Recorded as a violation."
+                )
+                return REFUSED
+            meta = json.loads(row["metadata_json"] or "{}")
+            cfg = {**f.config_defaults, **(meta.get("config") or {})}
+            if not cfg.get(key):
+                store.record_violation(conn, row["run_id"], s.id, "unauthorised_preauth",
+                                       f"config key '{key}' is not enabled",
+                                       severity="blocked")
+                _err(
+                    f"⛔ REFUSED: '{s.id}' allows pre-authorisation via config key "
+                    f"'{key}', but it is not enabled.\n"
+                    f"    Enable it with: harness config --run {row['run_id']} "
+                    f"--set {key}=true\n"
+                    f"    Do NOT infer pre-authorisation from the run's progress.\n"
+                    f"    Recorded as a violation."
+                )
+                return REFUSED
+            proof_doc = {"witness": "config", "witnessed": True, "config_key": key}
+        else:
+            cursor = _witness_cursor(conn, row["run_id"])
+            try:
+                proof_doc = proof.vouch(cursor=cursor)
+                if s.strict_witness and not proof_doc.get("witnessed"):
+                    # This gate is marked as one where an annotated downgrade is not an
+                    # acceptable outcome. Refuse instead of recording a flagged pass.
+                    raise proof.NoWitness(
+                        f"step '{s.id}' is marked strict_witness: an unwitnessed gate is "
+                        f"refused outright rather than recorded with a flag.\n"
+                        f"  Get a real human affirmation on a channel the witness can see."
+                    )
+            except proof.NoWitness as exc:
+                store.record_violation(conn, row["run_id"], s.id, "gate_refused_unwitnessed",
+                                       str(exc), severity="blocked")
+                _err(f"⛔ REFUSED: cannot record an affirm gate for '{s.id}'.\n    {exc}")
+                return REFUSED
+
+        store.record_gate(conn, row["run_id"], s.id, args.decision, args.evidence, proof_doc)
+        if not proof_doc.get("witnessed"):
+            # An unwitnessed gate goes on the violation ledger too, not just into the
+            # audit view. Without this a run could satisfy a `no_open_violations`
+            # predicate while holding a gate nobody vouched for — the degradation would
+            # launder itself into a clean run, which is precisely the silent kind.
+            store.record_violation(
+                conn, row["run_id"], s.id, "unwitnessed_gate",
+                f"recorded via witness '{proof_doc.get('witness')}' with no independent proof",
+            )
+        flag = "" if proof_doc.get("witnessed") else "  ⚠️ UNWITNESSED (recorded as a violation)"
+        print(f"✅ gate {s.id} = {args.decision}"
+              f"  (witness={proof_doc.get('witness')}){flag}")
+        if args.decision != "decline":
+            return _fire(conn, f, row, "gate_recorded", s.id)
+        return OK
+    finally:
+        conn.close()
+
+
+def _fire(conn, f, row, on: str, selector: str) -> int:
+    """Fire the hooks on one boundary and report. Returns a non-OK code only when a
+    fail_closed command failed — everything else is reported and allowed through,
+    matching the reference system's "log one line, continue — never STOP"."""
+    try:
+        fired = hookmod.fire(conn, f, row, on, selector)
+    except facts.FactsError as exc:
+        # A provider that ERRORS must be loud: treating it as "no facts" would turn every
+        # condition false and mute every hook, which is the exact failure this design
+        # exists to prevent.
+        _err(f"⛔ facts unavailable for {on} '{selector}': {exc}")
+        return REFUSED
+    blocked = OK
+    for fr in fired:
+        h = fr.hook
+        if not fr.matched:
+            print(f"  ⃝ hook {h.id}: condition not met")
+            for line in fr.trace:
+                print(f"      {line}")
+            continue
+        tag = " [obligation]" if h.obligation else ""
+        print(f"  🔔 hook {h.id}{tag}")
+        if h.mode == hookmod.MODE_CONTRACT:
+            for line in fr.rendered.splitlines():
+                print(f"      {line}")
+            if fr.obligation_created:
+                print(f"      ↳ discharge with: harness discharge --run {row['run_id']} "
+                      f"--hook {h.id} --evidence \"<what you did>\"")
+        else:
+            ok = fr.command_rc == 0
+            print(f"      command exit {fr.command_rc}"
+                  + ("" if ok else ("  ⛔ fail_closed" if h.fail_closed else "  ⚠️ warning only")))
+            if fr.command_out:
+                for line in fr.command_out.splitlines()[:8]:
+                    print(f"      | {line}")
+            if not ok and h.fail_closed:
+                blocked = REFUSED
+    return blocked
+
+
+def _mark(step, done: set) -> str:
+    """● closed/skipped · ◌ optional & untouched · ○ still owed."""
+    if step.id in done:
+        return "●"
+    return "◌" if step.optional else "○"
+
+
+def _witness_cursor(conn, run_id: str) -> dict | None:
+    """The high-water mark of every witness proof recorded on this run.
+
+    NOT "the proof of the most recent gate", which is what this used to be and which had a
+    hole wide enough to drive through:
+
+      * a gate authorised some other way — by config pre-authorisation, or by the recorded
+        downgrade — carries no turn count, so reading only the LATEST proof yielded no
+        cursor at all and the check silently skipped. One intervening preauth gate was
+        therefore enough to let the NEXT affirm gate claim a human reply that had already
+        been spent. Observed directly: two gates both recording `human_turns: 1` against a
+        transcript that only ever had one.
+      * `recorded_at` is second-granularity, so "the latest gate" was a non-deterministic
+        tie-break whenever two gates landed in the same second — the check would fire or
+        not depending on which row the sort happened to return.
+
+    Taking the MAXIMUM over the whole run fixes both at once: it is monotonic, so nothing
+    can lower it; it ignores gates that carry no count instead of being reset by them; and
+    it needs no ordering, so ties cannot change the answer.
+    """
+    rows = conn.execute(
+        "SELECT proof_json FROM gate WHERE run_id = ?", (run_id,)
+    ).fetchall()
+    best: dict | None = None
+    high = -1
+    for r in rows:
+        try:
+            p = json.loads(r["proof_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        n = p.get("human_turns")
+        if isinstance(n, int) and n > high:
+            high, best = n, p
+    return best
+
+
+def cmd_guard(args) -> int:
+    """The external-tool hook. Answers ONE question: may this action proceed?
+
+    Exit 4 = block. Everything else allows, because a guard that misfires on an
+    unrelated action is worse than one that misses: being told to satisfy a gate that
+    does not belong to your work leaves forging that gate as the only way forward.
+    """
+    try:
+        conn = store.connect(read_only=True)
+    except store.StoreNotInitialised:
+        return OK  # nothing to guard against yet
+    try:
+        candidates = store.open_runs_in_scope(conn, args.scope_kind, args.scope)
+        if not candidates:
+            return OK
+        if len(candidates) > 1:
+            ids = ", ".join(r["run_id"] for r in candidates)
+            _err(
+                f"⚠️  guard NOT enforced for action '{args.action}': scope "
+                f"{args.scope_kind}={args.scope!r} has {len(candidates)} open runs ({ids}).\n"
+                f"    Allowing rather than guessing which one owns this action."
+            )
+            return OK
+        row = candidates[0]
+        try:
+            f = flowmod.load(row["ability"])
+        except flowmod.FlowError:
+            return OK  # a broken spec must not brick unrelated tooling
+        step_id = f.guards.get(args.action)
+        if step_id is None:
+            return OK  # this ability does not guard this action
+        g = store.get_gate(conn, row["run_id"], step_id)
+        if g is not None and g["decision"] in ("affirm", "preauth"):
+            return OK
+        s = f.step(step_id)
+        _err(
+            f"⛔ BLOCKED: action '{args.action}' requires gate '{step_id}' "
+            f"({s.title}) on run {row['run_id']}.\n"
+            f"    Do not proceed. Get a real human affirmation, then record it:\n"
+            f"      harness gate --run {row['run_id']} --step {step_id} "
+            f"--decision affirm --evidence \"<what they said>\"\n"
+            f"    Recording it without a witnessed human turn is refused."
+        )
+        return BLOCKED
+    finally:
+        conn.close()
+
+
+def cmd_show(args) -> int:
+    """Print the prose behind a step: its guide section, or one of its topics.
+
+    Separate from `next` on purpose. `next` answers "what now" in a few lines; this
+    answers "give me the detail", and only when asked.
+    """
+    conn = store.connect(read_only=True)
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        s = f.step(args.step)
+    finally:
+        conn.close()
+
+    if args.topic:
+        if args.topic not in s.topics:
+            _err(
+                f"⛔ step '{s.id}' does not cite topic '{args.topic}'.\n"
+                f"    it cites: {', '.join(s.topics) or '(none)'}"
+            )
+            return USAGE
+        try:
+            path = prose.resolve_topic(f, args.topic)
+        except prose.ProseError as exc:
+            _err(f"⛔ {exc}")
+            return BAD_SPEC
+        print(f"# topic: {args.topic}   ({path})\n")
+        print(path.read_text(encoding="utf-8").rstrip())
+        return OK
+
+    try:
+        r = prose.resolve_guide(f, s.id)
+    except prose.ProseError as exc:
+        _err(f"⛔ {exc}")
+        return BAD_SPEC
+    if r is None:
+        print(f"(step '{s.id}' declares no guide at step, stage, or phase level)")
+        if s.directive:
+            print()
+            print(s.directive)
+        return OK
+    scope = "whole file" if r.whole_file else f"section '{r.anchor}'"
+    print(f"# guide for {s.id} — {r.level}-level pointer, {scope}   ({r.path})\n")
+    print(r.text.rstrip())
+    return OK
+
+
+def _check_goal(conn, row, f, phase: str):
+    """Evaluate a phase's goal. Returns (applicable, ok, why)."""
+    spec = f.phase_goals.get(phase)
+    if spec is None:
+        return False, True, "no goal declared for this phase"
+    subject = flowmod.GoalSubject(phase=phase, id=f"@{phase}")
+    ok, why = predicates.check(conn, row["run_id"], subject, spec)
+    return True, ok, why
+
+
+def cmd_assert_goal(args) -> int:
+    """Ask whether a phase MEETS its acceptance criterion. Read-only.
+
+    Separate from `summarize` so it can be asked at any time — the answer is the same
+    question `summarize` refuses on, and being able to ask it early is what lets a caller
+    find out what a layer still owes before trying to close it out.
+    """
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        if args.phase not in f.phases:
+            _err(f"⛔ ability '{row['ability']}' declares no phase '{args.phase}'.\n"
+                 f"    phases: {', '.join(f.phases)}")
+            return USAGE
+        applicable, ok, why = _check_goal(conn, row, f, args.phase)
+        if not applicable:
+            print(f"⃝  phase '{args.phase}' declares no goal — nothing to assert")
+            return OK
+        if ok:
+            print(f"✅ phase '{args.phase}' goal met: {why}")
+            return OK
+        _err(f"⛔ REFUSED: phase '{args.phase}' goal NOT met.\n    {why}")
+        return REFUSED
+    finally:
+        conn.close()
+
+
+def cmd_summarize(args) -> int:
+    """Record a phase's rollup. Explicit on purpose — see the table's comment.
+
+    Deriving the step lists is trivial; the value is the attestation that somebody wrapped
+    the phase up. A phase whose steps all closed and which nobody summarised is a phase
+    nobody looked back at.
+    """
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        if args.phase not in f.phases:
+            _err(f"⛔ ability '{row['ability']}' declares no phase '{args.phase}'.\n"
+                 f"    phases: {', '.join(f.phases)}")
+            return USAGE
+        # THE CHOKEPOINT. A phase is wrapped up only if it MEETS its acceptance criterion.
+        # Wiring the goal here rather than adding a separate mandatory command is what makes
+        # it unskippable: `close-run` demands summaries (phases_summarized), a summary demands
+        # the goal, so the criterion sits on the path to closing the run instead of beside it.
+        applicable, ok, why = _check_goal(conn, row, f, args.phase)
+        if applicable and not ok:
+            store.record_violation(conn, row["run_id"], None, "phase_goal_unmet",
+                                   f"{args.phase}: {why.splitlines()[0]}",
+                                   severity="blocked")
+            conn.commit()
+            _err(f"⛔ REFUSED: cannot summarize phase '{args.phase}' — its goal is not met.\n"
+                 f"    {why}\n"
+                 f"    (asked any time with: harness assert-goal --run {args.run} "
+                 f"--phase {args.phase})")
+            return REFUSED
+
+        done = store.closed_steps(conn, row["run_id"])
+        in_phase = [s.id for s in f.steps_in_phase(args.phase)]
+        skipped = {r["step_id"] for r in conn.execute(
+            "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'skipped'",
+            (row["run_id"],)).fetchall()}
+        closed = [x for x in in_phase if x in done and x not in skipped]
+        skips = [x for x in in_phase if x in skipped]
+
+        metrics = {}
+        for pair in args.metric or []:
+            if "=" not in pair:
+                _err(f"⛔ --metric expects key=value, got {pair!r}")
+                return USAGE
+            k, v = pair.split("=", 1)
+            metrics[k.strip()] = _coerce(v.strip())
+
+        store.add_phase_summary(
+            conn, row["run_id"], args.phase,
+            closed=",".join(closed), skipped=",".join(skips),
+            duration_s=args.duration, metrics_json=json.dumps(metrics, ensure_ascii=False),
+            note=args.note,
+        )
+        print(f"✅ summarized phase '{args.phase}': {len(closed)} closed, {len(skips)} skipped"
+              + (f", {len(metrics)} metric(s)" if metrics else ""))
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_skip(args) -> int:
+    """Record that a step legitimately will not run.
+
+    Only allowed for a step the flow declares `optional`. A mandatory step has no
+    skip: if it could be skipped it was not mandatory, and letting the caller decide
+    at runtime would make the flow mean whatever the caller wanted that day.
+    """
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        s = f.step(args.step)
+        if not f.applicable(s.id, row["variant"]):
+            _err(
+                f"⛔ '{s.id}' is not part of this flow (variant {row['variant']!r}) — there is "
+                f"nothing to skip.\n"
+                f"    It is already not owed; recording a skip would log a decision nobody made."
+            )
+            return REFUSED
+        if not s.optional:
+            _err(
+                f"⛔ REFUSED: '{s.id}' is not declared optional, so it cannot be skipped.\n"
+                f"    Either close it, or declare `optional: true` in the flow spec if it "
+                f"really may never run."
+            )
+            return REFUSED
+        store.log_step(conn, row["run_id"], s.id, "skipped", args.reason)
+        print(f"⏭  skipped {s.id} ({s.title})" + (f" — {args.reason}" if args.reason else ""))
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_purge_run(args) -> int:
+    """Remove a CLOSED run's rows. For test residue, not for tidying an inconvenient record.
+
+    Restricted and recorded — see store.purge_run for why both.
+    """
+    conn = store.connect()
+    try:
+        try:
+            counts = store.purge_run(conn, args.run, args.reason)
+        except KeyError:
+            _err(f"⛔ no run {args.run!r}")
+            return USAGE
+        except ValueError as exc:
+            _err(f"⛔ REFUSED: {exc}.\n"
+                 f"    Only a closed run may be purged — an open run's violations are live "
+                 f"evidence.")
+            return REFUSED
+        total = sum(counts.values())
+        print(f"✅ purged run {args.run}  ({total} row(s): "
+              + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()) if v) + ")")
+        print(f"   recorded in purge_log — the removal itself leaves a trace")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_guard_tool(args) -> int:
+    """The RUNTIME hook. Answers: may this tool call proceed?
+
+    Different question from `guard`, and the difference is who knows what. `guard` is for a
+    caller that already knows the semantic action and the scope. A runtime hook knows neither:
+    it holds a tool name, that tool's arguments, and a working directory. Turning those into an
+    action name is domain knowledge — which command constitutes a commit, which field carries a
+    close — so the ability DECLARES it (`guards.<action>.matches`) and the engine only compiles
+    the pattern and applies it. The engine never learns what any of them mean.
+
+    Same refusal posture as `guard`, for the same reason: ambiguity ALLOWS, loudly. A guard that
+    misfires on somebody else's work leaves forging its gate as the only way past it.
+
+    Exit 4 = block. Everything else allows.
+    """
+    try:
+        payload = json.loads(args.input_json or "{}")
+    except json.JSONDecodeError:
+        # A runtime that changed its payload shape must not brick every tool call.
+        _err("⚠️  guard-tool: --input-json is not JSON; allowing")
+        return OK
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+
+    try:
+        conn = store.connect(read_only=True)
+    except store.StoreNotInitialised:
+        return OK
+    try:
+        hits = []
+        for row in store.all_open_runs(conn):
+            try:
+                f = flowmod.load(row["ability"])
+            except flowmod.FlowError:
+                continue          # a broken spec must not brick unrelated tooling
+            if not f.scope_covers(row["scope_key"], args.cwd):
+                continue
+            for action, rules in f.guard_matches.items():
+                for rule in rules:
+                    if rule["tool"] != args.tool:
+                        continue
+                    if rule["field"]:
+                        hay = str(payload.get(rule["field"], ""))
+                    else:
+                        hay = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+                    if rule["regex"].search(hay):
+                        hits.append((row, f, action, f.guards[action], rule["pattern"]))
+                        break
+
+        if not hits:
+            return OK
+        owners = {h[0]["run_id"] for h in hits}
+        if len(owners) > 1:
+            _err(f"⚠️  guard-tool NOT enforced: {len(owners)} open runs claim this call "
+                 f"({', '.join(sorted(owners))}). Allowing rather than guessing which owns it.")
+            return OK
+
+        row, f, action, step_id, pattern = hits[0]
+        g = store.get_gate(conn, row["run_id"], step_id)
+        if g is not None and g["decision"] in ("affirm", "preauth"):
+            return OK
+        s = f.step(step_id)
+        _err(
+            f"⛔ BLOCKED: this looks like action '{action}' (matched {pattern!r}), which "
+            f"requires gate '{step_id}' ({s.title}) on run {row['run_id']}.\n"
+            f"    Do not proceed, and do not reword the command to get past this.\n"
+            f"    Get a real human affirmation, then record it:\n"
+            f"      harness gate --run {row['run_id']} --step {step_id} "
+            f"--decision affirm --evidence \"<what they said>\""
+        )
+        return BLOCKED
+    finally:
+        conn.close()
+
+
+def cmd_discharge(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        ob = store.get_obligation(conn, row["run_id"], args.hook)
+        if ob is None:
+            open_ids = [r["hook_id"] for r in store.open_obligations(conn, row["run_id"])]
+            _err(
+                f"⛔ no obligation '{args.hook}' on run {row['run_id']}.\n"
+                f"    open: {', '.join(open_ids) or '(none)'}"
+            )
+            return USAGE
+        if ob["discharged_at"]:
+            print(f"⃝ obligation {args.hook} was already discharged at {ob['discharged_at']}")
+            return OK
+        store.discharge_obligation(conn, row["run_id"], args.hook, args.evidence)
+        left = len(store.open_obligations(conn, row["run_id"]))
+        print(f"✅ discharged {args.hook}"
+              + (f"  ({left} obligation(s) still open)" if left else "  (none left)"))
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_obligations(args) -> int:
+    conn = store.connect(read_only=True)
+    try:
+        row = _run_or_exit(conn, args.run)
+        rows = store.all_obligations(conn, row["run_id"])
+        if not rows:
+            print("(no obligations raised)")
+            return OK
+        for r in rows:
+            state = "✅ discharged" if r["discharged_at"] else "⏳ OPEN"
+            print(f"{state}  {r['hook_id']}   raised at {r['trigger_kind']} "
+                  f"'{r['selector']}'  {r['raised_at']}")
+            if r["evidence"]:
+                print(f"    evidence: {r['evidence']}")
+            if args.verbose:
+                snap = json.loads(r["facts_json"] or "{}")
+                if snap:
+                    print(f"    facts at that moment: "
+                          + ", ".join(f"{k}={v!r}" for k, v in sorted(snap.items())))
+                for line in r["body"].splitlines():
+                    print(f"    | {line}")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_evidence(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        f.step(args.step)  # validate the id exists
+        store.add_evidence(conn, row["run_id"], args.step, args.kind, args.value)
+        print(f"✅ evidence recorded: {args.step} kind={args.kind}")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_config(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        meta = json.loads(row["metadata_json"] or "{}")
+        cfg = meta.setdefault("config", {})
+        for pair in args.set or []:
+            if "=" not in pair:
+                _err(f"⛔ --set expects key=value, got {pair!r}")
+                return USAGE
+            k, v = pair.split("=", 1)
+            cfg[k.strip()] = _coerce(v.strip())
+        if args.set:
+            conn.execute("UPDATE run SET metadata_json = ?, updated_at = ? WHERE run_id = ?",
+                         (json.dumps(meta, ensure_ascii=False), store.now_iso(), row["run_id"]))
+            conn.commit()
+        merged = {**f.config_defaults, **cfg}
+        for k in sorted(merged):
+            src = "run" if k in cfg else "flow-default"
+            print(f"{k} = {merged[k]!r}   [{src}]")
+        return OK
+    finally:
+        conn.close()
+
+
+def _coerce(v: str):
+    low = v.lower()
+    if low in ("true", "yes", "on"):
+        return True
+    if low in ("false", "no", "off"):
+        return False
+    try:
+        return int(v)
+    except ValueError:
+        return v
+
+
+def cmd_audit(args) -> int:
+    conn = store.connect(read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT g.run_id, r.ability, g.step_id, g.decision, g.proof_json, g.recorded_at"
+            " FROM gate g JOIN run r ON r.run_id = g.run_id ORDER BY g.recorded_at DESC"
+        ).fetchall()
+        unwitnessed = []
+        for r in rows:
+            p = json.loads(r["proof_json"] or "{}")
+            if not p.get("witnessed"):
+                unwitnessed.append((r, p))
+        print(f"gates recorded: {len(rows)}   unwitnessed: {len(unwitnessed)}")
+        for r, p in unwitnessed:
+            print(f"  ⚠️  {r['run_id']}  {r['step_id']}  {r['decision']}"
+                  f"  witness={p.get('witness')}  {r['recorded_at']}")
+        v = conn.execute(
+            "SELECT run_id, step_id, code, COUNT(*) n FROM violation"
+            " GROUP BY run_id, step_id, code ORDER BY n DESC"
+        ).fetchall()
+        if v:
+            print(f"violations: {sum(r['n'] for r in v)}")
+            for r in v:
+                print(f"  {r['code']:<24} {r['run_id']}  {r['step_id'] or '-'}  ×{r['n']}")
+        return OK
+    finally:
+        conn.close()
+
+
+def cmd_close_run(args) -> int:
+    conn = store.connect()
+    try:
+        row = _run_or_exit(conn, args.run)
+        f = _flow_for_run(conn, row)
+        done = store.closed_steps(conn, row["run_id"])
+        # Optional steps and untaken exclusive branches are not owed. Demanding them is
+        # what made the transcribed 111-step flow impossible to close.
+        missing = [sid for sid in f.required_steps(row["variant"]) if sid not in done]
+        if missing and not args.force:
+            _err(
+                f"⛔ REFUSED: {len(missing)} step(s) still open: "
+                f"{', '.join(missing[:8])}{' …' if len(missing) > 8 else ''}\n"
+                f"    Pass --force to close anyway (recorded as a violation)."
+            )
+            return REFUSED
+        owed = store.open_obligations(conn, row["run_id"])
+        if owed and not args.force:
+            _err(
+                f"⛔ REFUSED: {len(owed)} obligation(s) not discharged:\n"
+                + "\n".join(f"    {r['hook_id']}  (raised at {r['trigger_kind']} "
+                             f"'{r['selector']}')" for r in owed)
+                + f"\n    Discharge each with: harness discharge --run {row['run_id']} "
+                  f"--hook <id> --evidence \"<what you did>\"\n"
+                  f"    or inspect them:      harness obligations --run {row['run_id']}"
+            )
+            return REFUSED
+        if owed:
+            store.record_violation(
+                conn, row["run_id"], None, "undischarged_obligations",
+                f"{len(owed)} open: {','.join(r['hook_id'] for r in owed)}")
+        if missing:
+            store.record_violation(conn, row["run_id"], None, "forced_close",
+                                   f"{len(missing)} step(s) open: {','.join(missing)}")
+        store.close_run(conn, row["run_id"], args.result)
+        print(f"✅ closed run {row['run_id']} → {args.result}")
+        return OK
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ parser
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="harness",
+        description="harness-engine — declare a flow, get exit-code enforcement.",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
+    sub.add_parser("abilities", help="list installed abilities").set_defaults(fn=cmd_abilities)
+
+    v = sub.add_parser("validate", help="validate flow spec(s); exit 2 if invalid")
+    v.add_argument("ability", nargs="?")
+    v.set_defaults(fn=cmd_validate)
+
+    o = sub.add_parser("open", help="open a run of an ability's flow")
+    o.add_argument("ability")
+    o.add_argument("--scope", required=True, help="the scope key this run owns")
+    o.add_argument("--run", help="explicit run id (default: generated)")
+    o.add_argument("--title")
+    o.add_argument("--allow-concurrent", action="store_true",
+                   help="accept another open run in the same scope (guards go inert)")
+    o.add_argument("--variant", help="pick the flow variant explicitly (overrides derivation)")
+    o.set_defaults(fn=cmd_open)
+
+    s = sub.add_parser("status", help="show a run, or all open runs")
+    s.add_argument("--run")
+    s.set_defaults(fn=cmd_status)
+
+    n = sub.add_parser("next", help="show the next step and its directive")
+    n.add_argument("--run", required=True)
+    n.set_defaults(fn=cmd_next)
+
+    e = sub.add_parser("enter", help="enter a step")
+    e.add_argument("--run", required=True)
+    e.add_argument("--step", required=True)
+    e.add_argument("--force", action="store_true")
+    e.set_defaults(fn=cmd_enter)
+
+    c = sub.add_parser("close-step", help="close a step (exit 3 if incomplete)")
+    c.add_argument("--run", required=True)
+    c.add_argument("--step", required=True)
+    c.set_defaults(fn=cmd_close_step)
+
+    g = sub.add_parser("gate", help="record a gate decision (exit 3 if unproven)")
+    g.add_argument("--run", required=True)
+    g.add_argument("--step", required=True)
+    g.add_argument("--decision", required=True, choices=["affirm", "decline", "preauth"])
+    g.add_argument("--evidence")
+    g.set_defaults(fn=cmd_gate)
+
+    gu = sub.add_parser("guard", help="may this action proceed? exit 4 = block")
+    gu.add_argument("--action", required=True)
+    gu.add_argument("--scope-kind", required=True)
+    gu.add_argument("--scope", required=True)
+    gu.set_defaults(fn=cmd_guard)
+
+    pr = sub.add_parser("purge-run",
+                        help="remove a CLOSED run's rows (test residue); recorded in purge_log")
+    pr.add_argument("--run", required=True)
+    pr.add_argument("--reason", required=True, help="why — written to purge_log")
+    pr.set_defaults(fn=cmd_purge_run)
+
+    gt = sub.add_parser("guard-tool",
+                        help="may this TOOL CALL proceed? exit 4 = block (for runtime hooks)")
+    gt.add_argument("--tool", required=True, help="the runtime's name for the tool")
+    gt.add_argument("--input-json", required=True, help="the tool's arguments, as JSON")
+    gt.add_argument("--cwd", required=True, help="where the call is happening")
+    gt.set_defaults(fn=cmd_guard_tool)
+
+    dc = sub.add_parser("discharge", help="mark a hook's obligation as fulfilled")
+    dc.add_argument("--run", required=True)
+    dc.add_argument("--hook", required=True)
+    dc.add_argument("--evidence")
+    dc.set_defaults(fn=cmd_discharge)
+
+    ob = sub.add_parser("obligations", help="list this run's obligations")
+    ob.add_argument("--run", required=True)
+    ob.add_argument("-v", "--verbose", action="store_true")
+    ob.set_defaults(fn=cmd_obligations)
+
+    sw = sub.add_parser("show", help="print a step's guide section, or one of its topics")
+    sw.add_argument("--run", required=True)
+    sw.add_argument("--step", required=True)
+    sw.add_argument("--topic")
+    sw.set_defaults(fn=cmd_show)
+
+    ag = sub.add_parser("assert-goal", help="check whether a phase meets its acceptance criterion")
+    ag.add_argument("--run", required=True)
+    ag.add_argument("--phase", required=True)
+    ag.set_defaults(fn=cmd_assert_goal)
+
+    sm = sub.add_parser("summarize", help="record a phase's rollup")
+    sm.add_argument("--run", required=True)
+    sm.add_argument("--phase", required=True)
+    sm.add_argument("--metric", action="append", metavar="KEY=VALUE")
+    sm.add_argument("--duration", type=int)
+    sm.add_argument("--note")
+    sm.set_defaults(fn=cmd_summarize)
+
+    sk = sub.add_parser("skip", help="record that an OPTIONAL step will not run")
+    sk.add_argument("--run", required=True)
+    sk.add_argument("--step", required=True)
+    sk.add_argument("--reason")
+    sk.set_defaults(fn=cmd_skip)
+
+    ev = sub.add_parser("evidence", help="record evidence backing a completion predicate")
+    ev.add_argument("--run", required=True)
+    ev.add_argument("--step", required=True)
+    ev.add_argument("--kind", required=True)
+    ev.add_argument("--value")
+    ev.set_defaults(fn=cmd_evidence)
+
+    cf = sub.add_parser("config", help="show or set this run's config")
+    cf.add_argument("--run", required=True)
+    cf.add_argument("--set", action="append", metavar="KEY=VALUE")
+    cf.set_defaults(fn=cmd_config)
+
+    sub.add_parser("audit", help="list unwitnessed gates and violations").set_defaults(fn=cmd_audit)
+
+    cr = sub.add_parser("close-run", help="close a run (exit 3 if steps remain)")
+    cr.add_argument("--run", required=True)
+    cr.add_argument("--result", default="completed")
+    cr.add_argument("--force", action="store_true")
+    cr.set_defaults(fn=cmd_close_run)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args)
+    except store.StoreNotInitialised as exc:
+        _err(f"⛔ {exc}")
+        return USAGE
+    except SystemExit as exc:  # raised by the _or_exit helpers
+        return int(exc.code or 0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

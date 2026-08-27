@@ -1,0 +1,169 @@
+# cr-description-spec.yaml — the machine spec for a ship-check CR description.
+#
+# WHY THIS FILE EXISTS
+# [E02] used to be one line of prose ("4-section: What / Why / How / Testing. <= 4000
+# chars") with no template, no schema and no checker, so every ship's description had a
+# different shape and level of detail — whatever the agent improvised at that moment.
+# Two measured costs of that:
+#   - one ship burned 6 edit+measure rounds (5032 -> ... -> 3973 chars, ~12 tool calls)
+#     purely converging on the length limit  (history-log/.../issue-004.md)
+#   - several sessions hit non-ASCII mangling  (anti-cr-nonascii-mangled-by-c-locale)
+#
+# Prose MANDATORY does not bind an agent under context pressure (anti-pattern
+# `anti-prose-mandatory-cannot-bind-agent`), so the contract is expressed as data here
+# and enforced by an exit code in scripts/cr_description.py:
+#     lint  ->  0 = ok / 1 = a check failed / 2 = spec or input unusable
+# [E07] must not push when lint != 0.
+#
+# CONSUMED BY: scripts/cr_description.py (render + lint), [E02] / [E03].
+# HUMAN GUIDE:  references/[execution]cr-description-template.md
+
+version: "1.0"
+
+# Hard platform ceiling. CRUX truncates beyond this; the quotas below sum to 3550,
+# leaving ~11% headroom so an agent-authored section running slightly long does not
+# immediately trip the ceiling.
+total_limit: 4000
+
+sections:
+  # kind: machine        — rendered deterministically from the state DB / git / plan doc.
+  #                        The agent MUST NOT hand-write these (that is the regression
+  #                        this whole change exists to prevent).
+  # kind: agent-authored — the agent writes prose, but under the checks listed here.
+  - id: what
+    order: 1
+    heading: "## What"
+    kind: agent-authored
+    required: true
+    char_quota: 550
+    checks: [non_empty, no_placeholder, ascii_only, within_quota]
+    guidance: "What changed, concretely. Name the files/behaviour, not the motivation."
+
+  - id: why
+    order: 2
+    heading: "## Why"
+    kind: agent-authored
+    required: true
+    char_quota: 450
+    checks: [non_empty, no_placeholder, ascii_only, within_quota]
+    guidance: "The problem this solves, with evidence. Prefer an observed cost over an adjective."
+
+  - id: how
+    order: 3
+    heading: "## How"
+    kind: agent-authored
+    required: true
+    char_quota: 800
+    checks: [non_empty, no_placeholder, ascii_only, within_quota]
+    guidance: "Approach + the notable design decisions a reviewer would otherwise have to reverse-engineer."
+
+  - id: testing
+    order: 4
+    heading: "## Testing"
+    kind: machine
+    required: true
+    # 1680 (was 1500, briefly 3000): 3000 broke the load-time invariant
+    # `sum(char_quota) <= total_limit` -- quotas summed to 5320 against a 4000 limit, so
+    # `cr_description.py` fail-closed with rc 2 and [E02] could not render at all. 1680 is
+    # the largest value that keeps the invariant (4000 - 2320 for the other four sections),
+    # so Testing gets the extra room the 3000 edit was reaching for. Testing is the section
+    # that grows with the test count -- a 16-execution table overflows it -- and that is
+    # handled by design: `degrade_order` folds the executions table into a summary line
+    # first, while `never_drop` keeps the strength caveats and verdict.
+    char_quota: 1680
+    checks: [non_empty, ascii_only, within_quota]
+    guidance: "Rendered from shipcheck_test_execution + shipcheck_test_plan_meta. Never hand-written."
+
+  - id: meta
+    order: 5
+    heading: "## Meta"
+    kind: machine
+    required: true
+    # 520 (was 450, was 250): the first real render measured 368 chars, dominated by two
+    # absolute paths (the plan-doc filename alone is ~100). v1.49.68 added the `Revision: N
+    # (description re-rendered for this revision)` line (~57 chars) for re-pushes, so the
+    # worst case is ~425 and 450 left only 25 chars of slack. Meta is a machine section
+    # listed under never_drop, so an under-set quota would hard-block [E07]/[R06] on
+    # something the agent cannot shorten. Quotas now sum to 3820 (4.5% headroom).
+    char_quota: 520
+    checks: [non_empty, ascii_only, within_quota]
+    guidance: "Task URL / plan doc absolute path / commit / delivery / reviewer — the jump-off pointers."
+
+# Deterministic degradation order, applied only when the assembled document exceeds
+# total_limit. Fixed order so two runs on the same input degrade identically (the old
+# behaviour was an agent deciding ad hoc what to cut, which is why the same information
+# survived in one CR and vanished in the next).
+#
+# Strength caveats are NEVER dropped: they are the part a reviewer cannot reconstruct
+# and the entire reason the Testing section is worth reading.
+degrade_order:
+  - action: collapse_executions_table
+    target: testing
+    note: "Fold the per-execution table into one summary line (counts by result)."
+  - action: truncate
+    target: how
+  - action: truncate
+    target: why
+
+never_drop:
+  - testing.strength_caveats
+  - testing.verdict
+  - meta
+
+checks:
+  non_empty:
+    description: "Section body must have content after stripping whitespace."
+  no_placeholder:
+    description: "Rejects unfilled template markers left behind by the agent."
+    # Substrings, matched case-insensitively against the section body.
+    patterns:
+      - "TODO"
+      - "TBD"
+      - "FIXME"
+      - "XXX"
+      - "<placeholder>"
+      - "..."
+      - "lorem ipsum"
+      - "describe here"
+      - "fill in"
+  ascii_only:
+    description: >
+      Rejects non-ASCII bytes. `cr` run under a non-UTF-8 locale (LANG="" / LC_CTYPE=C)
+      replaces every non-ASCII byte with "?", corrupting the CR summary/description and
+      the local commit (observed: CR-290806247). config.commit_language defaults to "en"
+      for the same reason; this check is the enforcement.
+  within_quota:
+    description: "Section length must be <= char_quota."
+
+# Testing section rendering contract (implemented in cr_description.py).
+testing_render:
+  # A reviewer does not need "the tests passed"; they need enough to judge how solid the
+  # verification was. Each caveat below is computed from a field that already exists —
+  # nothing here is an LLM judgement about its own work.
+  strength_caveats:
+    - id: no_framework_test
+      when: "verdict == exempt"
+      text: "no framework test ran (exempt) - only alternative verification"
+    - id: hand_written_test_list
+      when: "source == plan-hand-written"
+      text: "test list was hand-written for this change, not declared by the package"
+    - id: must_run_skipped
+      when: "any execution with severity=must-run and result=skip"
+      text: "{n} must-run execution(s) skipped by skip_conditions"
+    - id: degraded_fallback
+      when: "any execution with result in (degraded-pass, degraded-fail)"
+      text: "{n} execution(s) ran a degraded fallback path"
+    - id: framework_eligible_but_exempt
+      when: "framework_eligible == true and verdict == exempt"
+      text: "package is framework_eligible but still exempt - a real test suite is owed"
+    - id: assertions_environment_attributed
+      when: "assertions_verdict mentions environment"
+      text: "some blast-radius assertions did not pass and were attributed to the environment"
+    - id: no_structured_record
+      when: "no test evidence rows for this session"
+      text: "no structured test record (pre-v1.50 session) - verdict shown is unverified by this renderer"
+
+  # Fixed footer line. The description is generated at [E02], i.e. BEFORE [E07] push,
+  # so analyzer results structurally cannot exist yet — and CRUX renders its own
+  # Analyzers panel, so duplicating it would be stale by construction.
+  analyzer_pointer: "Analyzer results: see the Analyzers panel on this CR (post-push, not available at description-generation time)."

@@ -1,0 +1,331 @@
+# ability: push —— 「方案文档 → 任务系统」的推送流程转写（对照用，非移植）
+#
+# 与 shipcheck-asis 的关键区别，也是它存在的理由：**这条流程有两个形态**。
+# 源系统称之为「可插拔 executor-branch 架构」，并写下自己的承诺：
+#   「加新 executor = 1 条 registry + 每 skill 1 个 branch + 1 个 steering，不改核心」
+# 引擎的 `variants` 原语就是要让这句承诺可被检验。
+#
+# 共享核心与变体专属的分界不是我划的，是源系统 branch/README.md 明写的：
+#   共享 —— 选方案 / depends_on lint / 待确认事项 lint / task 创建外壳
+#   专属 —— pre-flight / marker+DoD+description 组装 / close 契约
+#
+# 【一处设计取舍】共享的「创建 Task」需要变体专属的「description 组装」先完成，
+# 但共享步不能依赖只在某个变体存在的步（引擎会在加载期拒绝，理由见 flow.py 的
+# 跨变体依赖校验）。这里用已有原语表达：把「两个组装步至少关闭一个」写进
+# 创建步的完成判据（`all_of` 的 `any_of` 组），而不是写成 deps 边。
+
+version: 1
+ability: push
+title: 方案推送（真实 push 转写，双变体）
+scope_kind: workspace
+scope_match: path_prefix
+
+variants:
+  # 单一事实源是源系统的 registry；这里只声明引擎需要知道的两件事：有哪些值、默认是谁。
+  values: [ship-check, ux]
+  default: ship-check
+  # 变体由事实解析，而非每次手输 —— 手输的值会和 registry 静默漂移。
+  fact: executor
+
+facts:
+  providers: [plan_taxonomy]
+
+prose:
+  root: prose/
+  topics_dir: topics
+  anchor_pattern: '^#{1,6}\s+Step:\s+{step_id}\b'
+
+phases:
+  - id: select
+    title: 选方案（共享核心）
+    guide: select.md
+    goal:
+      type: phase_steps_closed
+  - id: verify
+    title: 推送前验证（变体专属）
+    guide: verify.md
+    goal:
+      type: all_checks
+      checks:
+        - type: phase_steps_closed
+        - type: evidence_in
+          kind: preflight_verdict
+          values: [verified]
+  - id: create
+    title: 创建任务（共享外壳 + 变体组装）
+    guide: create.md
+    goal:
+      type: phase_steps_closed
+  - id: close
+    title: 收尾（变体专属判定）
+    guide: close.md
+    goal:
+      type: all_of
+      steps: [Z02]
+      any_of:
+        - [Z01sc, Z01ux]
+
+steps:
+  # ────────────────────────────── select（共享）──────────────────────────────
+  - id: P01
+    phase: select
+    title: 选择方案文档
+    deps: []
+    completion:
+      type: evidence
+      kind: plan_doc
+    directive: |
+      产出：一份待推送的方案文档（pending 区里最新的一份，或用户点名的 slug）
+      完成：方案文档路径已记录
+
+  - id: P02
+    phase: select
+    title: 依赖检查（depends_on 前置 lint）
+    deps: [P01]
+    completion:
+      type: evidence_in
+      kind: depends_lint
+      values: [pass, no_deps, blocked]
+    directive: |
+      产出：本方案声明的前置依赖是否都已就绪的裁决
+      完成：裁决为 pass / no_deps；blocked 时不得继续推送
+
+  - id: P03
+    phase: select
+    title: Executor 识别（决定本次走哪个变体）
+    deps: [P02]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: executor
+          values: [ship-check, ux]
+        - type: evidence
+          kind: executor_reason
+    directive: |
+      产出：解析出的 executor + 解析理由（命中哪条 registry 规则，还是落到默认）
+      完成：executor 值已记录，且理由可追溯 —— 「为什么是这个变体」必须能回答
+
+  - id: P04
+    phase: select
+    title: 待确认事项 lint
+    deps: [P03]
+    completion:
+      type: evidence_in
+      kind: open_questions_lint
+      values: [pass, no_section, exempt_investigation]
+    directive: |
+      产出：方案里每条「待确认事项」是否都有默认决策的裁决
+      完成：裁决为 pass，或本类型豁免（调查类 / 无该章节）
+
+  # ─────────────────────── verify（变体专属：两套 pre-flight）───────────────────────
+  - id: V01sc
+    phase: verify
+    topics: [variant-not-optional]
+    title: 代码类 pre-flight（锚点 / 构建 / 测试框架）
+    variants: [ship-check]
+    deps: [P04]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_equals
+          kind: preflight_verdict
+          value: verified
+        - type: evidence_all_in
+          kind: critical_path_probe
+          values: [hit]
+    directive: |
+      产出：方案引用的每个改动锚点都实测命中 + 构建/测试工具可用性探测结果
+      完成：裁决为 verified，且每个 critical path 的探测结果都是命中
+      失败：任一锚点未命中 → 停下让人修方案，不要自己改锚点去迎合
+
+  - id: V01ux
+    phase: verify
+    topics: [variant-not-optional]
+    title: 设计类 pre-flight（目标项目 / 参考输入可达）
+    variants: [ux]
+    deps: [P04]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_equals
+          kind: preflight_verdict
+          value: verified
+        - type: evidence_all_in
+          kind: reference_input_probe
+          values: [reachable]
+    directive: |
+      产出：目标设计项目存在且含状态文件 + 每个参考输入都可达
+      完成：裁决为 verified，且每个参考输入的探测结果都是可达
+      失败：目标项目缺失或任一参考输入不可达 → 停下，与代码类同样的 fail-hard 姿态
+
+  # ───────────────────── create（共享外壳 + 变体组装）─────────────────────
+  - id: C01
+    phase: create
+    title: 展示方案摘要并等人确认
+    deps: [P04]
+    gate: affirm
+    completion:
+      type: gate_recorded
+    directive: |
+      产出：一条被如实记录的推送确认决定
+      完成：确认门已记录
+      失败：不要自问自答 —— 这一步的全部价值是有人真的看过再点头
+
+  - id: C02sc
+    phase: create
+    topics: [variant-not-optional, marker-mismatch]
+    title: 代码类描述组装（marker + DoD + 各段）
+    variants: [ship-check]
+    deps: [C01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: description
+        - type: evidence
+          kind: marker
+        - type: evidence
+          kind: dod_block
+    directive: |
+      产出：任务描述 —— 代码类 marker + 验收标准块 + 工作区/交付方式/CR 相关各段
+      完成：描述、marker、验收块三者都已记录
+
+  - id: C02ux
+    phase: create
+    topics: [variant-not-optional, marker-mismatch]
+    title: 设计类描述组装（marker + DoD + 各段）
+    variants: [ux]
+    deps: [C01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: description
+        - type: evidence
+          kind: marker
+        - type: evidence
+          kind: dod_block
+    directive: |
+      产出：任务描述 —— 设计类 marker + 目标项目/参考输入/受影响产物/修订类型 + 验收块
+      完成：描述、marker、验收块三者都已记录
+      注意：**不得注入代码类 marker** —— 那会让执行方在设计任务上误激活代码生命周期
+
+  - id: C03
+    phase: create
+    title: 创建任务
+    deps: [C01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: task_id
+        # 共享步不能 deps 到只在某变体存在的步（加载期会拒），所以「本变体的组装步
+        # 必须先完成」写在这里：两者关闭其一即可，而这正是 any_of 组的用途。
+        - type: all_of
+          steps: []
+          any_of:
+            - [C02sc, C02ux]
+    directive: |
+      产出：任务系统里的一条任务（含 id）
+      完成：任务 id 已记录，且本变体的描述组装步已关闭
+
+  - id: C04
+    phase: create
+    title: 方案文档状态迁移（pending → pushed）
+    deps: [C03]
+    completion:
+      type: evidence_in
+      kind: plan_status
+      values: [pushed]
+    directive: |
+      产出：方案文档状态与所在目录随推送结果更新
+      完成：状态为 pushed
+
+  # ─────────────────── close（变体专属判定 + 共享收尾）───────────────────
+  - id: Z01sc
+    phase: close
+    topics: [variant-not-optional]
+    title: 代码类完成判定（评审合入 + 任务可关）
+    variants: [ship-check]
+    deps: [C04]
+    optional: true
+    completion:
+      type: evidence_in
+      kind: close_verdict
+      values: [complete, cr_not_merged, still_running]
+    directive: |
+      产出：这条代码任务是否真的完成的判定
+      完成：判定已记录；非 complete 时不得关单
+      失败：评审未合入 → 告警并保持跟踪，不要替它宣布完成
+
+  - id: Z01ux
+    phase: close
+    topics: [variant-not-optional]
+    title: 设计类完成判定（阶段全 done + 交棒产物存在）
+    variants: [ux]
+    deps: [C04]
+    optional: true
+    completion:
+      type: evidence_in
+      kind: close_verdict
+      values: [complete, phases_pending]
+    directive: |
+      产出：这条设计任务是否真的完成的判定（读设计流程自己的状态，**不查评审合入**）
+      完成：判定已记录；phases_pending 时不得关单
+
+  - id: Z02
+    phase: close
+    title: 收尾（任务关闭 + 方案文档归档）
+    deps: [C04]
+    optional: true
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: task_state
+          values: [closed, kept_open]
+        - type: evidence_in
+          kind: plan_status
+          values: [done, pushed]
+    directive: |
+      产出：任务状态与方案文档归位的处置结果
+      完成：两者的处置都已记录 —— 「保持打开」也是一种必须被记下来的处置
+
+guards:
+  # 创建任务这个动作由确认门保护：没人点过头，任何工具都不该替它建单。
+  # matches 让运行时能在**发起调用之前**认出这个动作，而不必等 agent 自愿来问。
+  task_create:
+    step: C01
+    matches:
+      - tool: TaskeiCreateTask
+        pattern: '.'
+
+hooks:
+  - id: unknown-workspace-classification
+    trigger: phase_end
+    phase: select
+    when:
+      fact: unknown_paths
+      count_gte: 1
+    mode: contract
+    obligation: true
+    contract: |
+      这个工作区没有被分类 registry 认出来（unknown_paths 非空），
+      所以推导出的 scope/tags 落在了兜底值上。兜底不是错误，但「没认出来」
+      和「认出来是 misc」在下游长得一样 —— 显式销账，说明是补 registry 还是接受兜底。
+      harness discharge --run {{run_id}} --hook unknown-workspace-classification \
+        --evidence "<补了 registry / 接受兜底，理由>"
+
+  - id: non-default-variant-notice
+    trigger: phase_start
+    phase: verify
+    when:
+      not:
+        fact: executor
+        equals: ship-check
+    mode: contract
+    obligation: false
+    contract: |
+      本次走的是非默认变体（executor={{fact.executor}}，理由：{{fact.executor_reason}}）。
+      验证与描述组装都换成了该变体的那套，默认变体的步骤在本次流程里不存在。

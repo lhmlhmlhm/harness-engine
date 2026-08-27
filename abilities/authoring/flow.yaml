@@ -1,0 +1,138 @@
+# ability: authoring — converge a loose idea into a reviewed document.
+#
+# This ability exists to put PRESSURE on the engine's abstraction, and it is
+# deliberately unlike `delivery` in four ways:
+#
+#   1. a different scope dimension (a document, not a repo)
+#   2. NO guards at all — nothing here is irreversible, so the guard map is absent
+#      rather than filled in with something inert
+#   3. a DIAMOND dependency graph, not a chain — B and C both fork from A and rejoin
+#      at D, which only works if the engine really topologically sorts
+#   4. mostly `attest` completion — honest about being a ledger for the steps whose
+#      output leaves no machine-visible trace
+#
+# The reason for shipping two shapes on day one: a framework validated against a
+# single consumer collapses into that consumer. A prior attempt in this space declared
+# generic tables for future abilities, gained no second consumer, and its "generic"
+# table still holds zero rows while its one consumer hardcodes its own name into the
+# store. Two unlike abilities are the cheapest available guard against repeating that.
+
+version: 1
+ability: authoring
+title: 文档收敛流程
+scope_kind: document
+
+# 🧩 GENERIC —— 这个 ability 的事实与 delivery 完全不同：没有文件、没有分支、
+# 没有仓库，只有这个 run 自己的进展。它存在的目的是证明条件机制不隐含假设
+# 「事实是文件形状的」—— 如果引擎里有任何一处这么假设了，这个 ability 就跑不起来。
+facts:
+  provider: run_progress   # closed_steps / evidence_kinds / gate_count / violation_count
+
+hooks:
+  # 有待澄清项时，进定稿阶段前提醒别把开放问题偷偷答掉。必须销账。
+  - id: open-questions-outstanding
+    trigger: phase_start
+    phase: review
+    when: { fact: evidence_kinds, contains: open_question }
+    mode: contract
+    obligation: true
+    contract: |
+      B2 记录了待澄清项，它们**不是**留给你去决定的。
+      在定稿里把它们原样列出来交给人，然后：
+        harness discharge --run {{run_id}} --hook open-questions-outstanding \
+          --evidence "<列了哪几条>"
+
+  # 没有任何待澄清项，反而值得怀疑 —— 一份全都想清楚了的方案通常是偷偷答了。
+  - id: suspiciously-no-questions
+    trigger: phase_start
+    phase: review
+    when:
+      not: { fact: evidence_kinds, contains: open_question }
+    mode: contract
+    obligation: false
+    contract: |
+      整份稿子零待澄清项。回头确认一次：是真的都明确，还是把开放问题替用户答了？
+
+phases:
+  - id: gather
+    title: 收集
+    goal:
+      type: phase_steps_closed
+  - id: shape
+    title: 成形
+    goal:
+      type: all_of
+      steps: []
+      any_of: [[B1, B2]]
+  - id: review
+    title: 定稿
+    goal:
+      type: phases_summarized
+
+steps:
+  - id: A1
+    phase: gather
+    title: 收集散乱输入
+    gate: none
+    autonomy: agent
+    completion:
+      type: attest
+    directive: |
+      把用户给的零散诉求原样记下来，不要在这一步就开始收敛或回答「怎么做」。
+      这一步只有 attest —— 引擎不假装能检查「你是否真的听懂了」。
+
+  # 菱形的两条并行边：两者都只依赖 A1，彼此无序。
+  - id: B1
+    phase: shape
+    title: 结构化：已知
+    deps: [A1]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: section
+      min_count: 2
+    directive: |
+      把已经明确的东西写成 section（背景 / 范围 / 验收…）。
+      每写一节：harness evidence --step B1 --kind section --value "<节名>"
+
+  - id: B2
+    phase: shape
+    title: 结构化：待澄清
+    deps: [A1]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: open_question
+    directive: |
+      把「故意还没定的问题」单独列出来，不要替用户把它们决定掉。
+      一份没有待澄清项的方案，通常是把开放问题偷偷答了。
+      每条：harness evidence --step B2 --kind open_question --value "<问题>"
+
+  # 菱形汇合点：必须等两条边都关掉。
+  - id: D1
+    phase: review
+    title: 汇总成稿
+    deps: [B1, B2]
+    gate: none
+    autonomy: agent
+    completion:
+      type: all_of
+      steps: [B1, B2]
+    directive: |
+      合成完整文档。这一步的 completion 由引擎核对 B1/B2 是否都已关闭 ——
+      即使有人先跑 close-step D1 也会被 exit 3 挡住。
+
+  - id: D2
+    phase: review
+    title: 交给人定稿
+    deps: [D1]
+    gate: affirm
+    autonomy: human
+    completion:
+      type: gate_recorded
+    directive: |
+      🚦 把稿子给人看，结束这一轮等回复。
+      虽然这个 ability 没有任何 guard（没有不可逆动作要拦），
+      gate 的防伪仍然生效 —— 它拦的是「自己批准自己」。

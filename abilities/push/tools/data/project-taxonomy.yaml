@@ -1,0 +1,179 @@
+# project-taxonomy.yaml — single source of truth for project/tag/scope taxonomy
+#
+# The loop framework (plan / push / ship-check) reads THIS file instead of baking
+# project names into SKILL.md / task-naming-convention.md. Switching to a new
+# project = edit this file; framework code + markdown instructions stay unchanged.
+#
+# Consumed by:
+#   - push/scripts/taxonomy.py           (the shared derivation engine)
+#   - push/scripts/verify-taxonomy-parity.py  (behavior-parity gate)
+#   - plan/scripts/migrate-to-scope-folders.py (scope inference)
+#   - plan/SKILL.md Step 3b (tag) / 3c (scope) / 2c (tests_exemption category)
+#   - push/SKILL.md Step 3 (tag) + default room
+#
+# Fidelity note: scope_rules mirror plan/scripts determine_scope() priority EXACTLY
+# (tags → strong_slug → workspace → weak_slug → fallback). Any change here must keep
+# verify-taxonomy-parity.py green against plan/data/done/*.md.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# 🔧 SWITCHING PROJECTS — edit ONLY the entries tagged `# 🔧 PROJECT-SPECIFIC`
+#    below (projects / package_map / tag_order + the project rows inside
+#    scope_rules.{tag_signals,strong_slug,weak_slug} + tests_exemption_paths).
+#    Leave `# 🧩 GENERIC` entries (scope_enum, scope_rules.workspace framework
+#    paths, fallback) and `default_room` (personal) alone.
+#    ⚠️ Within each ordered list, KEEP existing entry order (first-match precedence
+#    is behavior-load-bearing; reordering can break verify-taxonomy-parity). To
+#    switch projects: replace project rows in place, then re-freeze the golden
+#    (`verify-taxonomy-parity.py --freeze`) after review.
+# ════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+
+# ── Taxonomy ─────────────────────────────────────────────────────────────────
+# 🔧 PROJECT-SPECIFIC (entire block): tag_order + projects + package_map are all
+#    project taxonomy — replace wholesale when switching projects.
+# Concat order for multi-tag task names (data-flow direction).
+tag_order: [BMS-Frontend, BMS-BFF, BMS-Backend, BMS-Security, BMS-KB, BMS-Skill, BMS-Loop, WinnerPanel, Marketplace-Frontend, Marketplace-BFF, WinnerPortal-Frontend, "Loop Agent", UX]
+
+# Project → its layer tags + package-name/path glob → tag mapping.
+# package_map is an ORDERED list (first fnmatch wins); match tested against both the
+# path basename and the (~-expanded) full path so package-name globs and path globs
+# both work.
+projects:
+  BMS:
+    tags: [BMS-Frontend, BMS-BFF, BMS-Backend, BMS-Security, BMS-KB, BMS-Skill, BMS-Loop]
+  WinnerPanel:
+    tags: [WinnerPanel]
+  # 🔧 Winner Portal 平台型仓库的 product/feature 级项目 — marketplace 跨 2 个 brazil 包
+  # （AWSGCRWinnerWebsite 前端 + AWSGCRWinBotBFFEntryLambda BFF）的 feature 子目录，
+  # 故 package 级 key 无法区分它与 vote / talent-review；见 package_map 前 3 行。
+  Marketplace:
+    tags: [Marketplace-Frontend, Marketplace-BFF]
+  # 🔧 Winner Portal 前端本体（非 marketplace feature 的部分 — core / nav / home / App 路由等）。
+  # 兜底于 marketplace 3 行之后，故 marketplace 子路径仍归 Marketplace（first-match）。
+  WinnerPortal:
+    tags: [WinnerPortal-Frontend]
+  "Loop Agent":
+    tags: ["Loop Agent"]
+  UX:
+    tags: [UX]
+
+package_map:
+  # 🔧 Winner Portal product/feature 级路径（必须在任何宽 glob 之前 — first-match）。
+  # ⚠️ 全字面路径、无跨包通配：AWSGCRWinBotBFFEntryLambda 的 marketplace 子目录此前被下方
+  #    "*BFF*" 抢先命中而错标成 BMS-BFF（跨产品线错标）。这 3 行只加不改、不移动既有行。
+  - {match: "*/AWSGCRWinnerWebsite/src/features/marketplace/*",          tag: Marketplace-Frontend}
+  - {match: "*/AWSGCRWinBotBFFEntryLambda/src/processors/marketplace/*", tag: Marketplace-BFF}
+  - {match: "*/AWSBMS2ServiceSpec/marketplace/*",                        tag: [Marketplace-Frontend, Marketplace-BFF]}
+  # 🔧 Winner Portal 前端兜底 — 必须在上面 marketplace 3 行之后（first-match），否则会抢走
+  # Marketplace-Frontend。⚠️ 只映射子路径、**不**加裸包根行 `*/AWSGCRWinnerWebsite`：
+  # 裸根行会让 2 份历史 marketplace plan doc（workspace=包根、golden=[]）翻成
+  # WinnerPortal-Frontend，parity gate 判定为 regression。裸根仍推导为 unknown。
+  - {match: "*/AWSGCRWinnerWebsite/*", tag: WinnerPortal-Frontend}
+  - {match: "GFXTech*Assets",        tag: BMS-Frontend}
+  - {match: "*FeatureControlLib",    tag: BMS-Frontend}
+  - {match: "*Console*Assets",       tag: BMS-Frontend}
+  - {match: "Sancus*Lambda",         tag: BMS-BFF}
+  - {match: "*BFF*",                 tag: BMS-BFF}
+  - {match: "FightBot*Lambda",       tag: BMS-Backend}
+  - {match: "FightBot*Common",       tag: BMS-Backend}
+  - {match: "AWSBMS2ServiceKnowledge", tag: BMS-KB}
+  - {match: "AWSBMS2ServiceSkills",  tag: BMS-Skill}
+  - {match: "AWSBMS2ServiceSpec",    tag: [BMS-Skill, BMS-Loop]}
+  - {match: "AWSBMS2SecurityService", tag: BMS-Security}   # 🔧 skill 安全扫描服务（独立包，AWSBMS2Service pipeline）
+  - {match: "actionitem-dev",        tag: WinnerPanel}
+  - {match: "*/.kiro/skills/ux/output/*", tag: UX}   # 🔧 ux 设计项目（必须在 skills 催全之前 — first-match）
+  - {match: "*/.kiro/skills/ux/output",   tag: UX}
+  - {match: "*/.kiro/skills/*",      tag: "Loop Agent"}
+  - {match: "*/.kiro/skills",        tag: "Loop Agent"}
+  - {match: "*/.kiro/prompts/*",     tag: "Loop Agent"}
+  - {match: "*/.kiro/prompts",       tag: "Loop Agent"}
+  - {match: "*/.kiro/steering/*",    tag: "Loop Agent"}
+  - {match: "*/.kiro/steering",      tag: "Loop Agent"}
+  - {match: "*/.kiro/tools/*",       tag: "Loop Agent"}   # cr-watch / emit-layer-scores / 其它个人 tool 脚本
+  - {match: "*/.kiro/tools",         tag: "Loop Agent"}
+  - {match: "*/.kiro/loop agents/*", tag: "Loop Agent"}   # framework primitive (trace.py / evaluate.py / 协议文档)
+  - {match: "*/.kiro/loop agents",   tag: "Loop Agent"}
+
+# ── Scope inference ──────────────────────────────────────────────────────────
+# Mirrors plan/scripts determine_scope() priority order EXACTLY. Priority 1 (explicit
+# frontmatter `scope:`) is handled in code, not here. Rules below are priorities 2-6.
+scope_enum: [bms, skills, agent, infra, misc]   # 🧩 GENERIC framework scopes (skills/agent/infra/misc); `bms` is the one 🔧 project scope
+
+scope_rules:
+  # priority 2 — tags (regex, case-insensitive)
+  #   🔧 PROJECT-SPECIFIC: every row maps a project tag → scope. ⚠️ order matters
+  #   (docs with BOTH 'Loop Agent' + 'BMS-*' tags resolve to whichever matches first).
+  tag_signals:
+    - {pattern: '\bLoop\s*Agent\b',   scope: agent}   # 🔧 loop-agent project
+    - {pattern: '\bAgent\s*Runner\b', scope: agent}   # 🔧 loop-agent project
+    - {pattern: '\bFleet\s*Runner\b', scope: agent}   # 🔧 loop-agent project
+    - {pattern: '\bBMS-(?:Frontend|Backend|Security|KB|Skill)\b', scope: bms}   # 🔧 BMS project
+    - {pattern: '\bSCE\b',            scope: bms}   # 🔧 BMS project
+  # priority 3 — strong slug patterns (override workspace)
+  #   🔧 PROJECT-SPECIFIC: BMS/skill-dev slug cases.
+  strong_slug:
+    - {pattern: '^quick-bms-test-', scope: skills}   # 🔧 BMS test-skill dev
+    - {pattern: '^test-scoring-',   scope: skills}   # 🔧 skill dev
+    - {pattern: '^new-skill-',      scope: skills}   # 🔧 skill dev
+  # priority 4 — workspace path heuristics (ordered; `type` selects match semantics)
+  workspace:
+    - {type: contains, value: "/workplace/fightbot/", scope: bms}   # 🔧 PROJECT-SPECIFIC (BMS workspace)
+    - {type: regex,    value: '/workplace/agent(/|$)', scope: agent} # 🔧 PROJECT-SPECIFIC (agent workspace)
+    - {type: regex,    value: '/\.kiro/skills(/|$)',   scope: skills} # 🧩 GENERIC (framework skills dir)
+    - {type: kiro_infra, scope: infra}   # 🧩 GENERIC — special: startswith ~/.kiro/ AND "/skills/" not in path
+  # priority 5 — weak slug patterns (only when workspace gives no signal)
+  #   🔧 PROJECT-SPECIFIC: BMS-case slugs (ppa-/mmr-/rename-user…). HARMLESS to new
+  #   projects (their slugs won't match → correct fallback:misc); do NOT delete
+  #   (removing breaks verify-taxonomy-parity against historical docs) — replace
+  #   with the new project's slug cases when switching.
+  weak_slug:
+    - {pattern: '^(ship-check|plan-|push-|ceo-|installer-|workflow-cross|l3-|kb-|quick-bms-test-skill$)', scope: skills}  # 🔧 skill/loop-agent dev slugs
+    - {pattern: '^(ppa-|decision-card-|mmr-|sync-list-|quip-faq-|extract-ppa|fix-throttle|add-word-limit|rename-user|build-env)', scope: bms}  # 🔧 BMS-case slugs
+  # priority 6 — fallback
+  fallback: misc   # 🧩 GENERIC
+
+# ── tests_exemption category (plan Step 2c) — project-specific path judgments ──
+# Generic rules (typescript/python project → none, terraform → infra-as-code, etc.)
+# stay in plan/SKILL.md; only the project-coupled path judgments live here.
+tests_exemption_paths:
+  - {type: contains, value: "AWSBMS2ServiceSkills", category: markdown-skill}   # 🔧 PROJECT-SPECIFIC (BMS skill package)
+  - {type: regex,    value: '/\.kiro/skills/[^/]+/', category: markdown-skill}  # 🧩 GENERIC — any skill self-def
+
+# ── Executors (pluggable executor-branch architecture) ───────────────────────
+# 🧩 GENERIC mechanism (the executor concept) + 🔧 per-project executor rows.
+#
+# An *executor* is the downstream lifecycle that will EXECUTE a plan/task:
+#   - ship-check : code → build → commit → CR → close (the default, historical)
+#   - ux         : U0–U7 gate-based design revision via the ux skill + ux-state.py
+#
+# This block is the SINGLE SOURCE OF TRUTH for executor id / description-marker /
+# paired worker-side steering / workspace→executor resolution. plan / push / pm all
+# resolve the executor via `taxonomy.py executor` — they never hardcode a second copy.
+#
+# Schema per entry (all keys REQUIRED so worker dispatch never mis-fires):
+#   marker   : the string injected into the Taskei task description that the paired
+#              steering file greps to activate the right worker-side lifecycle.
+#   steering  : the steering filename (under ~/.kiro/steering/) that declares how a
+#              worker activates this executor when it sees `marker`.
+#   branch    : the branch-file basename each skill reads (skills/{plan,push}/branch/{branch}.md).
+#   default   : (optional) exactly one executor is the fallback when resolve matches nothing.
+#   resolve   : ordered list of workspace-path rules (first match wins); {type: contains|regex, value: ...}.
+#               Empty / omitted = only reachable via `default: true` or explicit frontmatter `executor:`.
+executors:
+  ship-check:
+    marker: "⚠️ **Ship-Check Required**"
+    steering: ship-check-activation.md
+    branch: ship-check
+    default: true
+    resolve: []            # 🧩 default fallback — brazil packages / everything else
+  ux:
+    marker: "🎨 **UX-Revision Required**"
+    steering: ux-revision-activation.md
+    branch: ux
+    resolve:
+      - {type: contains, value: "/.kiro/skills/ux/output/"}   # 🔧 ux project folders
+      - {type: regex,    value: '/\.kiro/skills/ux/output$'}
+
+# ── Defaults ─────────────────────────────────────────────────────────────────
+default_room: "a898d8cd-2354-4cee-9584-f787106155c0"

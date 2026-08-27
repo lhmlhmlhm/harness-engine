@@ -1,0 +1,258 @@
+# ability: delivery — a code change taken from plan to merged.
+#
+# Shape: a long linear lifecycle with hard gates before irreversible acts, and
+# machine-checked completion on the steps that carry evidence.
+#
+# 🔧 PROJECT-SPECIFIC vs 🧩 GENERIC is marked per block, following the one pattern in
+# this space that demonstrably works: keep the algorithm in code and every piece of
+# domain vocabulary here, so retargeting means editing this file and nothing else.
+#
+# Everything below is DATA. The engine has never heard of "commit" or "D02".
+
+version: 1
+ability: delivery
+title: 交付生命周期
+# 🧩 GENERIC — which dimension a run owns. Two open runs in one scope make guards
+# ambiguous, so the engine refuses the second unless told otherwise.
+scope_kind: repo
+
+# 🔧 PROJECT-SPECIFIC — pre-authorisation switches. A gate declared
+# `preauth:<key>` may be satisfied by config INSTEAD of a human, but only when the
+# key is truthy. Absent or false ⇒ the gate refuses and records a violation.
+# 🧩 GENERIC —— 散文的四层分工：
+#   title      一行，列表里可见
+#   directive  几行速记，`harness next` 无条件打印，够动手
+#   guide      文件指针，操作契约全文，`harness show` 才取
+#   topics     命名的判断知识，踩到坑才读
+# 指针必须落在本 ability 目录内 —— ability 要能整个目录搬走。
+prose:
+  root: prose/
+  topics_dir: topics
+  # 引擎替换 {step_id} 后在 md 里搜标题。模式写在这里，所以引擎不需要知道
+  # step id 长什么样 —— 那种知识一进引擎就再也拿不出来了。
+  anchor_pattern: '^#{1,6}\s+Step:\s+{step_id}\b'
+
+# 🧩 GENERIC —— 运行时事实的来源。引擎不知道这些键是什么意思，只知道
+# provider 声明的类型，从而能在加载期校验条件里的键引用与算子合法性。
+facts:
+  provider: git_tree     # 声明 changed_files:list[str] / vcs_branch:str / dirty:bool / change_count:int
+
+# 🔧 PROJECT-SPECIFIC —— 边界上的钩子。条件是嵌套布尔，算子来自注册表。
+hooks:
+  # 改到散文却没改 flow（或反之）→ 提醒同步。这个条件会真的命中。
+  - id: prose-sync-reminder
+    trigger: phase_end
+    phase: build
+    when: { fact: changed_files, matches_any: ["**/prose/**", "**/*.md"] }
+    mode: contract
+    obligation: false          # 只提醒，不阻塞
+    contract: |
+      本轮改到了散文（{{fact.changed_files}}）。
+      确认 flow.yaml 的 directive/guide/topics 与散文没有脱节 ——
+      `harness validate` 只能查引用是否解析，查不出「内容已经不一致」。
+
+  # 改动面很大时，要求显式说明影响面，并且必须销账才能关 run。
+  - id: wide-change-attestation
+    trigger: phase_end
+    phase: build
+    when:
+      all_of:
+        - { fact: change_count, count_gte: 8 }
+        - { fact: dirty, equals: true }
+    mode: contract
+    obligation: true           # 未销账 → close-run exit 3
+    contract: |
+      这次改了 {{fact.change_count}} 个文件，超过了「小改动」的界。
+      在 D01 里逐个说明为什么每一处都属于本次范围，然后：
+        harness discharge --run {{run_id}} --hook wide-change-attestation \
+          --evidence "<影响面结论>"
+
+  # 分支保护：主干上不许走这条流程。命令模式 + fail_closed。
+  - id: refuse-on-trunk
+    trigger: gate_recorded
+    step: D02
+    when: { fact: vcs_branch, in: [main, master, mainline, trunk] }
+    mode: command
+    fail_closed: true
+    command: |
+      echo "分支是 {{fact.vcs_branch}} —— 这条流程不该直接在主干上走" >&2; exit 1
+
+config:
+  autopass_cleanup: false
+
+# 🔧 PROJECT-SPECIFIC — actions an external tool hook asks about. Each maps to the
+# step whose gate protects it. The engine validates that the step exists AND that it
+# actually has a gate: a guard pointing at an ungated step could never refuse, and
+# shipping one would be a false promise.
+guards:
+  commit: D02
+  publish: D02
+  close_task: E02
+
+phases:
+  - id: context
+    title: 读清现状
+    goal:
+      type: phase_steps_closed
+  - id: build
+    title: 实现与验证
+    guide: build.md
+    goal:
+      type: all_of
+      steps: [K01, K02]
+  - id: deliver
+    title: 交付
+    guide: deliver.md
+    goal:
+      type: phase_steps_closed
+  - id: endgame
+    title: 收尾
+    guide: deliver.md
+    goal:
+      type: no_open_violations
+
+steps:
+  # ── context ───────────────────────────────────────────────────────────────
+  - id: C01
+    phase: context
+    title: 锁定改动清单
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: change_list
+      min_count: 1
+    directive: |
+      读需求/方案，提取 path + operation + anchor 的清单，逐条 emit。
+      每条锚点必须实测命中（grep 出行号），锚点对不上就是现实与预期不符，停下来说。
+      记录：harness evidence --step C01 --kind change_list --value "<n 个文件>"
+
+  - id: C02
+    phase: context
+    title: 建立测试基线
+    deps: [C01]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: test_baseline
+    directive: |
+      先跑一遍测试，把「改动前就红的」记下来。没有基线，之后任何失败都无法归因。
+      记录：harness evidence --step C02 --kind test_baseline --value "<n passed, m failed>"
+
+  # ── build ─────────────────────────────────────────────────────────────────
+  - id: K01
+    phase: build
+    title: 实现
+    topics: [heredoc-hangs]
+    deps: [C01, C02]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: diff
+    directive: |
+      按清单实现。偏离清单就先说明再改。
+      记录：harness evidence --step K01 --kind diff --value "<files +a/-b>"
+
+  - id: K02
+    phase: build
+    title: 验证（含变异验证）
+    topics: [mutation-verification-traps]
+    deps: [K01]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: test_result
+      match: "pass"
+    directive: |
+      跑测试并与 C02 的基线对比 —— 只允许「新增绿」，不允许「既存绿变红」。
+      新写的测试必须做变异验证：把修复去掉，确认测试真的变红。
+      绿色本身不证明测试有效。
+      记录：harness evidence --step K02 --kind test_result --value "<n pass, mutation ok>"
+
+  # ── deliver ───────────────────────────────────────────────────────────────
+  - id: D01
+    phase: deliver
+    title: 影响面复核
+    deps: [K02]
+    gate: none
+    autonomy: agent
+    completion:
+      type: all_of
+      steps: [K01, K02]
+    directive: |
+      列出这次改动会波及的调用方；对每个说明为什么不破。
+
+  - id: D02
+    phase: deliver
+    title: 提交前确认（gate）
+    deps: [D01]
+    # 🧩 GENERIC — `affirm` 要求人的确认，且必须有 agent 无法伪造的 witness 背书。
+    gate: affirm
+    autonomy: human
+    completion:
+      type: gate_recorded
+    directive: |
+      🚦 停在这里，把改动摊给人看，然后结束这一轮。
+      不要在同一轮里自己记录这个 gate —— witness 会发现「距上次 gate 没有新的人类发言」
+      并拒绝（exit 3）。这不是障碍，这就是这个 gate 的全部意义。
+      人回复后：harness gate --step D02 --decision affirm --evidence "<原话>"
+
+  - id: D03
+    phase: deliver
+    title: 提交并发布
+    topics: [never-forge-a-gate]
+    deps: [D02]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: commit_sha
+    directive: |
+      提交 + 发布。D02 未记录时，外部 hook 会用 `harness guard --action commit`
+      拿到 exit 4 直接拦住这一步。
+      记录：harness evidence --step D03 --kind commit_sha --value "<sha>"
+
+  # ── endgame ───────────────────────────────────────────────────────────────
+  - id: E01
+    phase: endgame
+    title: 等待外部检查结论
+    topics: [terminal-not-optimistic]
+    deps: [D03]
+    gate: none
+    autonomy: agent
+    completion:
+      type: evidence
+      kind: checks_terminal
+    directive: |
+      等外部检查（CI / 静态分析 / review）走到终态再往下。
+      「还在跑」不是终态；把未跑完当通过是最常见的假完成。
+      记录：harness evidence --step E01 --kind checks_terminal --value "<结论>"
+
+  - id: E02
+    phase: endgame
+    title: 关单确认（gate）
+    deps: [E01]
+    gate: affirm
+    autonomy: human
+    completion:
+      type: gate_recorded
+    directive: |
+      🚦 关单不可逆，先让人确认。同 D02：必须是真实的人类回复。
+
+  - id: E03
+    phase: endgame
+    title: 收尾
+    deps: [E02]
+    # 🔧 PROJECT-SPECIFIC — 这一步允许用 config 预授权跳过人工确认。
+    gate: preauth:autopass_cleanup
+    autonomy: agent
+    completion:
+      type: no_open_violations
+    directive: |
+      清理临时产物、归档。
+      预授权路径：harness config --set autopass_cleanup=true 之后
+      harness gate --step E03 --decision preauth 才会被接受；
+      否则 —— 包括「我看进度应该算预授权了吧」这种推断 —— 一律 exit 3 并记 violation。
