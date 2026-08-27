@@ -164,6 +164,11 @@ class Flow:
     # its siblings. A real flow has Y/N close branches that are two steps, exactly one
     # of which ever runs.
     exclusive_groups: tuple[tuple[str, ...], ...]
+    # One line: WHEN a caller should reach for this ability. Lives here rather than in a
+    # separate routing document because a hand-kept list of "which ability for what" drifts
+    # from the abilities the moment one is added — and a routing table that is quietly wrong
+    # sends work to the wrong lifecycle, which is worse than having no table.
+    when: str
     # Abilities whose extension registrations this one relies on. Declared so a shared source
     # of truth stays singular without an ability secretly depending on load order.
     requires: tuple[str, ...]
@@ -251,8 +256,16 @@ class Flow:
     def default_variant(self) -> str | None:
         return self.variant_spec.get("default")
 
-    def scope_covers(self, scope_key: str, where: str) -> bool:
+    def scope_covers(self, scope_key: str, where: str, payload: dict | None = None) -> bool:
         """Does a run scoped to `scope_key` own an action happening at `where`?
+
+        `in_payload` exists because a working directory answers nothing for a scope that is not
+        a location. A run about one review, or one sprint, is not tied to a directory — and
+        comparing its scope key to a cwd simply never matches, so the guard silently never
+        fires. The reliable answer for those is the one this store's own design already argues
+        for: **the scope key the action carries with it**. A call that names the review it is
+        commenting on identifies its owner unambiguously; a call that names none is not that
+        run's business.
 
         `exact` is the default because equality is the only comparison that is right for every
         kind of scope. `path_prefix` exists for scopes that ARE locations, and it compares by
@@ -262,6 +275,16 @@ class Flow:
         a gate that belongs to somebody else's work leaves forging that gate as the only way
         forward. That is why widening this is a per-ability declaration and never a default.
         """
+        if self.scope_match == "in_payload":
+            # No early-out for an empty payload: `{}` serialises to a string the scope key
+            # cannot appear in, so the search below already answers "not mine". A guard clause
+            # there looked defensive and could not change any outcome — which is the same
+            # inert-but-declared shape this engine exists to remove, so it is not written.
+            import json as _json
+            hay = _json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+            # Whole-token, so a scope of `CR-123` does not claim `CR-1234`.
+            return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(str(scope_key))}"
+                             rf"(?![A-Za-z0-9_-])", hay) is not None
         if self.scope_match == "exact":
             return scope_key == where
         # BOTH SIDES ARE RESOLVED, and skipping that is a silent miss rather than a loud one.
@@ -327,7 +350,7 @@ class Flow:
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget", "on_exhausted"}
-TOP_KEYS = {"scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
+TOP_KEYS = {"when", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
 STAGE_KEYS = {"id", "guide"}
@@ -336,7 +359,7 @@ FACTS_KEYS = {"provider", "providers"}
 VARIANT_KEYS = {"values", "default", "fact"}
 GUARD_KEYS = {"step", "matches"}
 GUARD_MATCH_KEYS = {"tool", "field", "pattern"}
-SCOPE_MATCH_MODES = ("exact", "path_prefix")
+SCOPE_MATCH_MODES = ("exact", "path_prefix", "in_payload")
 
 
 def _require_plain_id(value, where: str, path: Path) -> str:
@@ -974,6 +997,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             f"got {scope_match!r}")
 
     return Flow(
+        when=str(raw.get("when", "")).strip(),
         requires=requires,
         ability=ability,
         title=str(raw.get("title", ability)),

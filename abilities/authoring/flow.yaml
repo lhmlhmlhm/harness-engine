@@ -22,6 +22,10 @@ ability: authoring
 title: 文档收敛流程
 scope_kind: document
 
+when: |
+  施压用的异形能力（5 步，scope 是文档，零 guard，以 attest 为主）。
+  它存在的唯一目的是防止引擎朝单一消费方塌陷 —— 不要用它做实际工作。
+
 # 🧩 GENERIC —— 这个 ability 的事实与 delivery 完全不同：没有文件、没有分支、
 # 没有仓库，只有这个 run 自己的进展。它存在的目的是证明条件机制不隐含假设
 # 「事实是文件形状的」—— 如果引擎里有任何一处这么假设了，这个 ability 就跑不起来。

@@ -104,6 +104,10 @@ def cmd_abilities(args) -> int:
               f"  exclusive-groups={len(f.exclusive_groups)}")
         conditional = sum(1 for h in f.hooks if h.when is not None)
         obliged = sum(1 for h in f.hooks if h.obligation)
+        if f.when:
+            for line in f.when.splitlines():
+                if line.strip():
+                    print(f"     ↳ {line.strip()}")
         print(f"     facts={'+'.join(f.facts_providers)}({len(f.facts_schema)} declared)"
               f"  hooks={len(f.hooks)} ({conditional} conditional, {obliged} obligation)")
     return OK
@@ -936,7 +940,7 @@ def cmd_guard_tool(args) -> int:
                 f = flowmod.load(row["ability"])
             except flowmod.FlowError:
                 continue          # a broken spec must not brick unrelated tooling
-            if not f.scope_covers(row["scope_key"], args.cwd):
+            if not f.scope_covers(row["scope_key"], args.cwd, payload):
                 continue
             for action, rules in f.guard_matches.items():
                 for rule in rules:

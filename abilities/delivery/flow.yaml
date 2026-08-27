@@ -16,6 +16,10 @@ title: 交付生命周期
 # ambiguous, so the engine refuses the second unless told otherwise.
 scope_kind: repo
 
+when: |
+  教学与参照用的小型交付流程（10 步）。真实交付走 shipcheck-asis；
+  这条存在是为了让四层散文机制有一个读得完的参照实现。
+
 # 🔧 PROJECT-SPECIFIC — pre-authorisation switches. A gate declared
 # `preauth:<key>` may be satisfied by config INSTEAD of a human, but only when the
 # key is truthy. Absent or false ⇒ the gate refuses and records a violation.

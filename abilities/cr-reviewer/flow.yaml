@@ -1,0 +1,229 @@
+# ability: cr-reviewer —— 评审别人的代码评审
+#
+# 转写自一个 5 步的评审流程。它与交付类 ability 的根本差别：**产出不落在自己的仓库里，
+# 而是落在别人的评审上**。一条发布出去的意见对方会看见、会照它改；一条草稿不会。
+# 所以这条流程唯一的不可逆动作是「发布」，而散文里那句
+#   「Always use publish=false first. Never auto-publish without user confirmation.」
+# 正是这个 ability 存在的理由 —— 它在源系统里是一条散文 MUST，在这里是一道 gate + guard。
+#
+# scope 是**被评审的那个 CR**，不是任何本地路径：同一个人可以同时评审多个 CR，而它们
+# 各自的意见绝不能混。scope_match 因此是 exact —— 路径式的放宽在这里没有意义。
+
+version: 1
+ability: cr-reviewer
+title: 代码评审（评审他人的 CR）
+scope_kind: cr
+scope_match: in_payload
+
+when: |
+  用户给出一个评审链接/编号，或说「review 一下这个」「有哪些评审等我看」「帮我看看这个 CR」。
+  只用于**评审别人的**代码；自己的改动要交付走 shipcheck-asis。
+
+facts:
+  # 内置 provider：只读本 run 自己的进展（关闭了哪些步、记了哪些 kind），
+  # 不碰文件系统也不调外部工具 —— 本流程的 hook 只需要这一类事实。
+  providers: [run_progress]
+
+phases:
+  - id: intake
+    title: 取到 CR 并读懂它
+    goal:
+      type: phase_steps_closed
+  - id: analyze
+    title: 分析与成文
+    goal:
+      type: all_checks
+      checks:
+        - type: phase_steps_closed
+        - type: evidence_in
+          kind: verdict
+          values: [approve, approve_with_comments, request_changes]
+  - id: deliver
+    title: 发布意见（不可逆的一步）
+    goal:
+      type: all_of
+      steps: [V01]
+      any_of:
+        - [V02, V03]
+
+steps:
+  # ────────────────────────── intake ──────────────────────────
+  - id: R01
+    phase: intake
+    title: 定位 CR
+    deps: []
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: cr_id
+        - type: evidence_in
+          kind: cr_source
+          values: [given_by_user, picked_from_pending]
+    directive: |
+      产出：要评审的那个 CR 的编号 + 它是用户直接给的还是从待评审列表里挑的
+      完成：编号已记录，来源取自封闭枚举
+      失败：找不到该 CR → 让用户核对编号，不要去评审一个「看起来像」的
+
+  - id: R02
+    phase: intake
+    title: 读 CR（含既有意见）
+    deps: [R01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: cr_metadata
+        - type: evidence
+          kind: changed_file
+        - type: evidence_in
+          kind: existing_comments_read
+          values: [read, none]
+    directive: |
+      产出：作者/摘要/修订号 + 改动文件清单 + **其他评审人已经提过的意见**
+      完成：三者都已记录；既有意见为「已读」或「确实没有」
+      注意：不读既有意见就开始写，最典型的后果是重复别人已经提过的点 ——
+            对作者来说那是噪声，而且会让你真正的新发现被淹掉
+
+  # ────────────────────────── analyze ──────────────────────────
+  - id: A01
+    phase: analyze
+    title: 按优先级逐维度分析
+    deps: [R02]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_all_in
+          kind: dimension_result
+          values: [clean, findings, not_applicable]
+          min_count: 5
+        - type: evidence
+          kind: analysis_note
+    directive: |
+      产出：五个维度各自的结论 —— 正确性 / 安全 / 覆盖缺口 / 设计 / 风格
+      完成：五个维度**每一个**都有结论（干净 / 有发现 / 不适用），不许漏维度
+      注意：顺序就是优先级。风格问题只在明显违背该库既有约定时才提，
+            个人偏好不是发现 —— 把它写进去会稀释前四类的可信度
+
+  - id: A02
+    phase: analyze
+    title: 分级成文
+    deps: [A01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_all_in
+          kind: finding_severity
+          values: [blocker, suggestion, nit]
+        - type: evidence
+          kind: review_summary
+    directive: |
+      产出：每条发现带一个分级（阻断 / 建议 / 吹毛求疵）+ 一份成文的评审摘要
+      完成：每条发现都有分级，摘要已记录
+      注意：**分级是给作者用的信息，不是给你用的**。把建议标成阻断会让人被迫改；
+            把阻断标成建议会让人放过它。零发现时明确说零发现，不要凑
+
+  - id: A03
+    phase: analyze
+    title: 给出裁决
+    deps: [A02]
+    completion:
+      type: evidence_in
+      kind: verdict
+      values: [approve, approve_with_comments, request_changes]
+    directive: |
+      产出：三者之一的裁决 + 一句理由
+      完成：裁决取自封闭枚举
+      注意：有阻断级发现却给 approve，是把「我看过」当成了「这没问题」
+
+  # ────────────────────────── deliver ──────────────────────────
+  - id: V01
+    phase: deliver
+    title: 🚦 发布前确认门
+    deps: [A03]
+    gate: affirm
+    completion:
+      type: all_checks
+      checks:
+        - type: gate_recorded
+        - type: evidence_in
+          kind: draft_state
+          values: [drafted]
+    directive: |
+      产出：一条被如实记录的「可以发布」决定
+      完成：确认门已记录，且所有意见先以**草稿**形态存在
+      失败：门被拦住时不要改措辞绕过 —— 发布是这条流程唯一对外可见的动作
+      注意：**先全部起草，再一次确认，最后发布。** 草稿改起来是零成本，
+            已发布的意见改起来对方已经读过了
+
+  - id: V02
+    phase: deliver
+    title: 发布意见
+    deps: [V01]
+    optional: true
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: publish_state
+          values: [published]
+        - type: evidence
+          kind: published_comment_count
+    directive: |
+      产出：意见发布到 CR 上 + 发布了几条
+      完成：状态为已发布，条数已记录
+
+  - id: V03
+    phase: deliver
+    title: 不发布（仅本地成文）
+    deps: [V01]
+    optional: true
+    completion:
+      type: evidence_in
+      kind: publish_state
+      values: [withheld]
+    directive: |
+      产出：本次不发布的记录
+      完成：状态为「未发布」
+      注意：这不是失败分支。用户看完摘要决定自己去说、或先跟作者聊，都是正当选择 ——
+            但它必须被记下来，否则「没发布」和「忘了发布」长得一样
+
+  - id: V04
+    phase: deliver
+    title: 交回人工批准
+    deps: [V01]
+    completion:
+      type: evidence_in
+      kind: approval_handoff
+      values: [browser_opened, not_applicable]
+    directive: |
+      产出：把批准这件事交回给人（打开评审页面），或记明本次不涉及批准
+      完成：两者之一已记录
+      注意：**批准没有命令行通道，只有人在页面上点。** 这不是限制，是这一步唯一正确的
+            形态 —— 批准是一个署名的表态，不该由任何自动化代为做出
+
+exclusive_groups:
+  # 发布 / 不发布，只会走一个。
+  - [V02, V03]
+
+guards:
+  # 唯一的不可逆动作。散文里那句「Never auto-publish without user confirmation」
+  # 在这里不是叮嘱，是一道门 —— 而这条 matches 让运行时在**调用发生之前**就认出它。
+  publish_comment:
+    step: V01
+    matches:
+      - tool: CRAddComment
+        pattern: '"publish"\s*:\s*true'
+
+hooks:
+  - id: blockers-with-approve
+    trigger: phase_end
+    phase: analyze
+    when:
+      fact: closed_steps
+      contains: A03
+    mode: contract
+    obligation: false
+    contract: |
+      裁决已记录。若其中有阻断级发现而裁决是 approve，那是把「我看过」当成了
+      「这没问题」—— 回头核一遍分级与裁决是否一致。

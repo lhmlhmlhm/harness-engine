@@ -1,0 +1,211 @@
+# ability: cr-to-task —— 从一段时间的评审活动倒推出任务
+#
+# 转写自一个 4 步流程。它与 push 的区别值得说清，因为两者都「创建任务」：
+#   push    —— 一份方案 → 一条任务（1:1，任务是方案的执行载体）
+#   本流程  —— N 个已完成的评审 → M 条任务（N:M，任务是**事后**对已做工作的归纳）
+# 方向是反的：push 先有计划后有工作，这里先有工作后补记录。这决定了它最典型的做错
+# 方式不是「漏了什么」，而是**按评审逐条建单** —— 那样得到的不是项目视图，是评审列表
+# 的副本，而副本没有任何新信息。
+#
+# scope 是**被归纳的那个时间区间**（通常一个迭代），因为这才是「这批工作」的边界；
+# 用仓库或用户名做 scope 会让两次不同区间的归纳互相覆盖。
+
+version: 1
+ability: cr-to-task
+title: 评审活动归纳成任务
+scope_kind: sprint
+scope_match: in_payload
+
+when: |
+  用户给出一个迭代链接/编号或一段时间范围，说「把我这个迭代的 CR 整理成 task」
+  「根据我的评审生成任务」。是**事后归纳**，不是计划 —— 要为未做的事出方案走 plan。
+
+facts:
+  # 内置 provider：只读本 run 自己的进展（关闭了哪些步、记了哪些 kind），
+  # 不碰文件系统也不调外部工具 —— 本流程的 hook 只需要这一类事实。
+  providers: [run_progress]
+
+phases:
+  - id: window
+    title: 确定时间窗
+    goal:
+      type: phase_steps_closed
+  - id: group
+    title: 取评审并按方向归组
+    goal:
+      type: all_checks
+      checks:
+        - type: phase_steps_closed
+        - type: evidence_in
+          kind: grouping_basis
+          values: [project_direction]
+  - id: commit
+    title: 确认并创建
+    goal:
+      type: all_of
+      steps: [T01]
+      any_of:
+        - [T02, T03]
+
+steps:
+  # ────────────────────────── window ──────────────────────────
+  - id: W01
+    phase: window
+    title: 解析时间窗
+    deps: []
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: date_range
+        - type: evidence_in
+          kind: range_source
+          values: [sprint_api, parsed_from_name, given_by_user]
+    directive: |
+      产出：起止日期 + 这个范围**怎么来的**
+      完成：范围已记录，来源取自封闭枚举
+      注意：来源必须记下来。从接口拿到的范围是权威的，从名字里解析出来的是猜的 ——
+            两者在结果里都只是两个日期，而后者可能整段偏移，把一批工作漏在窗外
+
+  - id: W02
+    phase: window
+    title: 定位归属房间
+    deps: [W01]
+    completion:
+      type: evidence
+      kind: room_id
+    directive: |
+      产出：这批任务要建在哪个房间
+      完成：房间标识已记录
+
+  # ────────────────────────── group ──────────────────────────
+  - id: G01
+    phase: group
+    title: 取窗内的评审
+    deps: [W02]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: cr_id
+        - type: evidence
+          kind: cr_count
+    directive: |
+      产出：窗内本人发起的评审清单 + 条数
+      完成：至少一条评审、条数已记录
+      失败：一条都没有 → 告诉用户并提议调整时间范围，**不要**悄悄放宽窗口去凑出结果
+
+  - id: G02
+    phase: group
+    title: 按项目方向归组
+    deps: [G01]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_equals
+          kind: grouping_basis
+          value: project_direction
+        - type: evidence
+          kind: task_group
+        - type: evidence_all_in
+          kind: group_has_multiple_crs
+          values: [yes, single_by_design]
+    directive: |
+      产出：按项目方向/功能域归出的组，每组一个待建任务
+      完成：归组依据是项目方向；每组要么含多条评审，要么显式标注「就这一条是设计如此」
+      注意：**这是整条流程唯一有价值的一步。** 按评审逐条建单不需要任何判断，
+            得到的也只是评审列表的副本。归组的价值在于它把「我改了这 7 个地方」
+            变成「我推进了这 2 件事」，而后者才是别人看得懂的东西。
+            `single_by_design` 存在是因为确实会有独立的一次性工作 —— 但如果每组都是它，
+            说明你没在归组
+
+  - id: G03
+    phase: group
+    title: 命名与打标
+    deps: [G02]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: task_name
+        - type: evidence
+          kind: label_set
+    directive: |
+      产出：每组的任务名（含项目标签前缀）+ 标签集合
+      完成：名字与标签都已记录
+
+  # ────────────────────────── commit ──────────────────────────
+  - id: T01
+    phase: commit
+    title: 🚦 建单前确认门
+    deps: [G03]
+    gate: affirm
+    completion:
+      type: all_checks
+      checks:
+        - type: gate_recorded
+        - type: evidence
+          kind: proposal_table
+    directive: |
+      产出：一张摊开的待建任务表（编号 / 任务名 / 含哪些评审 / 标签）+ 人的选择
+      完成：确认门已记录，且表格先被摆出来过
+      注意：把表格摊开是这道门的实质。人要能看出「第 3 组归错了」「第 5 组的名字不对」——
+            而只报「我要建 6 条任务，可以吗」给不了这个机会
+
+  - id: T02
+    phase: commit
+    title: 创建任务
+    deps: [T01]
+    optional: true
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: duplicate_check
+          values: [checked]
+        - type: evidence
+          kind: created_task_id
+    directive: |
+      产出：查重结果 + 创建出的任务标识
+      完成：查重已做，任务标识已记录
+      失败：与既有任务重名的要跳过并告知，不要建出两条同名任务 ——
+            清理重复任务的成本远高于这一次查重
+
+  - id: T03
+    phase: commit
+    title: 不创建（仅出归纳）
+    deps: [T01]
+    optional: true
+    completion:
+      type: evidence_in
+      kind: creation_state
+      values: [declined]
+    directive: |
+      产出：本次不建单的记录
+      完成：状态为「未创建」
+      注意：人看完表格决定不建，是正当结论。但要记下来 ——
+            「没建」和「忘了建」在事后长得一样
+
+exclusive_groups:
+  - [T02, T03]
+
+guards:
+  # 建单是对外可见且需要清理成本的动作，由确认门保护。
+  task_create:
+    step: T01
+    matches:
+      - tool: TaskeiCreateTask
+        pattern: '.'
+
+hooks:
+  - id: every-group-is-a-single-cr
+    trigger: phase_end
+    phase: group
+    when:
+      fact: evidence_kinds
+      contains: group_has_multiple_crs
+    mode: contract
+    obligation: false
+    contract: |
+      归组已完成。若每一组都只含一条评审，那不是归组，是把评审列表换了个名字 ——
+      回头看一遍有没有该合并的方向。

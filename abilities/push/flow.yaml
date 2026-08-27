@@ -18,6 +18,9 @@ version: 1
 ability: push
 title: 方案推送（真实 push 转写，双变体）
 scope_kind: workspace
+
+when: |
+  手上有一份方案文档要推成任务，或要收尾一条已推送的方案（关任务 / 归档）。
 scope_match: path_prefix
 
 variants:

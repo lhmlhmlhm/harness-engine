@@ -2837,3 +2837,83 @@ def test_no_ability_declares_a_provider_nothing_reads(env):
                 f"ability '{name}' declares provider '{provider}' ({len(owned)} facts) but no "
                 f"condition or template reads any of them — either wire it or drop it"
             )
+
+
+def test_every_ability_declares_when_to_reach_for_it(env):
+    """Routing must be DERIVABLE, not maintained by hand next to the abilities.
+
+    A hand-kept "which ability for what" table is stale the moment a seventh ability lands, and
+    a quietly-stale routing table sends work into the wrong lifecycle — which is worse than
+    having no table, because it looks authoritative.
+    """
+    from engine import flow as flowmod
+    missing = []
+    for name in flowmod.available_abilities():
+        f = flowmod.load(name)
+        if len(f.when.strip()) < 20:
+            missing.append(name)
+    assert not missing, f"no usable `when:` on: {missing}"
+    # And the capability map must NOT duplicate what `when:` already says.
+    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
+    assert "harness abilities" in cap, "the map must point at the derivable source"
+
+
+def test_a_review_publish_is_guarded(env, tmp_path):
+    """Publishing a comment onto someone else's review is the one irreversible act here.
+
+    In the source this is a prose MUST ("never auto-publish without user confirmation"); here it
+    is a gate plus a match rule, so the runtime refuses the call rather than relying on the
+    agent having read the sentence.
+    """
+    import json as _json
+    assert rc(["open", "cr-reviewer", "--scope", "CR-12345678", "--run", "rv"], env) == OK
+    blocked = rc(["guard-tool", "--tool", "CRAddComment",
+                  "--input-json", _json.dumps({"cr": "CR-12345678", "publish": True}),
+                  "--cwd", str(tmp_path)], env)
+    assert blocked == BLOCKED
+    # A DRAFT is not the guarded action — drafting freely is the whole point of drafting.
+    assert rc(["guard-tool", "--tool", "CRAddComment",
+               "--input-json", _json.dumps({"cr": "CR-12345678", "publish": False}),
+               "--cwd", str(tmp_path)], env) == OK
+
+
+def test_a_non_location_scope_is_matched_from_the_action_itself(env, tmp_path):
+    """A working directory answers nothing about a scope that is not a location.
+
+    A run about one review is not tied to a directory, so comparing its scope key to a cwd never
+    matches and the guard silently never fires — "not guarded" looking exactly like "nothing to
+    guard" again. The reliable signal is the scope key the ACTION carries.
+    """
+    import json as _json
+    d = _spec(env, "payloadscope", """
+scope_kind: ticket
+scope_match: in_payload
+phases: [{id: p1}]
+steps:
+  - id: G
+    phase: p1
+    gate: affirm
+    completion: {type: gate_recorded}
+guards:
+  act:
+    step: G
+    matches:
+      - tool: Doer
+        pattern: '"go"\\s*:\\s*true'
+""")
+    try:
+        assert rc(["open", "payloadscope", "--scope", "TK-100", "--run", "ps"], env) == OK
+        gt = lambda p: rc(["guard-tool", "--tool", "Doer", "--input-json", _json.dumps(p),
+                           "--cwd", str(tmp_path)], env)
+        # Names this run's ticket → this run owns it.
+        assert gt({"ticket": "TK-100", "go": True}) == BLOCKED
+        # Names a DIFFERENT ticket → not this run's business, even though the pattern matches.
+        assert gt({"ticket": "TK-200", "go": True}) == OK
+        # Whole-token: a longer id that merely starts with the scope key is a different ticket.
+        assert gt({"ticket": "TK-1000", "go": True}) == OK
+        # Names no ticket at all → nothing to attribute it to; do not guess.
+        assert gt({"go": True}) == OK
+        # The pattern still has to match: naming the ticket is not itself the action.
+        assert gt({"ticket": "TK-100", "go": False}) == OK
+    finally:
+        _rm(d)

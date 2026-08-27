@@ -19,6 +19,10 @@ ability: plan
 title: 方案生成（真实 plan 转写，双变体）
 scope_kind: plan_slug
 
+when: |
+  要为**还没开始做**的事出一份结构化方案。产出是一份待推送的方案文档，不是代码。
+  已经做完的工作要补记录，走 cr-to-task；有方案要推成任务，走 push。
+
 # 复用 push 注册的 provider —— 同一份 registry，一个事实来源。
 requires: [push]
 
