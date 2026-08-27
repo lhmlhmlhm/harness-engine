@@ -2918,3 +2918,103 @@ guards:
         assert gt({"ticket": "TK-100", "go": False}) == OK
     finally:
         _rm(d)
+
+
+# ───────────── end-to-end: the two review-side abilities, guard included ─────────────
+
+@pytest.mark.parametrize("ability,scope,guard_tool,guard_payload,taken,untaken", [
+    ("cr-reviewer", "CR-98765432", "CRAddComment",
+     {"cr": "CR-98765432", "revision": 3, "publish": True}, "V02", "V03"),
+    ("cr-to-task", "SPRINT-2026-Q3-07", "TaskeiCreateTask",
+     {"sprint": "SPRINT-2026-Q3-07", "name": "[X] something"}, "T02", "T03"),
+])
+def test_a_review_side_ability_runs_end_to_end_with_its_guard(
+        env, tmp_path, ability, scope, guard_tool, guard_payload, taken, untaken):
+    """Drive each of these to a clean close, WITH the runtime guard in the loop.
+
+    Separate from the variant e2e because these two exercise a path nothing else does: their
+    scope is not a location, so their guards can only be attributed by the scope key the ACTION
+    carries. Unit tests covered that comparison; this covers it inside a real run, alongside the
+    gate it protects — which is the pairing that matters. "It validates" and "it runs" have
+    already proved to be different claims once in this project, in an ability whose whole
+    variant branch was unreachable while every check passed.
+    """
+    import json as _json
+    import yaml as _yaml
+    flow = _yaml.safe_load((REPO / "abilities" / ability / "flow.yaml").read_text())
+    run_id = ability.replace("-", "")[:12]
+    gt = lambda: rc(["guard-tool", "--tool", guard_tool,
+                     "--input-json", _json.dumps(guard_payload),
+                     "--cwd", str(tmp_path)], env)
+
+    # Before the run exists there is nothing to attribute the call to.
+    assert gt() == OK
+    assert rc(["open", ability, "--scope", scope, "--run", run_id], env) == OK
+    # Now it is attributable — by the scope key inside the payload, not by any directory.
+    assert gt() == BLOCKED, "the guarded action must be refused before its gate"
+
+    t = tmp_path / "t.jsonl"
+    t.write_text("", encoding="utf-8")
+    turns = gates = 0
+    seen_phase = None
+    for s in flow["steps"]:
+        sid = s["id"]
+        if sid == untaken:
+            continue                      # the exclusive sibling; closing one is enough
+        if seen_phase is not None and s["phase"] != seen_phase:
+            r = run(["summarize", "--run", run_id, "--phase", seen_phase, "--note", "walked"], env)
+            assert r.returncode == OK, (seen_phase, r.stderr)
+        seen_phase = s["phase"]
+        if s.get("gate") == "affirm":
+            # A gate takes two turns: the refusal below is what makes that real.
+            assert rc(["gate", "--run", run_id, "--step", sid, "--decision", "affirm",
+                       "--evidence", "no human spoke"], env,
+                      transcript=t, witness="transcript") == REFUSED
+            turns += 1
+            with t.open("a", encoding="utf-8") as fh:
+                fh.write(_json.dumps({"role": "user", "content": f"go ahead on {sid}"}) + "\n")
+            assert rc(["gate", "--run", run_id, "--step", sid, "--decision", "affirm",
+                       "--evidence", f"go ahead on {sid}"], env,
+                      transcript=t, witness="transcript") == OK
+            gates += 1
+            # The gate is recorded, so the guarded action is now allowed.
+            assert gt() == OK, "recording the gate must release the guard"
+        _satisfy(env, run_id, sid, s.get("completion") or {})
+        r = run(["close-step", "--run", run_id, "--step", sid], env)
+        assert r.returncode == OK, (sid, r.stderr)
+    assert rc(["summarize", "--run", run_id, "--phase", seen_phase, "--note", "walked"],
+              env) == OK
+    assert turns == gates == 1, (turns, gates)
+
+    for line in run(["obligations", "--run", run_id], env).stdout.splitlines():
+        if line.strip().startswith("⏳"):
+            assert rc(["discharge", "--run", run_id, "--hook", line.split()[2],
+                       "--evidence", "handled"], env) == OK
+    r = run(["close-run", "--run", run_id, "--result", "completed"], env)
+    assert r.returncode == OK, r.stderr
+    audit = run(["audit"], env).stdout
+    assert "forced_close" not in audit and "undischarged_obligations" not in audit
+    # No gate was recorded via a downgrade — this run used a real transcript witness.
+    assert "unwitnessed: 0" in audit
+    # Every ledger row is a REFUSAL this test provoked on purpose, so zero breaches.
+    import sqlite3
+    c = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db")
+    try:
+        sev = dict(c.execute("SELECT severity, COUNT(*) FROM violation WHERE run_id = ? "
+                             "GROUP BY severity", (run_id,)).fetchall())
+        skipped = {r[0] for r in c.execute(
+            "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'skipped'",
+            (run_id,))}
+        closed = {r[0] for r in c.execute(
+            "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'closed'",
+            (run_id,))}
+    finally:
+        c.close()
+    assert sev.get("breach", 0) == 0, sev
+    # The untaken branch was auto-skipped BY ITS SIBLING CLOSING — nobody skipped it by hand,
+    # and it is not sitting outstanding either. Asserting the set precisely, because "the run
+    # closed" would hold just as well if the group had quietly demanded neither.
+    assert taken in closed, (taken, sorted(closed))
+    assert untaken in skipped, (untaken, sorted(skipped))
+    assert untaken not in closed
+    assert len(closed) + len(skipped) == len(flow["steps"]), (sorted(closed), sorted(skipped))
