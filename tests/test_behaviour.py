@@ -2401,16 +2401,17 @@ steps: [{id: A, phase: p1}]
 
 
 def test_the_two_new_abilities_have_full_prose_and_no_product_names(env):
-    """Both transcriptions must be self-contained documentation, not a copy of someone's docs.
+    """Every ability that declares prose must have ALL of it, and none of it copied.
 
-    A product name appearing here is evidence of copying, and it also makes the ability
-    unusable anywhere that system does not exist.
+    A product name here is evidence of copying, and it also makes the ability unusable anywhere
+    that system does not exist. Partial prose is its own failure: `next` prints the directive
+    unconditionally, so a step missing one reads exactly like a step with nothing to say.
     """
     import re
     from engine import flow as flowmod, prose
     BAD = ["CRUX", "brazil", "Taskei", "Midway", "agent-fleet",
            "AutoSDE", "Coverlay", "easymrgr", "mwinit"]
-    for name in ("push", "plan"):
+    for name in ("push", "plan", "cr-reviewer", "cr-to-task"):
         f = flowmod.load(name)
         cov = prose.coverage(f)
         assert cov["directive"] == cov["steps"], (name, cov)

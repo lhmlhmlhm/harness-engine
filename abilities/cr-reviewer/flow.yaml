@@ -24,13 +24,20 @@ facts:
   # 不碰文件系统也不调外部工具 —— 本流程的 hook 只需要这一类事实。
   providers: [run_progress]
 
+prose:
+  root: prose/
+  topics_dir: topics
+  anchor_pattern: '^#{1,6}\s+Step:\s+{step_id}\b'
+
 phases:
   - id: intake
     title: 取到 CR 并读懂它
+    guide: intake.md
     goal:
       type: phase_steps_closed
   - id: analyze
     title: 分析与成文
+    guide: analyze.md
     goal:
       type: all_checks
       checks:
@@ -40,6 +47,7 @@ phases:
           values: [approve, approve_with_comments, request_changes]
   - id: deliver
     title: 发布意见（不可逆的一步）
+    guide: deliver.md
     goal:
       type: all_of
       steps: [V01]
@@ -107,6 +115,7 @@ steps:
 
   - id: A02
     phase: analyze
+    topics: [severity-is-for-the-author]
     title: 分级成文
     deps: [A01]
     completion:
@@ -125,6 +134,7 @@ steps:
 
   - id: A03
     phase: analyze
+    topics: [severity-is-for-the-author]
     title: 给出裁决
     deps: [A02]
     completion:
@@ -139,6 +149,7 @@ steps:
   # ────────────────────────── deliver ──────────────────────────
   - id: V01
     phase: deliver
+    topics: [draft-then-publish]
     title: 🚦 发布前确认门
     deps: [A03]
     gate: affirm
@@ -158,6 +169,7 @@ steps:
 
   - id: V02
     phase: deliver
+    topics: [draft-then-publish]
     title: 发布意见
     deps: [V01]
     optional: true

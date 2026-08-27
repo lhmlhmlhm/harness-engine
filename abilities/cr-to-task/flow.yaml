@@ -25,13 +25,20 @@ facts:
   # 不碰文件系统也不调外部工具 —— 本流程的 hook 只需要这一类事实。
   providers: [run_progress]
 
+prose:
+  root: prose/
+  topics_dir: topics
+  anchor_pattern: '^#{1,6}\s+Step:\s+{step_id}\b'
+
 phases:
   - id: window
     title: 确定时间窗
+    guide: window.md
     goal:
       type: phase_steps_closed
   - id: group
     title: 取评审并按方向归组
+    guide: group.md
     goal:
       type: all_checks
       checks:
@@ -41,6 +48,7 @@ phases:
           values: [project_direction]
   - id: commit
     title: 确认并创建
+    guide: commit.md
     goal:
       type: all_of
       steps: [T01]
@@ -51,6 +59,7 @@ steps:
   # ────────────────────────── window ──────────────────────────
   - id: W01
     phase: window
+    topics: [a-parsed-range-may-be-silently-wrong]
     title: 解析时间窗
     deps: []
     completion:
@@ -97,6 +106,7 @@ steps:
 
   - id: G02
     phase: group
+    topics: [grouping-not-listing]
     title: 按项目方向归组
     deps: [G01]
     completion:
