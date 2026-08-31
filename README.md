@@ -485,6 +485,51 @@ per-run 缓存会在长流程里过期——开头读到的「改了哪些文件
       ✔ evidence_kinds contains 'open_question'   (actual: '[2 item(s)]')
 ```
 
+### provider 声明它需要什么能力，引擎决定缺失意味着什么
+
+一个伸手到进程外的 provider 需要某样东西在那里：一个工具文件、一个可执行程序、
+环境里的一个凭证、一个可连的主机。在这层之前，每个 provider 各自手写「工具没有就返回
+零值」——而**它返回的零值，在实质事实上与一次真正的全清不可区分**。区分它们的唯一东西是一个
+伴生布尔（作者要记得声明）**加上**一条 vacuous hook（flow 要记得写）。一个约定的两半，
+中间没有任何东西把它们绑在一起。改之前实测：两个 ability 里 10 处手写分支、4 个伴生布尔、
+4 条 hook，**没有任何检查确认哪一对存在**。
+
+```yaml
+@facts.provider("cr_status",
+    requires=({"file": "tools/fleet_probe.py"}, {"cmd": "kinit"}, {"net": "code.amazon.com:443"}),
+    schema={...})
+```
+
+引擎认识四种描述符、不认识任何一个参数的含义：
+
+| 描述符 | 探测什么 |
+|---|---|
+| `{"file": "tools/x.py"}` | 路径存在（相对路径按**注册该 provider 的模块所在目录**解析） |
+| `{"cmd": "git"}` | 可执行程序在 PATH 上 |
+| `{"env": "SOME_TOKEN"}` | 环境变量已设且非空 |
+| `{"net": "host[:port]"}` | 能建立 TCP 连接（端口缺省 443） |
+
+**能力缺失 → 该 provider 的事实被标为「不可用」，而不是归零。** 触到一个不可用事实的条件或
+判据**拒绝，而不是判 false**——因为任何算子作用在缺失值上都答 False，放它过去就等于把条件
+静音，而**一个被静音的条件与一个「查了没发现」的条件不可区分**。
+
+一句话概括这条不对称：它与 `claim_corroborated` 的「无法核实 = 拒绝」是同一条，
+只是从一个谓词推广到了整个事实层。
+
+`validate` 在**开 run 之前**就回答「这台机器能不能跑这条流程」：
+
+```
+   capabilities: 4 declared, 0 absent
+   capabilities: 6 declared, 2 absent — cr_status needs cmd 'kinit'; cr_status needs net '...'
+   ⚠️  steps whose criteria or hooks read those facts will REFUSE, not pass
+```
+
+这是让「读内网的 provider」可以被接进来、而 ability 仍然能在任何机器上被检查的那一块：
+**缺失能力是关于环境的事实，不是关于工作的裁决**，所以它必须能这样说出来。
+
+一处刻意没有迁移的：`scope 不是一个目录` 这支留在 provider 里。那是**真答案**（没什么可分析），
+不是缺失的答案，把两者混为一谈会把一个正确的空结果变成拒绝。
+
 ### 通用性是被测试证明的，不是声称的
 
 两个 ability 用**完全不相交的事实**：

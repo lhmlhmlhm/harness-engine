@@ -106,7 +106,7 @@ def _change_set_from_evidence(run_id: str) -> dict:
     return cs
 
 
-@facts.provider("blast_radius", schema={
+@facts.provider("blast_radius", requires=({"file": "tools/run-assertions.py"},), schema={
     # Verdict counts, straight from the tool's own `summary` block.
     "any_fail": operators.T_BOOL,
     "auto_fail_count": operators.T_INT,
@@ -137,9 +137,10 @@ def _blast_radius(ctx: dict) -> dict:
         "failed_assertions": [], "manual_assertions": [], "deferred_assertions": [],
         "analysis_ran": False, "checks_meaningful": False, "declared_file_count": 0,
     }
-    if not ASSERTIONS.is_file():
-        return empty
-
+    # The tool's presence is a declared CAPABILITY now, so absence never reaches here — it
+    # yields unavailable facts, and touching one is refused. What remains below is the honest
+    # empty: a scope that is not a directory has nothing to analyse, and that is a real answer
+    # rather than a missing one.
     workspace = Path(str(ctx.get("scope") or ".")).expanduser()
     if not workspace.is_dir():
         return empty
@@ -209,7 +210,10 @@ def _run_tool(script: Path, *args: str, stdin: str | None = None, timeout: int =
         raise RuntimeError(f"{script.name} emitted non-JSON: {exc}") from None
 
 
-@facts.provider("decision_gate", schema={
+@facts.provider("decision_gate",
+                requires=({"file": "tools/run-assertions.py"},
+                          {"file": "tools/classify-gate.py"}),
+                schema={
     # The classifier's own verdict vocabulary, passed through untouched.
     "verdict": operators.T_STR,
     "blocking_ids": operators.T_LIST,
@@ -232,8 +236,6 @@ def _decision_gate(ctx: dict) -> dict:
     """
     empty = {"verdict": "", "blocking_ids": [], "warning_ids": [],
              "blocking_count": 0, "warning_count": 0, "pipeline_ran": False}
-    if not (ASSERTIONS.is_file() and CLASSIFY_GATE.is_file()):
-        return empty
     workspace = Path(str(ctx.get("scope") or ".")).expanduser()
     if not workspace.is_dir():
         return empty
@@ -271,7 +273,9 @@ def _decision_gate(ctx: dict) -> dict:
     }
 
 
-@facts.provider("review_comments", schema={
+@facts.provider("review_comments",
+                requires=({"file": "tools/analyzer-comment-classify.py"},),
+                schema={
     "actionable_count": operators.T_INT,
     "noise_count": operators.T_INT,
     "actionable_ids": operators.T_LIST,
@@ -290,8 +294,6 @@ def _review_comments(ctx: dict) -> dict:
     """
     empty = {"actionable_count": 0, "noise_count": 0,
              "actionable_ids": [], "classifier_ran": False}
-    if not COMMENT_CLASSIFY.is_file():
-        return empty
     raw = ctx.get("comments")
     if not raw:
         return {**empty, "classifier_ran": True}

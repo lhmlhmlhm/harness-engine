@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import difflib
 
-from . import operators
+from . import facts, operators
 
 COMBINATORS = ("all_of", "any_of", "not")
 
@@ -134,7 +134,19 @@ def evaluate(cond, values: dict) -> bool:
             return any(evaluate(s, values) for s in body)
     name = str(cond["fact"])
     op = next(k for k in cond if k != "fact")
-    return operators.apply(op, values.get(name), cond[op])
+    val = values.get(name)
+    if isinstance(val, facts.Unavailable):
+        # REFUSE, DO NOT EVALUATE. Every operator applied to a missing value returns False,
+        # so letting this through would silence the condition — and a silenced condition is
+        # indistinguishable from one that looked and found nothing. That is the precise shape
+        # of hole the capability layer exists to close, so it cannot be reopened here.
+        raise facts.FactUnavailable(
+            f"condition reads fact '{name}', but {val.why()}.\n"
+            f"  Not treated as false: an operator on a missing value would answer False for "
+            f"every question, which reads exactly like a clean result.\n"
+            f"  Either make the capability available, or run a flow that does not need it."
+        )
+    return operators.apply(op, val, cond[op])
 
 
 def explain(cond, values: dict, indent: int = 0) -> list[str]:
@@ -157,7 +169,9 @@ def explain(cond, values: dict, indent: int = 0) -> list[str]:
             return lines
     name = str(cond["fact"])
     op = next(k for k in cond if k != "fact")
-    got = evaluate(cond, values)
     val = values.get(name)
+    if isinstance(val, facts.Unavailable):
+        return [f"{pad}⚠ {name} {op} {cond[op]!r}   (UNAVAILABLE: {val.why()})"]
+    got = evaluate(cond, values)
     shown = val if not isinstance(val, list) else f"[{len(val)} item(s)]"
     return [f"{pad}{'✔' if got else '✘'} {name} {op} {cond[op]!r}   (actual: {shown!r})"]

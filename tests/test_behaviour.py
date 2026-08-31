@@ -2885,6 +2885,229 @@ def test_only_a_closed_run_may_be_purged_and_the_purge_is_recorded(env):
     assert rc(["purge-run", "--run", "pg", "--reason", "again"], env) == USAGE   # gone
 
 
+def _cap_probe(requires: str, cond: str = "{fact: n, count_gte: 1}") -> pathlib.Path:
+    """A throwaway ability whose provider declares a capability that may or may not be here."""
+    d = REPO / "abilities" / "__cap_test__"
+    d.mkdir(exist_ok=True)
+    (d / "providers.py").write_text(
+        "from engine import facts, operators\n\n"
+        f"@facts.provider('cap_facts', requires={requires}, "
+        "schema={'n': operators.T_INT})\n"
+        "def _p(ctx):\n"
+        "    return {'n': 0}\n",
+        encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        "version: 1\nability: __cap_test__\nscope_kind: x\n"
+        "facts:\n  providers: [cap_facts]\n"
+        "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+        "steps:\n"
+        "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+        "    completion: {type: evidence, kind: k}\n"
+        "hooks:\n"
+        "  - id: h\n    trigger: step_close\n    step: S1\n"
+        f"    when: {cond}\n"
+        "    mode: contract\n    contract: |\n      x\n",
+        encoding="utf-8")
+    return d
+
+
+def _cap_cleanup(d: pathlib.Path) -> None:
+    for f in d.iterdir():
+        if f.is_dir():
+            for g in f.iterdir():
+                g.unlink()
+            f.rmdir()
+        else:
+            f.unlink()
+    d.rmdir()
+
+
+def test_an_absent_capability_refuses_instead_of_answering_false(env):
+    """The core asymmetry. Every operator on a missing value answers False, so a silenced
+    condition is indistinguishable from one that looked and found nothing — which is the hole
+    the capability layer exists to close and therefore must not reopen."""
+    d = _cap_probe('({"cmd": "definitely-not-a-real-binary-xyz"},)')
+    try:
+        assert rc(["open", "__cap_test__", "--scope", "s", "--run", "k1"], env) == OK
+        assert rc(["evidence", "--run", "k1", "--step", "S1",
+                   "--kind", "k", "--value", "v"], env) == OK
+        r = run(["close-step", "--run", "k1", "--step", "S1"], env)
+        assert r.returncode == REFUSED, r.stdout + r.stderr
+        both = r.stdout + r.stderr
+        assert "definitely-not-a-real-binary-xyz" in both, both
+        assert "Not treated as false" in both, both
+    finally:
+        _cap_cleanup(d)
+
+
+def test_a_present_capability_lets_the_condition_answer_normally(env):
+    """The positive control. Without it the test above would pass on an ability that simply
+    never fires its hook, and the capability layer would be credited for a dead condition."""
+    d = _cap_probe('({"cmd": "git"}, {"env": "PATH"})')
+    try:
+        assert rc(["open", "__cap_test__", "--scope", "s", "--run", "k2"], env) == OK
+        assert rc(["evidence", "--run", "k2", "--step", "S1",
+                   "--kind", "k", "--value", "v"], env) == OK
+        r = run(["close-step", "--run", "k2", "--step", "S1"], env)
+        assert r.returncode == OK, r.stdout + r.stderr
+        assert "condition not met" in r.stdout, r.stdout      # n=0, so count_gte 1 is False
+    finally:
+        _cap_cleanup(d)
+
+
+def test_an_absent_capability_stops_only_the_steps_that_read_it(env):
+    """Absence is a fact about the ENVIRONMENT, not a verdict on the work.
+
+    The first version of this test dropped the flow's hooks entirely and asserted the run
+    closed — which proved only that a flow with no hooks calls no providers. It stayed green
+    under every mutation, including a two-point one, because it never reached the code it
+    named. Rewritten to drive both sides in ONE run: two providers, one of them unusable here,
+    and a step on each. The usable side must still close.
+
+    Pinning the property, not a mechanism: it is delivered by the caller narrowing each gather
+    to the providers owning the facts it is about to read, and it survives whether an absent
+    capability is marked or raised. That is why no single-point mutation turns this red — it is
+    covered twice — and saying so is more useful than implying one guard holds it up.
+    """
+    d = REPO / "abilities" / "__cap2_test__"
+    d.mkdir(exist_ok=True)
+    try:
+        (d / "providers.py").write_text(
+            "from engine import facts, operators\n\n"
+            "@facts.provider('here_facts', requires=({'cmd': 'git'},), "
+            "schema={'a': operators.T_INT})\n"
+            "def _a(ctx):\n    return {'a': 7}\n\n"
+            "@facts.provider('gone_facts', "
+            "requires=({'cmd': 'definitely-not-a-real-binary-xyz'},), "
+            "schema={'b': operators.T_INT})\n"
+            "def _b(ctx):\n    return {'b': 7}\n",
+            encoding="utf-8")
+        (d / "flow.yaml").write_text(
+            "version: 1\nability: __cap2_test__\nscope_kind: x\n"
+            "facts:\n  providers: [here_facts, gone_facts]\n"
+            "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+            "steps:\n"
+            "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+            "    completion: {type: evidence, kind: k}\n"
+            "  - id: S2\n    phase: p\n    title: t\n    directive: d\n"
+            "    deps: [S1]\n    completion: {type: evidence, kind: k}\n"
+            "hooks:\n"
+            "  - id: ha\n    trigger: step_close\n    step: S1\n"
+            "    when: {fact: a, count_gte: 1}\n    mode: contract\n    contract: |\n      x\n"
+            "  - id: hb\n    trigger: step_close\n    step: S2\n"
+            "    when: {fact: b, count_gte: 1}\n    mode: contract\n    contract: |\n      x\n",
+            encoding="utf-8")
+        assert rc(["open", "__cap2_test__", "--scope", "s", "--run", "k3"], env) == OK
+        for sid in ("S1", "S2"):
+            assert rc(["evidence", "--run", "k3", "--step", sid,
+                       "--kind", "k", "--value", "v"], env) == OK
+        r1 = run(["close-step", "--run", "k3", "--step", "S1"], env)
+        assert r1.returncode == OK, r1.stdout + r1.stderr
+        r2 = run(["close-step", "--run", "k3", "--step", "S2"], env)
+        assert r2.returncode != OK, r2.stdout + r2.stderr
+        assert "definitely-not-a-real-binary-xyz" in r2.stdout + r2.stderr
+    finally:
+        _cap_cleanup(d)
+
+
+def test_an_unavailable_fact_may_not_silently_pin_a_run_shape(env):
+    """A variant derived from a fact this machine cannot produce must REFUSE, not default.
+
+    This is the one that already went wrong once, without a capability layer involved: a
+    derivation fed an input it was never meant to read answered with its default, the wrong
+    shape got pinned, and every step of the right shape then reported as "not part of this
+    flow" — a refusal that reads as correct. An absent capability is the same trap with a
+    different cause, so it gets the same answer.
+    """
+    d = REPO / "abilities" / "__capv_test__"
+    d.mkdir(exist_ok=True)
+    try:
+        (d / "providers.py").write_text(
+            "from engine import facts, operators\n\n"
+            "@facts.provider('vfacts', "
+            "requires=({'cmd': 'definitely-not-a-real-binary-xyz'},), "
+            "schema={'mode': operators.T_STR})\n"
+            "def _v(ctx):\n    return {'mode': 'beta'}\n",
+            encoding="utf-8")
+        (d / "flow.yaml").write_text(
+            "version: 1\nability: __capv_test__\nscope_kind: x\n"
+            "facts:\n  providers: [vfacts]\n"
+            "variants:\n  values: [alpha, beta]\n  default: alpha\n  fact: mode\n"
+            "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+            "steps:\n"
+            "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+            "    completion: {type: evidence, kind: k}\n",
+            encoding="utf-8")
+        r = run(["open", "__capv_test__", "--scope", "s", "--run", "kv"], env)
+        assert r.returncode == REFUSED, r.stdout + r.stderr
+        both = r.stdout + r.stderr
+        assert "cannot resolve the variant" in both, both
+        assert "definitely-not-a-real-binary-xyz" in both, both
+        # And it must NOT have quietly landed on the default.
+        assert "(no open runs)" in run(["status"], env).stdout
+        # Explicit still works: knowing the answer must not require the capability.
+        assert rc(["open", "__capv_test__", "--scope", "s", "--run", "kv2",
+                   "--variant", "beta"], env) == OK
+    finally:
+        _cap_cleanup(d)
+
+
+def test_validate_reports_which_capabilities_this_machine_lacks(env):
+    """"Can this flow run here" must be answerable BEFORE opening a run. Otherwise the only
+    way to find out is to walk the flow until something fails, and at that point the failure
+    reads as the flow's rather than the environment's."""
+    d = _cap_probe('({"cmd": "definitely-not-a-real-binary-xyz"},)')
+    try:
+        out = run(["validate", "__cap_test__"], env).stdout
+        assert "capabilities: 1 declared, 1 absent" in out, out
+        assert "definitely-not-a-real-binary-xyz" in out, out
+        assert "will REFUSE, not pass" in out, out
+    finally:
+        _cap_cleanup(d)
+
+
+@pytest.mark.parametrize("bad", [
+    '({"nosuchkind": "x"},)',
+    '({"cmd": "a", "env": "b"},)',
+    '("cmd git",)',
+])
+def test_a_malformed_capability_is_rejected_at_registration(env, bad):
+    """A typo'd or two-in-one descriptor must fail at import, not become an unprobed
+    capability that reads as satisfied."""
+    d = _cap_probe(bad)
+    try:
+        assert rc(["validate", "__cap_test__"], env) != OK
+    finally:
+        _cap_cleanup(d)
+
+
+def test_the_real_ability_declares_the_capabilities_its_tools_need(env):
+    """The migration, pinned. Three providers hand-rolled a "tool missing -> return zeros"
+    branch whose zeros were indistinguishable, in the substantive fact, from a real all-clear;
+    the only thing separating them was a companion boolean the author had to remember AND a
+    hook the flow had to remember. Declaring the tool instead removes the remembering.
+
+    What deliberately did NOT move: the "scope is not a directory" branch. That is a real
+    answer (nothing to analyse), not a missing one, and conflating the two would turn a
+    correct empty result into a refusal.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+    declared = {pn: _f.capabilities(pn)
+                for pn in ("blast_radius", "decision_gate", "review_comments")}
+    assert all(declared.values()), declared
+    assert all(list(d[0])[0] == "file" for d in declared.values())
+    # Every declared tool is actually shipped, so a correct install has no absent capability.
+    for pn in declared:
+        assert _f.probe_capabilities(pn) == [], (pn, _f.probe_capabilities(pn))
+    # The honest-empty branch survived: absence of CHANGES is still reachable without any
+    # capability being absent.
+    assert "checks_meaningful" in _f.schema_of("blast_radius")
+    assert "analysis_ran" in _f.schema_of("blast_radius")
+
+
 def _claim_probe(body_extra: str = "") -> pathlib.Path:
     """A throwaway ability whose provider answers from an env var, so one spec covers
     corroborated / disproved / unavailable without three near-identical fixtures."""

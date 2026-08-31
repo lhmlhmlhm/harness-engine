@@ -33,6 +33,10 @@ Two things follow, and both are load-bearing here:
 """
 from __future__ import annotations
 
+import inspect
+import os
+import shutil
+import socket
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -46,10 +50,126 @@ class FactsError(ValueError):
     pass
 
 
-def provider(name: str, *, schema: dict) -> Callable:
-    """Register a fact provider and the schema it promises.
+class FactUnavailable(FactsError):
+    """A condition or criterion touched a fact whose provider could not run.
+
+    Subclasses `FactsError` so every caller that already treats an unusable provider as
+    loud — hook firing, variant derivation — treats an unusable CAPABILITY the same way,
+    without each of them learning a second failure shape.
+    """
+
+
+# ----------------------------------------------------------------- capabilities
+#
+# WHY THE ENGINE PROBES INSTEAD OF THE PROVIDER CHECKING.
+#
+# A provider that reaches outside the process needs something to be there: a tool file, an
+# executable, a credential in the environment, a reachable host. Before this existed, each
+# provider hand-wrote its own "if the tool is missing, return zeros" branch — and the zeros
+# it returned were indistinguishable, in the substantive fact, from a real all-clear. The
+# only thing separating them was a companion boolean the author had to remember to declare
+# AND a hook the flow had to remember to write for it. Two halves of one convention, held
+# together by nothing. Measured before the change: ten hand-rolled branches across two
+# abilities, four companion booleans, four hooks — and no check that any pair existed.
+#
+# That convention does not scale in the direction this is going. Wiring providers that read
+# an internal network multiplies it by however many providers there are, and each omission
+# produces the one failure this whole design exists to prevent: "could not check" reading
+# downstream as "checked, and it was clean".
+#
+# So a provider DECLARES what it needs and the engine decides what absence means. Absence
+# yields facts marked unavailable rather than zeroed, and touching one is refused rather
+# than evaluated — the same asymmetry a completion criterion already applies to a claim it
+# cannot corroborate.
+#
+# The engine understands four descriptor kinds and nothing about what any argument means:
+#
+#   {"file": "tools/x.py"}     a path exists (relative to the registering module's dir)
+#   {"cmd": "git"}             an executable is on PATH
+#   {"env": "SOME_TOKEN"}      an environment variable is set and non-empty
+#   {"net": "host[:port]"}     a TCP connection can be opened (port defaults to 443)
+#
+# `net` is the reason the whole mechanism is worth having, and also the reason it must be
+# declared rather than discovered: a flow that needs a network can then be REPORTED as
+# unrunnable here, instead of failing later as if the flow itself were wrong.
+
+CAP_KINDS = ("file", "cmd", "env", "net")
+NET_TIMEOUT = 2.0
+
+_PROBE_CACHE: dict = {}
+
+
+def _probe(kind: str, arg: str, base: Path) -> bool:
+    """Answer one capability question, cached for the life of the process.
+
+    Cached because a CLI invocation is short-lived and several providers routinely name the
+    same host or tool; probing per provider per gather would multiply a network timeout by
+    the number of providers. Short-lived also means the cache cannot go stale in a way that
+    matters — a capability that appears mid-command is not a case worth serving.
+    """
+    key = (kind, arg, str(base))
+    if key in _PROBE_CACHE:
+        return _PROBE_CACHE[key]
+    ok = False
+    if kind == "file":
+        pth = Path(arg).expanduser()
+        ok = (pth if pth.is_absolute() else base / pth).exists()
+    elif kind == "cmd":
+        ok = shutil.which(arg) is not None
+    elif kind == "env":
+        ok = bool(os.environ.get(arg, "").strip())
+    elif kind == "net":
+        host, _, port = arg.partition(":")
+        try:
+            with socket.create_connection((host, int(port or 443)), NET_TIMEOUT):
+                ok = True
+        except OSError:
+            ok = False
+    _PROBE_CACHE[key] = ok
+    return ok
+
+
+class Unavailable:
+    """Placeholder for a fact whose provider could not run. Never a value.
+
+    Carries the reason so a refusal can name the missing capability instead of reporting a
+    generic failure — "needs cmd 'kinit'" is actionable, "facts unavailable" is not.
+    """
+
+    __slots__ = ("provider", "missing")
+
+    def __init__(self, provider_name: str, missing: list):
+        self.provider = provider_name
+        self.missing = list(missing)
+
+    def why(self) -> str:
+        parts = ", ".join(f"{k} {a!r}" for k, a in self.missing)
+        return f"provider '{self.provider}' needs {parts}, which is absent here"
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return f"<unavailable: {self.why()}>"
+
+
+def capabilities(name: str) -> tuple:
+    return tuple(_PROVIDERS[name]["requires"])
+
+
+def probe_capabilities(name: str) -> list:
+    """Which of a provider's declared capabilities are ABSENT. Empty means all present."""
+    entry = _PROVIDERS[name]
+    out = []
+    for desc in entry["requires"]:
+        kind, arg = next(iter(desc.items()))
+        if not _probe(kind, str(arg), entry["base"]):
+            out.append((kind, str(arg)))
+    return out
+
+
+def provider(name: str, *, schema: dict, requires: tuple = ()) -> Callable:
+    """Register a fact provider, the schema it promises, and what it needs to run.
 
     `schema` maps fact name -> one of `operators.TYPES`.
+    `requires` is a sequence of one-key capability descriptors (see CAP_KINDS).
     """
     for key, typ in schema.items():
         if typ not in operators.TYPES:
@@ -57,11 +177,34 @@ def provider(name: str, *, schema: dict) -> Callable:
                 f"provider '{name}' declares fact '{key}' as type {typ!r}; "
                 f"legal types are {', '.join(operators.TYPES)}"
             )
+    reqs = []
+    for desc in requires:
+        if not isinstance(desc, dict) or len(desc) != 1:
+            raise RuntimeError(
+                f"provider '{name}': each entry of `requires` is a single-key mapping, "
+                f"got {desc!r}. One capability per descriptor keeps a refusal able to name "
+                f"exactly which one is missing."
+            )
+        kind = next(iter(desc))
+        if kind not in CAP_KINDS:
+            raise RuntimeError(
+                f"provider '{name}' requires capability kind {kind!r}; the engine knows "
+                f"{', '.join(CAP_KINDS)}. A new kind is an engine change on purpose — the "
+                f"engine must be able to PROBE it, which means understanding it."
+            )
+        reqs.append({kind: str(desc[kind])})
 
     def deco(fn: Callable) -> Callable:
         if name in _PROVIDERS:
             raise RuntimeError(f"fact provider '{name}' already registered")
-        _PROVIDERS[name] = {"fn": fn, "schema": dict(schema)}
+        # A relative `file` resolves against the directory that REGISTERED the provider, so
+        # an ability names its own tools the way it stores them and stays movable.
+        try:
+            base = Path(inspect.getfile(fn)).resolve().parent
+        except TypeError:  # pragma: no cover - builtins cannot register providers
+            base = Path.cwd()
+        _PROVIDERS[name] = {"fn": fn, "schema": dict(schema),
+                            "requires": tuple(reqs), "base": base}
         return fn
     return deco
 
@@ -90,6 +233,24 @@ def gather(name: str, ctx: dict) -> dict:
         raise FactsError(
             f"unknown fact provider '{name}'; registered: {', '.join(registered()) or '(none)'}"
         )
+    # CAPABILITIES ARE CHECKED BEFORE THE CALL, and absence does not raise here — it yields
+    # facts marked unavailable, so the refusal happens at the point of USE.
+    #
+    # WHAT THAT BUYS, stated precisely because the first version of this comment got it wrong.
+    # It does NOT provide run isolation: "an absent capability only stops the steps that need
+    # it" is already delivered by the caller narrowing each gather to the providers owning the
+    # facts it is about to read, and mutating this return to a raise leaves that property
+    # intact (verified — the mutation stays green, alone and together with removing the
+    # narrowing). What it buys is ATTRIBUTION: a marker travels to the condition or criterion
+    # that reads it, so the refusal names the fact and the missing capability instead of
+    # reporting a generic provider failure from one frame up. "needs cmd 'kinit'" is
+    # actionable; "facts unavailable" sends someone looking in the flow for an environment
+    # problem. Absent capability is a fact about the environment, not a verdict about the work,
+    # and the message has to be able to say so.
+    missing = probe_capabilities(name)
+    if missing:
+        marker = Unavailable(name, missing)
+        return {k: marker for k in entry["schema"]}
     try:
         raw = entry["fn"](ctx)
     except Exception as exc:  # noqa — surface anything, never swallow

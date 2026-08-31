@@ -346,16 +346,22 @@ def _claim_corroborated(conn, run_id, step, spec, facts_fn=None) -> tuple[bool, 
             f"because the alternative is to pass an unchecked claim."
         )
     try:
+        # The gather AND the evaluation are inside one try: a provider that errors and a
+        # capability this machine lacks are the same thing from here — the claim cannot be
+        # corroborated — and giving them separate handling would invite one of them to grow a
+        # softer outcome than the other.
         values = facts_fn()
-    except Exception as exc:  # noqa — any provider failure is an unverifiable claim
+        contradicted = conditions.evaluate(cond, values)
+    except Exception as exc:  # noqa — any failure to consult the world is unverifiable
         return False, (
             f"'{kind}' is {latest!r} (a claim of absence) and the fact that would "
             f"corroborate it is unavailable: {exc}\n"
             f"    Unverifiable is refused, not passed — otherwise 'nothing could check' "
             f"becomes the cheapest way to record 'nothing was there'.\n"
-            f"    Fix the provider, or stop claiming absence and record what was found."
+            f"    Fix the provider or the capability, or stop claiming absence and record "
+            f"what was found."
         )
-    if conditions.evaluate(cond, values):
+    if contradicted:
         lines = conditions.explain(cond, values)
         detail = "\n".join("      " + ln for ln in lines)
         return False, (

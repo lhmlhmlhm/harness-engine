@@ -155,6 +155,21 @@ def cmd_validate(args) -> int:
         multi = sum(1 for n in pinned if n >= 2)
         print(f"   artifacts: {sum(pinned)} pinned across {len(pinned)} steps"
               f" ({multi} step(s) pin ≥2)")
+        # CAPABILITIES, probed here rather than left to be discovered mid-run. "Can this
+        # machine run this flow" is a question an author asks BEFORE opening a run, and until
+        # now the only way to answer it was to walk the flow until something failed — by which
+        # point the failure looks like the flow's, not the environment's.
+        declared = [(pn, d) for pn in f.facts_providers
+                    for d in facts.capabilities(pn)]
+        if declared:
+            absent = {pn: facts.probe_capabilities(pn) for pn in f.facts_providers}
+            gone = [(pn, m) for pn, ms in absent.items() for m in ms]
+            line = f"   capabilities: {len(declared)} declared, {len(gone)} absent"
+            print(line if not gone else line + " — " + "; ".join(
+                f"{pn} needs {k} {a!r}" for pn, (k, a) in gone))
+            if gone:
+                print("   ⚠️  steps whose criteria or hooks read those facts will REFUSE, "
+                      "not pass")
         no_goal = [x for x in f.phases if x not in f.phase_goals]
         gs = "/".join(f"{k}:{NAMES[predicates.strength(v)]}"
                       for k, v in f.phase_goals.items())
@@ -213,7 +228,15 @@ def cmd_open(args) -> int:
                          f"    Pass --variant explicitly, or fix the provider. Falling back to "
                          f"a default here would pin the wrong shape silently.")
                     return REFUSED
-                got = str(vals.get(key, ""))
+                raw_variant = vals.get(key, "")
+                if isinstance(raw_variant, facts.Unavailable):
+                    # Pinning the shape of a run on a fact this machine cannot produce would
+                    # silently land the default, which is the failure this derivation already
+                    # refuses elsewhere — an absent capability must not become a shape choice.
+                    _err(f"⛔ cannot resolve the variant: {raw_variant.why()}\n"
+                         f"    Pass --variant explicitly, or make the capability available.")
+                    return REFUSED
+                got = str(raw_variant)
                 if got not in f.variants:
                     _err(f"⛔ fact {key!r} resolved to {got!r}, which is not a declared "
                          f"variant ({', '.join(f.variants)}).\n"
