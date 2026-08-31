@@ -23,23 +23,36 @@ from __future__ import annotations
 
 from typing import Callable
 
-from . import store
+from . import conditions, store
 
 _REGISTRY: dict[str, dict] = {}
 
 
-def predicate(name: str, *, requires: tuple[str, ...] = ()) -> Callable:
+def predicate(name: str, *, requires: tuple[str, ...] = (),
+              needs_facts: bool = False) -> Callable:
     """Register a completion predicate under `name`.
 
     `requires` names the spec keys the flow must supply, checked at flow-load time so
     a typo in an ability's yaml is a startup error rather than a mid-run surprise.
+
+    `needs_facts` marks a predicate that must consult DERIVED facts, not only what was
+    recorded. Declared rather than assumed, for two reasons: the caller passes the fact
+    resolver only to predicates that asked for it, so gathering stays on-demand (a
+    provider is a subprocess; running every one to evaluate a criterion that never looks
+    at facts would make reading a step's status expensive), and flow-load can insist that
+    an ability using such a predicate actually declares a provider for the fact.
     """
     def deco(fn: Callable) -> Callable:
         if name in _REGISTRY:
             raise RuntimeError(f"completion predicate '{name}' already registered")
-        _REGISTRY[name] = {"fn": fn, "requires": requires}
+        _REGISTRY[name] = {"fn": fn, "requires": requires, "needs_facts": needs_facts}
         return fn
     return deco
+
+
+def needs_facts(name: str) -> bool:
+    entry = _REGISTRY.get(name)
+    return bool(entry and entry["needs_facts"])
 
 
 def is_registered(name: str) -> bool:
@@ -78,10 +91,20 @@ def validate_spec(name: str, spec: dict, where: str) -> None:
         validate_spec(sub_name, sub, f"{where} checks[{i}]")
 
 
-def check(conn, run_id: str, step, spec: dict) -> tuple[bool, str]:
+def check(conn, run_id: str, step, spec: dict, facts_fn=None) -> tuple[bool, str]:
+    """Evaluate a completion spec. `facts_fn` is a zero-arg callable returning derived facts.
+
+    Lazy on purpose: it is only ever CALLED by a predicate that declared `needs_facts`, so
+    reading the status of a step whose criterion never looks at the world costs no
+    subprocesses. A predicate that needs facts and is handed no resolver refuses — see
+    `_claim_corroborated`; treating the absence of a resolver as "no contradiction found"
+    is the exact shape of hole this predicate exists to close.
+    """
     entry = _REGISTRY.get(str(spec.get("type")))
     if entry is None:  # unreachable: flow.load validates the type up front
         return False, f"no predicate for completion type {spec.get('type')!r}"
+    if entry["needs_facts"]:
+        return entry["fn"](conn, run_id, step, spec, facts_fn)
     return entry["fn"](conn, run_id, step, spec)
 
 
@@ -262,6 +285,91 @@ def _evidence_all_in(conn, run_id, step, spec) -> tuple[bool, str]:
     )
 
 
+@predicate("claim_corroborated",
+           requires=("kind", "claims", "disproved_when"), needs_facts=True)
+def _claim_corroborated(conn, run_id, step, spec, facts_fn=None) -> tuple[bool, str]:
+    """Done when a recorded claim that NOTHING was found survives an independent probe.
+
+    WHAT THIS CLOSES. Every other predicate here reads only what was recorded, so the whole
+    set shares one blind spot: a value asserting absence — "no dependencies", "clean", "all
+    of these were noise" — is accepted on its own word. That is the single most attractive
+    thing to record, because it is the value that requires no further work, and it is
+    indistinguishable in the log from the same value honestly earned. A neighbouring system
+    lost this exact way: a rule accepted "the tool was not available" as evidence that there
+    was nothing to report, a mechanism unrelated to the flow made that failure the normal
+    outcome, and one hundred and thirty-six acknowledgements were granted for work nobody did
+    — each one individually plausible, and none of them checkable after the fact.
+
+    So the flow may declare, for a claim of absence, WHICH derived fact would contradict it.
+    The engine then asks the world before believing the record.
+
+    THE CLAIM IS THE LATEST ROW — the run's current answer — and the universal reading was
+    tried first and rejected. "Every row is inside `claims`" sounds stricter, and for a field
+    whose rows are ONE verdict re-decided it is the opposite: a run that recorded `warn` and
+    then `clean` has one row outside, so a universal check reads that as "something was found,
+    nothing to corroborate" and waves through the very `clean` it was built to interrogate.
+    Latest-row cannot produce that miss. It CAN over-fire on a field where each row is its own
+    per-item verdict (many comments, most of them noise) — that shape is not this predicate's
+    and belongs to `evidence_all_in` plus a hook on the count. An empty set is refused rather
+    than passed: a claim over nothing would otherwise be the cheapest clean bill available.
+
+    UNVERIFIABLE IS A REFUSAL, not a pass. If the fact cannot be obtained, the outcome is
+    the same as a contradiction. This is the asymmetry the whole predicate is for: "I looked
+    and there was nothing" and "nothing could look" produce identical records, so the one
+    that cannot be corroborated must not be the one that costs less. The exits are to fix
+    the provider, or to stop claiming absence — not to record the claim again.
+
+    Generic by construction: the engine compares recorded strings against `claims` and hands
+    the fact to the shared condition evaluator. It learns nothing about what any of them mean.
+    """
+    kind = str(spec["kind"])
+    claims = [str(v) for v in (spec["claims"] or [])]
+    cond = spec["disproved_when"]
+    rows = store.find_evidence(conn, run_id, step.evidence_scope, kind)
+    if not rows:
+        return False, (
+            f"no '{kind}' recorded — there is no claim to corroborate\n"
+            f"    (an absence claim over an empty set would otherwise be the cheapest pass)"
+        )
+    latest = str(rows[-1]["value"])
+    if latest not in claims:
+        return True, (
+            f"'{kind}' is {latest!r}, not a claim of absence ({claims}) — "
+            f"nothing to corroborate"
+        )
+    if facts_fn is None:
+        return False, (
+            f"'{kind}' is {latest!r}, a claim of absence, but no fact resolver was "
+            f"supplied — "
+            f"the claim cannot be corroborated.\n"
+            f"    This is a wiring fault, not a clean result. It is reported as a refusal "
+            f"because the alternative is to pass an unchecked claim."
+        )
+    try:
+        values = facts_fn()
+    except Exception as exc:  # noqa — any provider failure is an unverifiable claim
+        return False, (
+            f"'{kind}' is {latest!r} (a claim of absence) and the fact that would "
+            f"corroborate it is unavailable: {exc}\n"
+            f"    Unverifiable is refused, not passed — otherwise 'nothing could check' "
+            f"becomes the cheapest way to record 'nothing was there'.\n"
+            f"    Fix the provider, or stop claiming absence and record what was found."
+        )
+    if conditions.evaluate(cond, values):
+        lines = conditions.explain(cond, values)
+        detail = "\n".join("      " + ln for ln in lines)
+        return False, (
+            f"'{kind}' is {latest!r} (a claim of absence), but an independent fact says "
+            f"otherwise:\n{detail}\n"
+            f"    The record and the world disagree. Deal with what was found, or explain "
+            f"why it does not hold here — do NOT re-record the claim to make this pass."
+        )
+    return True, (
+        f"'{kind}' is {latest!r} (a claim of absence), corroborated — the independent "
+        f"fact does not contradict it"
+    )
+
+
 @predicate("fields_agree", requires=("kind_a", "kind_b"))
 def _fields_agree(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when two recorded values AGREE, and optionally the agreed value is acceptable.
@@ -412,8 +520,8 @@ def _phase_steps_closed(conn, run_id, step, spec) -> tuple[bool, str]:
     )
 
 
-@predicate("all_checks", requires=("checks",))
-def _all_checks(conn, run_id, step, spec) -> tuple[bool, str]:
+@predicate("all_checks", requires=("checks",), needs_facts=True)
+def _all_checks(conn, run_id, step, spec, facts_fn=None) -> tuple[bool, str]:
     """Done when EVERY nested check passes. A conjunction of the other predicates.
 
     WHY THIS IS NECESSARY, not sugar. Without it a step can carry exactly one criterion,
@@ -440,7 +548,11 @@ def _all_checks(conn, run_id, step, spec) -> tuple[bool, str]:
     for i, sub in enumerate(checks):
         if not isinstance(sub, dict) or "type" not in sub:
             return False, f"all_checks[{i}] is not a completion spec (needs a 'type')"
-        ok, why = check(conn, run_id, step, sub)
+        # The resolver is forwarded, not dropped. A conjunction is the normal home for a
+        # fact-consulting check (a value AND its corroboration), and a parent that swallowed
+        # the resolver would make that nested check refuse for a wiring reason while reading
+        # as a real contradiction.
+        ok, why = check(conn, run_id, step, sub, facts_fn)
         oks.append(ok)
         whys.append(("✔" if ok else "✘") + f" {sub['type']}: {why.splitlines()[0]}")
     if all(oks):
@@ -492,6 +604,14 @@ def requirements(spec: dict) -> list[dict]:
             if key in ("kind_a", "kind_b"):
                 item["note"] = "must agree with the other side"
             out.append(item)
+    if t == "claim_corroborated":
+        return [{"what": "evidence", "kind": str(spec["kind"]),
+                 "every_row": True,
+                 "claims": [str(v) for v in spec["claims"]],
+                 "note": f"a claim of absence ({[str(v) for v in spec['claims']]}) is only "
+                         f"accepted if an independent fact does not contradict it"},
+                {"what": "derived",
+                 "detail": "an independently derived fact must not contradict the claim"}]
     if t == "evidence_matches_variant":
         return [{"what": "evidence", "kind": str(spec["kind"]),
                  "note": "must equal the run's pinned variant"}]

@@ -866,14 +866,30 @@
     ]
    },
    "live_spec": {
-    "type": "evidence_in",
-    "kind": "consistency_result",
-    "values": [
-     "aligned",
-     "n/a"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence_in",
+      "kind": "consistency_result",
+      "values": [
+       "aligned",
+       "n/a"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "consistency_result",
+      "claims": [
+       "n/a"
+      ],
+      "disproved_when": {
+       "fact": "checks_meaningful",
+       "equals": true
+      }
+     }
     ]
    },
-   "reason": "散文完成标准「所有消费层与改动对齐」是一个裁决，输出「各消费层是否与新值/新签名对齐」。用 evidence_in：aligned（全对齐）/ n/a（本次无跨层标识符改动）。散文『发现某层仍用旧值 / 参数不匹配 → 记为阻塞项』的 blocked 值不在允许集，本步保持未关闭直到修好，T2。"
+   "reason": "散文完成标准「所有消费层与改动对齐」是一个裁决，输出「各消费层是否与新值/新签名对齐」。用 evidence_in：aligned（全对齐）/ n/a（本次无跨层标识符改动）。散文『发现某层仍用旧值 / 参数不匹配 → 记为阻塞项』的 blocked 值不在允许集，本步保持未关闭直到修好，T2。\n[2026-08-31 升级] 散文的完成标准是「所有消费层与改动对齐」；「n/a」是它的一个合法答案，但那是一句声称。分析器已独立判过本次改动是否给出可检查的输入（checks_meaningful），两者不能同时为真，所以「n/a」要经它核对。"
   },
   "D10": {
    "tier_at_derivation": "T1",
@@ -945,15 +961,31 @@
     ]
    },
    "live_spec": {
-    "type": "evidence_in",
-    "kind": "decision",
-    "values": [
-     "clean",
-     "block",
-     "warn"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence_in",
+      "kind": "decision",
+      "values": [
+       "clean",
+       "block",
+       "warn"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "decision",
+      "claims": [
+       "clean"
+      ],
+      "disproved_when": {
+       "fact": "blocking_count",
+       "count_gte": 1
+      }
+     }
     ]
    },
-   "reason": "散文完成标准「决策已落库且本层目标校验通过」，输出「决策写入状态存储」，输入是 D14 的门禁结果（干净放行 / 阻塞 / 警告）。用共享 kind decision（『一个被记录的决定值』）做 evidence_in，值必须 ∈ {clean, block, warn} 这三种合法门禁分类之一，挡掉垃圾值，T2。完成标准后半『本层目标校验通过』由本 phase 的 goal（phase_steps_closed）承载，不重复压进本步。"
+   "reason": "散文完成标准「决策已落库且本层目标校验通过」，输出「决策写入状态存储」，输入是 D14 的门禁结果（干净放行 / 阻塞 / 警告）。用共享 kind decision（『一个被记录的决定值』）做 evidence_in，值必须 ∈ {clean, block, warn} 这三种合法门禁分类之一，挡掉垃圾值，T2。完成标准后半『本层目标校验通过』由本 phase 的 goal（phase_steps_closed）承载，不重复压进本步。\n[2026-08-31 升级] 散文要求裁决落库，取值来自原文的 clean/block/warn。其中「clean」是唯一不需要后续工作的答案；分类器已算出阻断项数量（blocking_count），它说有阻断时的一句 clean 与一次真正干净的裁决在日志里不可区分，所以要在声称发生处核对。"
   },
   "D16": {
    "tier_at_derivation": "T1",

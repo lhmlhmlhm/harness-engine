@@ -888,11 +888,22 @@ steps:
   deps:
   - D08
   completion:
-    type: evidence_in
-    kind: consistency_result
-    values:
-    - aligned
-    - n/a
+    type: all_checks
+    checks:
+    - type: evidence_in
+      kind: consistency_result
+      values:
+      - aligned
+      - n/a
+    # 「n/a」说的是「本次没有需要对齐的消费层」。这件事有独立答案：分析器已经判过这次改动
+    # 有没有给出可检查的输入。它说有，而这一步说没什么要对齐，两者不能同时为真。
+    - type: claim_corroborated
+      kind: consistency_result
+      claims:
+      - n/a
+      disproved_when:
+        fact: checks_meaningful
+        equals: true
 - id: D10
   phase: verification
   stage: blast-radius
@@ -965,12 +976,25 @@ steps:
   deps:
   - D14
   completion:
-    type: evidence_in
-    kind: decision
-    values:
-    - clean
-    - block
-    - warn
+    type: all_checks
+    checks:
+    - type: evidence_in
+      kind: decision
+      values:
+      - clean
+      - block
+      - warn
+    # 「clean」是这一步唯一不需要后续工作的答案，也因此最容易被记下。分类器已经算出阻断项
+    # 的数量；在它说有阻断时接受一句 clean，等于让这条记录和一次真正干净的裁决在日志里
+    # 长得一样。phase_end 的 obligation 抓得到，但要等整个 verification 走完，而且可以用
+    # 一段散文销账 —— 在声称发生的那一刻拒绝，才没有可谈的余地。
+    - type: claim_corroborated
+      kind: decision
+      claims:
+      - clean
+      disproved_when:
+        fact: blocking_count
+        count_gte: 1
 - id: D16
   phase: verification
   stage: decision-gate

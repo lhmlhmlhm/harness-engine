@@ -453,7 +453,8 @@ def cmd_close_step(args) -> int:
             _err(f"⛔ REFUSED: '{s.id}' depends on unclosed step(s): {', '.join(missing)}")
             return REFUSED
 
-        ok, why = predicates.check(conn, row["run_id"], s, s.completion)
+        ok, why = predicates.check(conn, row["run_id"], s, s.completion,
+                                   _facts_resolver(f, row, s.completion))
         if not ok:
             store.log_step(conn, row["run_id"], s.id, "refused", why.splitlines()[0])
             _err(f"⛔ REFUSED: '{s.id}' is not complete.\n    {why}")
@@ -568,6 +569,45 @@ def cmd_gate(args) -> int:
         return OK
     finally:
         conn.close()
+
+
+def _facts_resolver(f, row, spec: dict):
+    """A lazy resolver for a completion criterion that consults derived facts.
+
+    Narrowed to the providers that OWN the facts the spec actually references, the same way
+    hook evaluation narrows — a criterion asking one question must not drag every provider's
+    subprocess along with it. Returns None when the spec references no fact, so nothing is
+    gathered and `predicates.check` never calls out.
+    """
+    from . import conditions
+
+    needed: set = set()
+
+    def walk(sp) -> None:
+        if not isinstance(sp, dict):
+            return
+        if str(sp.get("type")) == "all_checks":
+            for sub in sp.get("checks") or []:
+                walk(sub)
+            return
+        if "disproved_when" in sp:
+            needed.update(conditions.facts_referenced(sp["disproved_when"]))
+
+    walk(spec)
+    if not needed:
+        return None
+
+    def resolve() -> dict:
+        use = tuple(pn for pn in f.facts_providers
+                    if any(f.facts_owner.get(k) == pn for k in needed))
+        values = facts.gather_all(use, {
+            "run_id": row["run_id"], "scope": row["scope_key"],
+            "scope_kind": row["scope_kind"], "ability": row["ability"],
+        }) if use else {}
+        values["run_variant"] = row["variant"] or ""
+        return values
+
+    return resolve
 
 
 def _fire(conn, f, row, on: str, selector: str) -> int:
@@ -754,7 +794,8 @@ def _check_goal(conn, row, f, phase: str):
     if spec is None:
         return False, True, "no goal declared for this phase"
     subject = flowmod.GoalSubject(phase=phase, id=f"@{phase}")
-    ok, why = predicates.check(conn, row["run_id"], subject, spec)
+    ok, why = predicates.check(conn, row["run_id"], subject, spec,
+                               _facts_resolver(f, row, spec))
     return True, ok, why
 
 

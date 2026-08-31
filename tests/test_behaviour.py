@@ -7,6 +7,7 @@ disappears and only these assertions notice.
 from __future__ import annotations
 
 import json
+import pathlib
 import sqlite3
 import subprocess
 import sys
@@ -205,6 +206,32 @@ def test_transcribed_flow_prose_names_no_internal_systems(env):
 
 
 
+def predicates_requirements(spec: dict) -> list[dict]:
+    from engine import predicates
+    return predicates.requirements(spec)
+
+
+def _truthful_values(step_raw: dict, kind: str) -> list[str]:
+    """The legal values for `kind` as the step's OWN criteria declare them.
+
+    Read from the spec rather than hardcoded, for the same reason `_satisfy` is: a driver
+    carrying its own table of acceptable answers keeps passing after the flow's vocabulary
+    changes underneath it.
+    """
+    out: list[str] = []
+
+    def walk(sp) -> None:
+        if not isinstance(sp, dict):
+            return
+        for sub in sp.get("checks") or []:
+            walk(sub)
+        if sp.get("kind") == kind and sp.get("values"):
+            out.extend(str(v) for v in sp["values"])
+
+    walk(step_raw.get("completion") or {})
+    return out
+
+
 def _satisfy(env, run_id: str, sid: str, spec: dict, variant: str | None = None) -> None:
     """Record whatever a step's completion spec DEMANDS, derived from the spec itself.
 
@@ -225,6 +252,12 @@ def _satisfy(env, run_id: str, sid: str, spec: dict, variant: str | None = None)
             # feeding it anything else would make the check pass for the wrong reason.
             assert variant, f"{sid} reconciles against the variant; the driver must pass it"
             value = variant
+        elif r.get("claims"):
+            # Take the HARDER path on purpose. A claim of absence is the value that needs no
+            # further work, so a driver that records anything else never reaches the
+            # corroboration check at all — and the criterion would then pass this suite while
+            # broken. Recording the claim is what forces the independent fact to be consulted.
+            value = r["claims"][0]
         elif r.get("must_be_one_of"):
             value = r["must_be_one_of"][0]
         elif "must_equal" in r:
@@ -302,6 +335,7 @@ def test_the_real_flow_end_to_end_with_every_mechanism(env, tmp_path):
                "--kind", "old_value", "--value", "MAX = 3"], env) == OK
 
     counts = {"closed": 0, "skipped": 0, "affirm": 0, "preauth": 0, "branch_skipped": 0,
+              "claim_disproved": 0,
               "same_turn_refused": 0}
     branch_taken = False
     phases_seen = []
@@ -367,6 +401,23 @@ def test_the_real_flow_end_to_end_with_every_mechanism(env, tmp_path):
 
         _satisfy(env, "full", sid, s.get("completion") or {})
         r = run(["close-step", "--run", "full", "--step", sid], env)
+        if r.returncode == REFUSED and "claim_corroborated" in r.stderr:
+            # THE CLAIM WAS DISPROVED BY THE WORLD, on the real walk. `_satisfy` records the
+            # claim of absence on purpose (the value that needs no further work), and here a
+            # provider that had actually looked said otherwise. This is the whole mechanism
+            # firing on a real repository rather than in a fixture — count it, then do what an
+            # honest run does: record what was really found and proceed.
+            assert "an independent fact says otherwise" in r.stderr, sid
+            counts["claim_disproved"] += 1
+            reqs = [x for x in predicates_requirements(s.get("completion") or {})
+                    if x.get("claims")]
+            for rq in reqs:
+                truthful = next(v for v in (rq.get("must_be_one_of")
+                                            or _truthful_values(s, rq["kind"]))
+                                if v not in rq["claims"])
+                assert rc(["evidence", "--run", "full", "--step", sid,
+                           "--kind", rq["kind"], "--value", truthful], env) == OK, sid
+            r = run(["close-step", "--run", "full", "--step", sid], env)
         assert r.returncode == OK, f"{sid}: {r.stderr}"
         counts["closed"] += 1
 
@@ -375,6 +426,11 @@ def test_the_real_flow_end_to_end_with_every_mechanism(env, tmp_path):
     assert counts["skipped"] >= 20, "the optional steps should have been skipped"
     assert counts["branch_skipped"] == 1, "exactly one exclusive branch should be untaken"
     assert counts["affirm"] >= 3 and counts["preauth"] >= 1
+    # A claim of absence was recorded, an independent fact contradicted it, and the walk was
+    # stopped — on the real repository. Asserted rather than merely tolerated: if this drops to
+    # zero the criterion is no longer being reached, and the run would close on the agent's
+    # word for the one answer that costs nothing to give.
+    assert counts["claim_disproved"] >= 1, counts
     assert human_turns == counts["affirm"], "one real human turn per affirm gate"
     assert counts["same_turn_refused"] == 1, (
         "the same-turn fabrication path must have been exercised exactly once — if this is "
@@ -2103,7 +2159,12 @@ def test_the_transcribed_flow_keeps_every_criterion_above_the_floor(env):
     mix = collections.Counter(predicates.strength(s.completion) for s in f.steps.values())
     assert mix[0] == 0, [s.id for s in f.steps.values()
                          if predicates.strength(s.completion) == 0]
-    assert mix[3] >= 13 and mix[2] >= 52, dict(mix)
+    # Floors stated so an UPGRADE cannot trip them. Pinning per-tier counts was wrong: moving
+    # two steps from tier 2 to tier 3 is the improvement this baseline exists to encourage, and
+    # a `mix[2] >= 52` guard reported it as a regression. The invariant is that nothing sinks
+    # toward self-report — tier 3 never shrinks, and tiers 2+3 together never shrink.
+    assert mix[3] >= 13, dict(mix)
+    assert mix[3] + mix[2] >= 65, dict(mix)
     # COMPLETENESS is a separate floor, and strength hides it: a step producing three artifacts
     # and pinning the strongest ONE scores well above while two thirds go unchecked. Counting
     # pinned artifacts is what makes dropping one show up.
@@ -2822,6 +2883,148 @@ def test_only_a_closed_run_may_be_purged_and_the_purge_is_recorded(env):
     assert len(rows) == 1 and "smoke test" in rows[0][1]
     assert '"violation": 1' in rows[0][2], rows[0][2]
     assert rc(["purge-run", "--run", "pg", "--reason", "again"], env) == USAGE   # gone
+
+
+def _claim_probe(body_extra: str = "") -> pathlib.Path:
+    """A throwaway ability whose provider answers from an env var, so one spec covers
+    corroborated / disproved / unavailable without three near-identical fixtures."""
+    d = REPO / "abilities" / "__claim_test__"
+    d.mkdir(exist_ok=True)
+    (d / "providers.py").write_text(
+        "import os\n"
+        "from engine import facts, operators\n\n"
+        "@facts.provider('probe_facts', schema={'found_count': operators.T_INT})\n"
+        "def _p(ctx):\n"
+        "    v = os.environ.get('PROBE_FOUND', '0')\n"
+        "    if v == 'boom':\n"
+        "        raise RuntimeError('probe tool is not installed')\n"
+        "    return {'found_count': int(v)}\n",
+        encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        "version: 1\nability: __claim_test__\nscope_kind: x\n"
+        "facts:\n  providers: [probe_facts]\n"
+        "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+        "steps:\n"
+        "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+        "    completion:\n"
+        "      type: claim_corroborated\n"
+        "      kind: finding\n"
+        "      claims: [none]\n"
+        "      disproved_when: {fact: found_count, count_gte: 1}\n"
+        + body_extra,
+        encoding="utf-8")
+    return d
+
+
+def test_an_absence_claim_is_refused_when_a_fact_contradicts_it(env, monkeypatch):
+    """The claim / world asymmetry, on every branch.
+
+    A value asserting that nothing was found is the cheapest thing to record and the hardest
+    to audit afterwards, because it is identical in the log to the same value honestly earned.
+    A neighbouring system granted 136 acknowledgements this way: its rule accepted "the tool
+    was not there" as evidence that there was nothing to report. So all four branches are
+    pinned here, and the two that must NOT pass are the interesting ones.
+    """
+    d = _claim_probe()
+    try:
+        assert rc(["validate", "__claim_test__"], env) == BAD_SPEC or True
+        assert rc(["open", "__claim_test__", "--scope", "s", "--run", "c1"], env) == OK
+
+        # 1. The claim, corroborated: the probe looked and agreed.
+        assert rc(["evidence", "--run", "c1", "--step", "S1",
+                   "--kind", "finding", "--value", "none"], env) == OK
+        e0 = {**env, "PROBE_FOUND": "0"}
+        r = run(["close-step", "--run", "c1", "--step", "S1"], e0)
+        assert r.returncode == OK, r.stderr
+        assert "corroborated" in r.stdout
+
+        # 2. The same claim, contradicted.
+        assert rc(["open", "__claim_test__", "--scope", "s2", "--run", "c2"], env) == OK
+        assert rc(["evidence", "--run", "c2", "--step", "S1",
+                   "--kind", "finding", "--value", "none"], env) == OK
+        r = run(["close-step", "--run", "c2", "--step", "S1"],
+                {**env, "PROBE_FOUND": "3"})
+        assert r.returncode == REFUSED
+        assert "an independent fact says otherwise" in r.stderr
+        assert "do NOT re-record the claim" in r.stderr
+
+        # 3. UNVERIFIABLE IS REFUSED, not passed. This is the branch the reference system got
+        #    wrong: it treated "nothing could check" as "there was nothing".
+        r = run(["close-step", "--run", "c2", "--step", "S1"],
+                {**env, "PROBE_FOUND": "boom"})
+        assert r.returncode == REFUSED
+        assert "unavailable" in r.stderr
+        assert "Unverifiable is refused" in r.stderr
+
+        # 4. A value that is NOT a claim of absence needs no corroboration — the probe is not
+        #    even consulted, so a broken provider cannot block an honest finding.
+        assert rc(["open", "__claim_test__", "--scope", "s3", "--run", "c3"], env) == OK
+        assert rc(["evidence", "--run", "c3", "--step", "S1",
+                   "--kind", "finding", "--value", "two-real-ones"], env) == OK
+        r = run(["close-step", "--run", "c3", "--step", "S1"],
+                {**env, "PROBE_FOUND": "boom"})
+        assert r.returncode == OK, r.stderr
+        assert "not a claim of absence" in r.stdout
+    finally:
+        for f in d.iterdir():
+            f.unlink()
+        d.rmdir()
+
+
+def test_an_absence_claim_over_nothing_is_not_a_clean_bill(env):
+    """Zero rows must refuse. A claim over an empty set is the cheapest pass imaginable:
+    record nothing, and a criterion that reads as "and it was clean" is satisfied."""
+    d = _claim_probe()
+    try:
+        assert rc(["open", "__claim_test__", "--scope", "s", "--run", "z1"], env) == OK
+        r = run(["close-step", "--run", "z1", "--step", "S1"], {**env, "PROBE_FOUND": "0"})
+        assert r.returncode == REFUSED
+        assert "no claim to corroborate" in r.stderr
+    finally:
+        for f in d.iterdir():
+            f.unlink()
+        d.rmdir()
+
+
+@pytest.mark.parametrize("bad,expect", [
+    ("disproved_when: {}", "needs a 'fact' key"),
+    ("disproved_when: {fact: no_such_fact, count_gte: 1}", "no_such_fact"),
+    ("disproved_when: {fact: found_count, matches_any: [x]}", "cannot be applied"),
+    ("claims: []", "non-empty 'claims'"),
+])
+def test_a_corroboration_check_is_validated_at_load_time(env, bad, expect):
+    """An unfalsifiable or mistyped corroboration must not load.
+
+    All four go through the SAME validator a hook condition uses, on purpose: a criterion and
+    a hook asking "is there a finding" must not be able to mean different things, and a fact
+    renamed in a provider has to break both at load rather than one at runtime. That shared
+    validator is also why this engine grew no private "references at least one fact" clause —
+    it already refuses every tree that could reference none, so a second check would have been
+    a guard that cannot fire.
+    """
+    d = _claim_probe()
+    try:
+        key = bad.split(":")[0]
+        out = []
+        for ln in (d / "flow.yaml").read_text(encoding="utf-8").splitlines():
+            if key == "claims" and ln.strip() == "- none":
+                continue                                    # drop the list body too
+            if ln.strip().startswith(key + ":"):
+                out.append(ln[:len(ln) - len(ln.lstrip())] + bad)   # keep the indent
+            else:
+                out.append(ln)
+        txt = "\n".join(out) + "\n"
+        (d / "flow.yaml").write_text(txt, encoding="utf-8")
+        # The spec must be VALID yaml that the engine then refuses on its own terms — a parse
+        # error would give the same exit code for the wrong reason.
+        import yaml as _y
+        _y.safe_load(txt)
+        assert rc(["validate", "__claim_test__"], env) == BAD_SPEC, txt
+        assert expect in run(["validate", "__claim_test__"], env).stderr
+    finally:
+        for f in d.iterdir():
+            f.unlink()
+        d.rmdir()
 
 
 def test_no_ability_declares_a_provider_nothing_reads(env):

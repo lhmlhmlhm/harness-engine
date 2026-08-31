@@ -41,6 +41,7 @@ GATE_AFFIRM = "affirm"
 GATE_PREAUTH_PREFIX = "preauth:"
 
 
+from . import conditions as conditionsmod
 from .conditions import ConditionError as ConditionErrorAlias
 
 
@@ -978,6 +979,43 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
                 f"the run's shape must get the engine's answer, not a provider's."
             )
         facts_schema["run_variant"] = "str"
+
+    # A completion criterion that consults a DERIVED fact is validated against the same
+    # schema, with the same validator, as a hook condition. One vocabulary: a criterion and a
+    # hook asking "is there a blocking finding" must not be able to mean different things, and
+    # a fact renamed in a provider has to break BOTH at load time or it breaks one at runtime.
+    def _check_fact_conditions(spec: dict, where: str) -> None:
+        t = str(spec.get("type"))
+        if t == "all_checks":
+            for i, sub in enumerate(spec.get("checks") or []):
+                if isinstance(sub, dict):
+                    _check_fact_conditions(sub, f"{where} check[{i}]")
+            return
+        if t != "claim_corroborated":
+            return
+        claims = spec.get("claims")
+        if not isinstance(claims, list) or not claims:
+            raise FlowError(
+                f"{path}: {where}: claim_corroborated needs a non-empty 'claims' list — "
+                f"which recorded values assert that nothing was found."
+            )
+        try:
+            conditionsmod.validate(spec.get("disproved_when"), facts_schema,
+                                   f"{path}: {where} disproved_when")
+        except ConditionErrorAlias as exc:
+            raise FlowError(str(exc)) from None
+        # NO SEPARATE "references at least one fact" CHECK. It was written and then removed:
+        # `conditions.validate` already refuses every tree that could reference none — a leaf
+        # must carry `fact`, and a combinator must be non-empty — so the extra clause could not
+        # change any outcome. A guard that cannot fire is the thing this engine spends its
+        # refusals on elsewhere; keeping one here because it reads carefully would be worse
+        # than not having it, since it would look like the unfalsifiable case was covered by
+        # something of its own.
+
+    for s_ in steps.values():
+        _check_fact_conditions(s_.completion, f"step '{s_.id}'")
+    for pid, g in phase_goals.items():
+        _check_fact_conditions(g, f"phase '{pid}' goal")
 
     hooks_raw = raw.get("hooks") or []
     try:
