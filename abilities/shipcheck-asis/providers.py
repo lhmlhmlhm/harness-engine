@@ -35,6 +35,7 @@ Two reasons, and the second is why it stays that way:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 import sys
@@ -53,6 +54,8 @@ ASSERTIONS = TOOLS / "run-assertions.py"
 CLASSIFY_GATE = TOOLS / "classify-gate.py"
 NOISE_RULES = TOOLS / "config" / "analyzer-noise-rules.yaml"
 COMMENT_CLASSIFY = TOOLS / "analyzer-comment-classify.py"
+RUN_METRICS = TOOLS / "analyze-run-metrics.py"
+SESSIONS_DIR = Path("~/.kiro/sessions/cli")
 
 
 def _change_set_from_evidence(run_id: str) -> dict:
@@ -193,6 +196,24 @@ def _blast_radius(ctx: dict) -> dict:
     }
 
 
+def _run_tool_text(script: Path, *args: str, timeout: int = 60):
+    """Shell out to a copied tool that emits TEXT, not JSON.
+
+    A separate runner rather than a flag on the JSON one: the two differ in what counts as
+    a usable answer, and folding them together would mean one of the two loses its check.
+    Here an empty stdout on a nominally-successful exit is a real failure — the tool is
+    supposed to have printed a report — whereas a non-zero exit is information the caller
+    interprets, not an error to raise on.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(script), *args],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if proc.returncode == 0 and not proc.stdout.strip():
+        raise RuntimeError(f"{script.name} exited 0 but printed nothing")
+    return proc.stdout, proc.returncode
+
+
 def _run_tool(script: Path, *args: str, stdin: str | None = None, timeout: int = 180):
     """Shell out to a copied tool. Raises on a genuine failure — never returns silence."""
     proc = subprocess.run(
@@ -313,3 +334,62 @@ def _review_comments(ctx: dict) -> dict:
                                  for r in actionable),
         "classifier_ran": True,
     }
+
+
+@facts.provider("run_metrics",
+                requires=({"file": "tools/analyze-run-metrics.py"},
+                          {"file": "~/.kiro/sessions/cli"}),
+                schema={
+    # Whether the runtime record could actually be READ and had turns in the window.
+    # Distinct from the capability: the engine answers "is the session store present at
+    # all", this answers "was there anything in it for this run". Collapsing the two would
+    # put an environment question and a data question behind one boolean, and the flow could
+    # then no longer tell "not running under that runtime" from "running, nothing recorded".
+    "metrics_available": operators.T_BOOL,
+    "run_turns": operators.T_INT,
+    "run_calls": operators.T_INT,
+    "run_credits": operators.T_STR,
+    "run_peak_ctx_pct": operators.T_INT,
+})
+def _run_metrics(ctx: dict) -> dict:
+    """Numbers about the run itself, derived from the agent runtime's own record.
+
+    WHY THIS ONE, out of the pure-compute tools that were candidates. Its output is the only
+    thing in that group this engine has something to compare AGAINST: a step records a
+    metrics summary, and until now that criterion was "a row of this kind exists" — which
+    accepts numbers nobody produced. The other candidates compute over the source system's
+    OWN spec tree and history corpus, and this engine has neither those files nor a reason to
+    audit them, so wiring them would have added providers with nothing to read them.
+
+    The tool is copied verbatim and takes its window from the run's own open time, so the
+    numbers describe this run rather than whatever else the machine has been doing.
+    """
+    empty = {"metrics_available": False, "run_turns": 0, "run_calls": 0,
+             "run_credits": "0", "run_peak_ctx_pct": 0}
+    from engine import store
+    conn = store.connect(read_only=True)
+    try:
+        row = store.get_run(conn, str(ctx.get("run_id") or ""))
+    finally:
+        conn.close()
+    if row is None:
+        return empty
+    out, rc = _run_tool_text(RUN_METRICS, "--since", str(row["opened_at"]),
+                             "--mode", "plan-doc")
+    # rc 1 = the runtime session could not be identified; 2 = identified but no turns in the
+    # window; 3 = its record file is missing. All three are honest "no numbers", and none of
+    # them is a capability problem — the store directory exists or this provider would not
+    # have been called at all.
+    if rc != 0:
+        return empty
+    got = dict(empty)
+    got["metrics_available"] = True
+    m = re.search(r"Turns:\s*(\d+)\s*/\s*Calls:\s*(\d+)\s*/\s*Credits:\s*([\d.]+)", out)
+    if m:
+        got["run_turns"] = int(m.group(1))
+        got["run_calls"] = int(m.group(2))
+        got["run_credits"] = m.group(3)
+    m = re.search(r"Peak context:\s*([\d.]+)%", out)
+    if m:
+        got["run_peak_ctx_pct"] = int(float(m.group(1)))
+    return got

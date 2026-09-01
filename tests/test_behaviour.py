@@ -206,6 +206,44 @@ def test_transcribed_flow_prose_names_no_internal_systems(env):
 
 
 
+def _close_step_honestly(env, run_id: str, sid: str, step_raw: dict, counts: dict | None = None):
+    """Close a step, and when a claim of absence is DISPROVED, do what an honest run does.
+
+    Shared by both full-flow drivers because they were drifting: the retry lived in one of
+    them, so adding a corroborated criterion elsewhere in the flow broke the other with an
+    unrelated-looking exit 3. A driver duplicated is a driver that stops testing the same
+    thing.
+
+    `_satisfy` deliberately records the claim of absence — the value that needs no further
+    work — so this path is REACHED rather than dodged. If the world contradicts it, record
+    what is really the case and close. If the flow declares no non-claim value, the step
+    genuinely cannot be closed here, and that is reported as such.
+    """
+    r = run(["close-step", "--run", run_id, "--step", sid], env)
+    if r.returncode == REFUSED and "claim_corroborated" in r.stderr:
+        assert "an independent fact says otherwise" in r.stderr or \
+               "is unavailable" in r.stderr, (sid, r.stderr)
+        if counts is not None:
+            counts["claim_disproved"] = counts.get("claim_disproved", 0) + 1
+        for rq in predicates_requirements(step_raw.get("completion") or {}):
+            if not rq.get("claims"):
+                continue
+            legal = rq.get("must_be_one_of") or _truthful_values(step_raw, rq["kind"])
+            alt = [v for v in legal if v not in rq["claims"]]
+            # A step MAY legitimately offer no alternative — a criterion whose every legal
+            # value asserts having consulted something external cannot be satisfied when that
+            # thing is unreachable. Saying so beats a StopIteration from inside the driver.
+            assert alt, (
+                f"{sid}: the claim on {rq['kind']!r} was disproved and the flow declares no "
+                f"honest alternative (legal values {legal}, all of them claims). This step "
+                f"cannot be closed in this environment."
+            )
+            assert rc(["evidence", "--run", run_id, "--step", sid,
+                       "--kind", rq["kind"], "--value", alt[0]], env) == OK, sid
+        r = run(["close-step", "--run", run_id, "--step", sid], env)
+    return r
+
+
 def predicates_requirements(spec: dict) -> list[dict]:
     from engine import predicates
     return predicates.requirements(spec)
@@ -400,24 +438,7 @@ def test_the_real_flow_end_to_end_with_every_mechanism(env, tmp_path):
             counts["preauth"] += 1
 
         _satisfy(env, "full", sid, s.get("completion") or {})
-        r = run(["close-step", "--run", "full", "--step", sid], env)
-        if r.returncode == REFUSED and "claim_corroborated" in r.stderr:
-            # THE CLAIM WAS DISPROVED BY THE WORLD, on the real walk. `_satisfy` records the
-            # claim of absence on purpose (the value that needs no further work), and here a
-            # provider that had actually looked said otherwise. This is the whole mechanism
-            # firing on a real repository rather than in a fixture — count it, then do what an
-            # honest run does: record what was really found and proceed.
-            assert "an independent fact says otherwise" in r.stderr, sid
-            counts["claim_disproved"] += 1
-            reqs = [x for x in predicates_requirements(s.get("completion") or {})
-                    if x.get("claims")]
-            for rq in reqs:
-                truthful = next(v for v in (rq.get("must_be_one_of")
-                                            or _truthful_values(s, rq["kind"]))
-                                if v not in rq["claims"])
-                assert rc(["evidence", "--run", "full", "--step", sid,
-                           "--kind", rq["kind"], "--value", truthful], env) == OK, sid
-            r = run(["close-step", "--run", "full", "--step", sid], env)
+        r = _close_step_honestly(env, "full", sid, s, counts)
         assert r.returncode == OK, f"{sid}: {r.stderr}"
         counts["closed"] += 1
 
@@ -731,7 +752,8 @@ def test_the_real_flow_closes_without_force(env, tmp_path):
         _satisfy(env, "real", sid, s.get("completion") or {})
         if sid == "E22b":
             continue  # the exclusive sibling of E22a; closing one is enough
-        assert rc(["close-step", "--run", "real", "--step", sid], env) == OK, sid
+        r = _close_step_honestly(env, "real", sid, s)
+        assert r.returncode == OK, f"{sid}: {r.stderr}"
 
     # Conditional hooks may have raised obligations along the way; discharge them, since
     # the point of this test is that STEPS close cleanly, not that hooks never fire.
@@ -3248,6 +3270,191 @@ def test_a_corroboration_check_is_validated_at_load_time(env, bad, expect):
         for f in d.iterdir():
             f.unlink()
         d.rmdir()
+
+
+def test_a_pure_compute_tool_is_wired_through_the_provider_seam(env):
+    """C1: a copied tool computes, a provider declares, a criterion decides.
+
+    The tool is byte-identical to its source and emits TEXT, not JSON, so the seam had to
+    absorb a second output shape rather than the ability adapting the tool. What it buys is
+    a criterion that was previously "a row of this kind exists" — which accepts numbers
+    nobody produced — becoming a claim that an independent record can contradict.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+    assert "run_metrics" in _f.registered()
+    caps = _f.capabilities("run_metrics")
+    kinds = [next(iter(d)) for d in caps]
+    assert kinds == ["file", "file"], caps
+    # The tool's own presence AND the runtime record it reads are both declared. Declaring
+    # only the tool would make "this machine has no such runtime" look like "the runtime is
+    # empty" — the pair the whole capability layer exists to keep apart.
+    assert any("analyze-run-metrics.py" in str(d.get("file", "")) for d in caps), caps
+    assert any("sessions" in str(d.get("file", "")) for d in caps), caps
+    tool = REPO / "abilities" / "shipcheck-asis" / "tools" / "analyze-run-metrics.py"
+    src = pathlib.Path.home() / ".kiro/skills/ship-check/scripts/analyze-run-metrics.py"
+    assert tool.is_file()
+    if src.is_file():
+        assert tool.read_bytes() == src.read_bytes(), "the copy has drifted from its source"
+    # And the step that reads it declares BOTH a claim and the honest alternative, so the
+    # exit from the claim is in the spec rather than only in a refusal message.
+    import yaml as _y
+    fl = _y.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
+    e19 = next(x for x in fl["steps"] if x["id"] == "E19")
+    checks = e19["completion"]["checks"]
+    legal = next(c["values"] for c in checks if c.get("kind") == "metrics_source"
+                 and c["type"] == "evidence_in")
+    claims = next(c["claims"] for c in checks if c["type"] == "claim_corroborated")
+    assert set(claims) < set(legal), (claims, legal)
+
+
+def test_capability_present_but_no_data_is_its_own_answer(env, monkeypatch):
+    """The second dimension, pinned separately because the flow can absorb either outcome.
+
+    The capability layer answers "is the runtime record present at all" and the provider
+    answers "did it have anything for this run" — two questions the design claims to keep
+    apart. The full-flow driver cannot prove that: it closes the step either way (an
+    uncontradicted claim closes, and a contradicted one closes after recording the honest
+    value), so mutating the provider's honesty flag left the suite green. Asserted here as the
+    pairing it actually is: the flag is true exactly when the tool succeeded.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    from engine import facts as _f, flow as _fl, store as _st
+    _fl.load_extensions("shipcheck-asis")
+    assert rc(["open", "shipcheck-asis", "--scope", str(REPO), "--run", "mx"], env) == OK
+    conn = _st.connect(read_only=True)
+    try:
+        opened = _st.get_run(conn, "mx")["opened_at"]
+    finally:
+        conn.close()
+    tool = REPO / "abilities" / "shipcheck-asis" / "tools" / "analyze-run-metrics.py"
+    proc = subprocess.run([sys.executable, str(tool), "--since", str(opened),
+                           "--mode", "plan-doc"], capture_output=True, text=True)
+    got = _f.gather("run_metrics", {"run_id": "mx", "scope": str(REPO),
+                                    "scope_kind": "workspace", "ability": "shipcheck-asis"})
+    assert got["metrics_available"] is (proc.returncode == 0), (proc.returncode, got)
+    if proc.returncode != 0:
+        # Zeroed, not guessed. Numbers carried over from a failed read would be the exact
+        # thing the criterion above exists to refuse.
+        assert (got["run_turns"], got["run_calls"], got["run_peak_ctx_pct"]) == (0, 0, 0), got
+    # A run_id the store does not have is the same honest nothing, by a different route.
+    absent = _f.gather("run_metrics", {"run_id": "no-such-run", "scope": str(REPO),
+                                       "scope_kind": "workspace", "ability": "shipcheck-asis"})
+    assert absent["metrics_available"] is False, absent
+
+
+def test_a_net_dependent_provider_declares_the_host_and_touches_no_credentials(env):
+    """C2: the shape of a provider that reaches a network, and its two hard limits.
+
+    LIMIT ONE — it must not acquire credentials. Reading a review needs an authenticated
+    session; a provider that went into the user's credential store to get one would trade a
+    far larger permission for a small fact. So authorization is REPORTED, never obtained.
+
+    LIMIT TWO — what it therefore cannot answer. Measured against the real host, an existing
+    review and a nonexistent one return the SAME unauthenticated redirect, so existence is not
+    derivable and no fact claims it. Declaring `cr_exists` would have been the tempting lie:
+    plausible in the schema, unfalsifiable in the output.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("cr-reviewer")
+    caps = _f.capabilities("cr_review_state")
+    assert {"cmd": "curl"} in caps, caps
+    assert any("net" in d and "code.amazon.com" in d["net"] for d in caps), caps
+    schema = _f.schema_of("cr_review_state")
+    # Authorization is a FACT, not a fifth capability kind: the engine can probe presence,
+    # and probing authorization would mean making a real authenticated request, which is
+    # domain knowledge the engine must not hold.
+    assert "cr_needs_authorization" in schema
+    assert "cr_host_answered" in schema
+    assert "cr_exists" not in schema, "existence is not derivable without credentials"
+    # The guard bans USING a credential, not MENTIONING one. A whole-file substring ban was
+    # tried first and was the wrong shape twice over: it forbade the docstring from stating
+    # the rule, and it forbade the SSO_MARKERS table from recognising an auth redirect — the
+    # very thing that lets the provider report "this host wants credentials" without holding
+    # any. So the check walks string literals other than docstrings and looks for credential
+    # FLAGS and credential PATHS.
+    import ast as _ast
+    tree = _ast.parse((REPO / "abilities" / "cr-reviewer" / "providers.py").read_text())
+    docstrings = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.Module, _ast.FunctionDef, _ast.AsyncFunctionDef,
+                             _ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], _ast.Expr) and \
+                    isinstance(body[0].value, _ast.Constant) and \
+                    isinstance(body[0].value.value, str):
+                docstrings.add(id(body[0].value))
+    literals = [n.value for n in _ast.walk(tree)
+                if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+                and id(n) not in docstrings]
+    CRED_FLAGS = ("-b", "--cookie", "-c", "--cookie-jar", "--netrc", "-u", "--user", "-H",
+                  "--header", "--key", "--cert")
+    # Shaped to match credential MATERIAL, not vocabulary. "authorization" alone banned the
+    # fact name `cr_needs_authorization` — the fact whose entire job is to say credentials
+    # would be needed. The colon and the space are what make these header forms, not words.
+    CRED_PATHS = (".midway", ".netrc", ".aws/", ".ssh/", "id_rsa",
+                  "authorization:", "bearer ", "x-api-key")
+    for lit in literals:
+        assert lit.strip() not in CRED_FLAGS, f"provider passes credential flag {lit!r}"
+        low = lit.lower()
+        for pth in CRED_PATHS:
+            assert pth not in low, f"provider names credential material {lit!r}"
+    # And it has no business in the home directory at all.
+    assert "Path.home()" not in (REPO / "abilities" / "cr-reviewer" / "providers.py").read_text()
+
+
+def test_an_unreachable_review_host_refuses_the_claim_of_having_read_it(env):
+    """C2's absence path, deterministic — no network needed to prove it.
+
+    Uses an unresolvable host so the capability is absent by construction. The point is the
+    same asymmetry as everywhere else: "I consulted it and there was nothing" must not be
+    cheaper than consulting it, so a claim that cannot be corroborated is refused and the
+    refusal names the host.
+    """
+    d = REPO / "abilities" / "__net_test__"
+    d.mkdir(exist_ok=True)
+    try:
+        (d / "providers.py").write_text(
+            "from engine import facts, operators\n\n"
+            "@facts.provider('offsite_facts', "
+            "requires=({'net': 'nonexistent-host-for-tests.invalid:443'},), "
+            "schema={'host_answered': operators.T_BOOL})\n"
+            "def _o(ctx):\n    return {'host_answered': True}\n",
+            encoding="utf-8")
+        (d / "flow.yaml").write_text(
+            "version: 1\nability: __net_test__\nscope_kind: cr\n"
+            "facts:\n  providers: [offsite_facts]\n"
+            "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+            "steps:\n"
+            "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+            "    completion:\n"
+            "      type: all_checks\n"
+            "      checks:\n"
+            "      - {type: evidence_in, kind: comments_read, values: [read, none]}\n"
+            "      - type: claim_corroborated\n"
+            "        kind: comments_read\n"
+            "        claims: [read, none]\n"
+            "        disproved_when: {fact: host_answered, equals: false}\n",
+            encoding="utf-8")
+        out = run(["validate", "__net_test__"], env).stdout
+        assert "capabilities: 1 declared, 1 absent" in out, out
+        assert "nonexistent-host-for-tests.invalid" in out, out
+        assert rc(["open", "__net_test__", "--scope", "CR-1", "--run", "n1"], env) == OK
+        assert rc(["evidence", "--run", "n1", "--step", "S1",
+                   "--kind", "comments_read", "--value", "none"], env) == OK
+        r = run(["close-step", "--run", "n1", "--step", "S1"], env)
+        assert r.returncode == REFUSED, r.stdout + r.stderr
+        both = r.stdout + r.stderr
+        assert "nonexistent-host-for-tests.invalid" in both, both
+        assert "is unavailable" in both, both
+    finally:
+        _cap_cleanup(d)
 
 
 def test_no_ability_declares_a_provider_nothing_reads(env):

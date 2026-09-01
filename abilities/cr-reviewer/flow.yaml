@@ -22,7 +22,7 @@ when: |
 facts:
   # 内置 provider：只读本 run 自己的进展（关闭了哪些步、记了哪些 kind），
   # 不碰文件系统也不调外部工具 —— 本流程的 hook 只需要这一类事实。
-  providers: [run_progress]
+  providers: [run_progress, cr_review_state]
 
 prose:
   root: prose/
@@ -87,6 +87,13 @@ steps:
         - type: evidence_in
           kind: existing_comments_read
           values: [read, none]
+        # 两个取值都是「我确实去看过这个 CR」的声称 —— `read` 说看过且有意见，`none` 说
+        # 看过且确实没有。所以两者都要核：评审系统从这台机器根本连不上时，两句都不可能
+        # 为真。这是本仓第一个依赖网络的核对；能力不在时它拒绝并指名主机，不是静默判 false。
+        - type: claim_corroborated
+          kind: existing_comments_read
+          claims: [read, none]
+          disproved_when: {fact: cr_host_answered, equals: false}
     directive: |
       产出：作者/摘要/修订号 + 改动文件清单 + **其他评审人已经提过的意见**
       完成：三者都已记录；既有意见为「已读」或「确实没有」
@@ -228,6 +235,24 @@ guards:
         pattern: '"publish"\s*:\s*true'
 
 hooks:
+  # 异常报告，刻意窄：主机答了，却既没有要凭证（正常的未授权形态）也没有给出页面。
+  # 那是第三种情况 —— 5xx、代理插手、或路径变了 —— 而它与「读到了」在下游长得一样。
+  # 恒触发的告警是噪声，所以这里不报「需要授权」本身：那是无凭证探测的预期答案。
+  - id: cr-host-answered-oddly
+    trigger: step_close
+    step: R02
+    when:
+      all_of:
+      - {fact: cr_host_answered, equals: true}
+      - {fact: cr_needs_authorization, equals: false}
+      - {fact: cr_readable, equals: false}
+    mode: contract
+    obligation: true
+    contract: |
+      评审主机答了 HTTP {{fact.cr_http_status}}，但既不是要求凭证、也不是评审页面本身。
+      这一步记下的「既有意见」因此不是从评审系统读来的 —— 说明你实际依据的是什么，然后销账：
+        harness discharge --run {{run_id}} --hook cr-host-answered-oddly \
+          --evidence "<HTTP {{fact.cr_http_status}} 的处置 / 意见实际来自哪里>"
   - id: blockers-with-approve
     trigger: phase_end
     phase: analyze

@@ -29,7 +29,36 @@ facts:
   - blast_radius
   - decision_gate
   - review_comments
+  - run_metrics
 hooks:
+# 两个 hook 读同一个 provider，但问的是两件不同的事，而这正是能力层与 provider 诚实位
+# 各管一维的示例：能力缺失由引擎回答（该 provider 的事实全部不可用，读它的条件直接拒绝），
+# 「在但没数据」由 provider 自己回答（metrics_available=false）。合成一个布尔就会让
+# 「没在这个运行时里跑」与「跑了但窗口内没记录」不可区分。
+- id: metrics-runtime-unreadable
+  trigger: step_close
+  step: E19
+  when:
+    fact: metrics_available
+    equals: false
+  mode: contract
+  obligation: true
+  contract: |
+    运行时记录存在但这次读不到数字（会话认不出 / 窗口内没有 turn / 记录文件缺失）。
+    所以小结里的指标只能是你自己的账，不是抄来的 —— 在小结里明说这一点，然后销账：
+      harness discharge --run {{run_id}} --hook metrics-runtime-unreadable \
+        --evidence "<为什么读不到 / 小结里怎么标注的>"
+- id: metrics-context-pressure
+  trigger: step_close
+  step: E19
+  when:
+    fact: run_peak_ctx_pct
+    count_gte: 85
+  mode: contract
+  contract: |
+    这次运行的上下文峰值到了 {{fact.run_peak_ctx_pct}}%（turns={{fact.run_turns}} /
+    calls={{fact.run_calls}} / credits={{fact.run_credits}}）。接近上限的运行里，
+    早期读到的东西可能已经不在上下文里了 —— 小结若依赖开头的判断，值得回去核一遍。
 - id: blast-radius-failures
   trigger: phase_end
   phase: verification
@@ -1680,8 +1709,27 @@ steps:
   deps:
   - E12
   completion:
-    type: evidence
-    kind: session_metrics
+    type: all_checks
+    checks:
+    - type: evidence
+      kind: session_metrics
+    # 「这些数字来自运行时记录」是一句可以核对的声称，而它是这一步唯一不需要额外工作的答案。
+    # 原判据只要求「有这么一行」，于是一份没人产出过的数字与一份如实抄下来的在日志里一样。
+    # 运行时记录读不到时仍有诚实出口：把来源记成 own_account，那不是声称查无，不必核对。
+    # 合法取值必须写出来，否则「不要声称 runtime」这条出口只存在于拒绝信息里：
+    # 判据说了什么会被核对，却没说还可以记什么，读 spec 的人无从知道诚实路径叫什么。
+    - type: evidence_in
+      kind: metrics_source
+      values:
+      - runtime
+      - own_account
+    - type: claim_corroborated
+      kind: metrics_source
+      claims:
+      - runtime
+      disproved_when:
+        fact: metrics_available
+        equals: false
 - id: E20
   phase: cleanup
   stage: close

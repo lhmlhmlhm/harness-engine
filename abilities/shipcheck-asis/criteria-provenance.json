@@ -1793,10 +1793,34 @@
     "kind": "session_metrics"
    },
    "live_spec": {
-    "type": "evidence",
-    "kind": "session_metrics"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence",
+      "kind": "session_metrics"
+     },
+     {
+      "type": "evidence_in",
+      "kind": "metrics_source",
+      "values": [
+       "runtime",
+       "own_account"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "metrics_source",
+      "claims": [
+       "runtime"
+      ],
+      "disproved_when": {
+       "fact": "metrics_available",
+       "equals": false
+      }
+     }
+    ]
    },
-   "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。"
+   "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。\n[2026-09-01 升级] 散文的完成标准是「指标已汇总」，原判据只要求有这么一行 —— 一份没人产出过的数字与一份如实抄下来的因此不可区分。运行时自己的记录可以独立算出 turns/calls/credits，所以「这些数字来自运行时」这句声称要经它核对；读不到时的诚实出口是 own_account。"
   },
   "E20": {
    "tier_at_derivation": "T2",
