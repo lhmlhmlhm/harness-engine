@@ -109,7 +109,7 @@ def test_bad_spec_exits_bad_spec_and_never_touches_the_store(env, tmp_path, monk
     broken.mkdir(exist_ok=True)
     (broken / "flow.yaml").write_text(
         # depends on a step that does not exist
-        "version: 1\nability: __broken_test__\nscope_kind: x\n"
+        "version: 1\nability: __broken_test__\nrole: fixture\nscope_kind: x\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    deps: [NOPE]\n",
         encoding="utf-8",
@@ -134,7 +134,7 @@ def test_unknown_step_key_is_fatal(env):
     d = REPO / "abilities" / "__key_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __key_test__\nscope_kind: x\n"
+        "version: 1\nability: __key_test__\nrole: fixture\nscope_kind: x\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    gaet: affirm\n    stage: oops\n",
         encoding="utf-8",
@@ -152,7 +152,7 @@ def test_unknown_root_key_is_fatal(env):
     d = REPO / "abilities" / "__root_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __root_test__\nscope_kind: x\nstages: []\n"
+        "version: 1\nability: __root_test__\nrole: fixture\nscope_kind: x\nstages: []\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n",
         encoding="utf-8",
@@ -770,10 +770,19 @@ def test_the_real_flow_closes_without_force(env, tmp_path):
 
 
 def _spec(env, name: str, body: str) -> Path:
+    """A throwaway spec for one assertion. Declared `role: fixture` — which is what it is.
+
+    The engine requires a `production` ability to carry routing (`when:`), so every spec has
+    to say which kind it is. That rule caught ~70 specs here the moment it landed, and giving
+    each one an invented `when:` would have been the wrong repair: they exist to exercise the
+    engine, not to be reached for. A body may still override the role by declaring its own.
+    """
     d = REPO / "abilities" / name
     d.mkdir(exist_ok=True)
+    role = "" if "role:" in body else "role: fixture\n"
     (d / "flow.yaml").write_text(
-        f"version: 1\nability: {name}\nscope_kind: s\n{body.strip()}\n", encoding="utf-8"
+        f"version: 1\nability: {name}\n{role}scope_kind: s\n{body.strip()}\n",
+        encoding="utf-8",
     )
     return d
 
@@ -1532,7 +1541,7 @@ def test_guard_pointing_at_ungated_step_is_rejected(env):
     d = REPO / "abilities" / "__inert_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __inert_test__\nscope_kind: x\n"
+        "version: 1\nability: __inert_test__\nrole: fixture\nscope_kind: x\n"
         "guards:\n  act: S1\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    gate: none\n",
@@ -2919,7 +2928,7 @@ def _cap_probe(requires: str, cond: str = "{fact: n, count_gte: 1}") -> pathlib.
         "    return {'n': 0}\n",
         encoding="utf-8")
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __cap_test__\nscope_kind: x\n"
+        "version: 1\nability: __cap_test__\nrole: fixture\nscope_kind: x\n"
         "facts:\n  providers: [cap_facts]\n"
         "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
         "steps:\n"
@@ -3005,7 +3014,7 @@ def test_an_absent_capability_stops_only_the_steps_that_read_it(env):
             "def _b(ctx):\n    return {'b': 7}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __cap2_test__\nscope_kind: x\n"
+            "version: 1\nability: __cap2_test__\nrole: fixture\nscope_kind: x\n"
             "facts:\n  providers: [here_facts, gone_facts]\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
             "steps:\n"
@@ -3052,7 +3061,7 @@ def test_an_unavailable_fact_may_not_silently_pin_a_run_shape(env):
             "def _v(ctx):\n    return {'mode': 'beta'}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __capv_test__\nscope_kind: x\n"
+            "version: 1\nability: __capv_test__\nrole: fixture\nscope_kind: x\n"
             "facts:\n  providers: [vfacts]\n"
             "variants:\n  values: [alpha, beta]\n  default: alpha\n  fact: mode\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
@@ -3146,7 +3155,7 @@ def _claim_probe(body_extra: str = "") -> pathlib.Path:
         "    return {'found_count': int(v)}\n",
         encoding="utf-8")
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __claim_test__\nscope_kind: x\n"
+        "version: 1\nability: __claim_test__\nrole: fixture\nscope_kind: x\n"
         "facts:\n  providers: [probe_facts]\n"
         "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
         "steps:\n"
@@ -3428,7 +3437,7 @@ def test_an_unreachable_review_host_refuses_the_claim_of_having_read_it(env):
             "def _o(ctx):\n    return {'host_answered': True}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __net_test__\nscope_kind: cr\n"
+            "version: 1\nability: __net_test__\nrole: fixture\nscope_kind: cr\n"
             "facts:\n  providers: [offsite_facts]\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
             "steps:\n"
@@ -3487,23 +3496,108 @@ def test_no_ability_declares_a_provider_nothing_reads(env):
             )
 
 
-def test_every_ability_declares_when_to_reach_for_it(env):
-    """Routing must be DERIVABLE, not maintained by hand next to the abilities.
+def test_routing_and_the_fixture_role_are_two_sides_of_one_rule(env):
+    """Routing must be DERIVABLE, and a flow excluded from the reports must be UNREACHABLE.
 
-    A hand-kept "which ability for what" table is stale the moment a seventh ability lands, and
-    a quietly-stale routing table sends work into the wrong lifecycle — which is worse than
-    having no table, because it looks authoritative.
+    A hand-kept "which ability for what" table is stale the moment another ability lands, and a
+    quietly-stale routing table sends work into the wrong lifecycle — worse than no table,
+    because it reads authoritative. So every production ability carries its own `when:`.
+
+    The second half is what stops the fixture role from being an escape hatch. A role that only
+    silenced a report could be claimed by anything; here it is tied to something structural and
+    checked at load — a fixture must NOT carry `when:`, so it cannot be reached at all. The two
+    requirements point in opposite directions, which is what makes neither the cheap one to
+    claim: dodging the criteria report costs you reachability.
     """
     from engine import flow as flowmod
-    missing = []
+    missing, reachable = [], []
     for name in flowmod.available_abilities():
         f = flowmod.load(name)
-        if len(f.when.strip()) < 20:
+        if f.role == flowmod.ROLE_FIXTURE:
+            if f.when.strip():
+                reachable.append(name)
+        elif len(f.when.strip()) < 20:
             missing.append(name)
-    assert not missing, f"no usable `when:` on: {missing}"
+    assert not missing, f"no usable `when:` on production ability: {missing}"
+    assert not reachable, f"fixture is routable, which defeats the role: {reachable}"
+    # At least one of each, or this asserts nothing.
+    roles = {flowmod.load(n).role for n in flowmod.available_abilities()}
+    assert roles == {flowmod.ROLE_PRODUCTION, flowmod.ROLE_FIXTURE}, roles
+    # A fixture must not be load-bearing for real work either.
+    for name in flowmod.available_abilities():
+        f = flowmod.load(name)
+        if f.role != flowmod.ROLE_FIXTURE:
+            for dep in f.requires:
+                assert flowmod.load(dep).role != flowmod.ROLE_FIXTURE, (name, dep)
     # And the capability map must NOT duplicate what `when:` already says.
     cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
     assert "harness abilities" in cap, "the map must point at the derivable source"
+
+
+@pytest.mark.parametrize("body,expect", [
+    ("role: nonsense", "not one of"),
+    ("role: fixture\nwhen: |\n  这条文本让夹具变得可路由，必须在加载期被拒绝\n", "is the hint an agent reads"),
+    ("role: production", "no usable `when:`"),
+])
+def test_the_fixture_role_is_checked_at_load_time(env, body, expect):
+    """An unknown role, a routable fixture, and a production flow with no routing."""
+    d = _spec(env, "__role_test__",
+              f"{body}\nphases:\n  - id: p\nsteps:\n  - id: S1\n    phase: p\n"
+              "    title: t\n    directive: d\n    completion: {type: attest}\n")
+    try:
+        assert rc(["validate", "__role_test__"], env) == BAD_SPEC
+        assert expect in run(["validate", "__role_test__"], env).stderr
+    finally:
+        _rm(d)
+
+
+def test_a_spec_that_declares_nothing_lands_on_the_strict_role(env):
+    """The default must be the STRICT role, not the lenient one.
+
+    This is what stops `fixture` from being reachable by silence. A spec saying nothing about
+    its role is `production`, so it is refused for missing routing rather than quietly enjoying
+    the fixture exemption from the criteria report. Written by hand instead of through the
+    shared `_spec` helper on purpose — that helper injects `role: fixture`, which is right for
+    a throwaway spec and would swallow the very case under test here.
+    """
+    d = REPO / "abilities" / "__default_role_test__"
+    d.mkdir(exist_ok=True)
+    try:
+        (d / "flow.yaml").write_text(
+            "version: 1\nability: __default_role_test__\nscope_kind: s\n"
+            "phases:\n  - id: p\nsteps:\n  - id: S1\n    phase: p\n"
+            "    title: t\n    directive: d\n    completion: {type: attest}\n",
+            encoding="utf-8")
+        assert rc(["validate", "__default_role_test__"], env) == BAD_SPEC
+        err = run(["validate", "__default_role_test__"], env).stderr
+        assert "no usable `when:`" in err, err
+        # And the refusal must name the alternative, or the only way out looks like inventing
+        # a routing hint for something that should never be routed.
+        assert "role: fixture" in err, err
+    finally:
+        _rm(d)
+
+
+def test_a_fixture_is_kept_out_of_the_routing_roster_and_the_strength_report(env):
+    """Both omissions, asserted where a reader would look for them.
+
+    The roster is what an agent reads to choose an ability, so an unreachable entry there is
+    noise at best and a mis-route at worst — but a human still has to be able to find these,
+    hence the trailing line. The strength report omits them because a fixture's criteria are
+    weak BY DESIGN: one keeps a deliberate `attest` step as the honest floor, and reporting
+    that as a shortfall is what happened for several rounds before the role existed.
+    """
+    out = run(["abilities"], env).stdout
+    assert "fixtures (not routable): authoring, delivery" in out, out
+    for name in ("authoring", "delivery"):
+        # Listed once, in the footer — not as a routable entry with its own block.
+        assert f"✅ {name}" not in out, out
+        v = run(["validate", name], env).stdout
+        assert "criteria strength not reported" in v, v
+        assert "criteria: " not in v, v
+        assert "artifacts: " not in v, v
+    prod = run(["validate", "shipcheck-asis"], env).stdout
+    assert "criteria: " in prod and "artifacts: " in prod, prod
 
 
 def test_a_review_publish_is_guarded(env, tmp_path):

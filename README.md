@@ -17,8 +17,8 @@ harness-engine/
 │   ├── proof.py             gate 防伪 witness 注册表
 │   └── harness.py           CLI
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
-│   ├── delivery/flow.yaml   交付生命周期（10 步 / 4 阶段 / 3 guard）
-│   └── authoring/flow.yaml  文档收敛（5 步 / 3 阶段 / 0 guard / 菱形依赖）
+│   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
+│   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
 └── tests/                   44 个测试
 ```
 
@@ -86,7 +86,7 @@ steps:
 
 **只有一个消费方的框架不是框架**——没有第二个用例施加压力，抽象只会朝那唯一的实现塌陷。
 
-所以 `authoring` 存在的目的就是**给抽象施压**，它被刻意做成与 `delivery` 四处不同：
+所以 `authoring` 被刻意做成与 `delivery` 四处不同——它是 `role: fixture`，存在的目的是**给抽象施压并给机制测试提供夹具**：
 不同的 scope 维度（document 而非 repo）、**零 guard**、**菱形依赖**（B1/B2 从 A1 分叉、
 在 D1 汇合，检验拓扑排序真的在工作）、以 `attest` 为主（诚实承认引擎在这些步骤上只是账本）。
 
@@ -484,6 +484,48 @@ per-run 缓存会在长流程里过期——开头读到的「改了哪些文件
     not: ✘
       ✔ evidence_kinds contains 'open_question'   (actual: '[2 item(s)]')
 ```
+
+### `role: fixture` —— 以及一个报了数轮的假缺口
+
+`delivery` / `authoring` 有一段时间在每份报告里都像是**没做完的 ability**：`value-checked×0`，
+而 `authoring` 还留着一处 `attest`（`UNCHECKED×1`）。我把它当缺口报了好几轮。
+
+**那是分类错误。** 它们不承载工作，它们是**机制测试的夹具**——5 步和 10 步是最便宜的夹具，
+gate / witness / preauth / guard / scope 歧义 / close-run / forced-close / purge 这些机制测试
+（共 24 个测试函数）都跑在它们上面，替代方案是跑 101 步的真实流程。一个夹具需要的是小、稳、
+覆盖机制，**不是强判据**；而 `authoring` 那处 `attest` 是全仓唯一还在演示「最弱下限」的地方，
+把它读成缺口恰好读反了。
+
+所以引擎新增一个声明字段，而不是在报告里加个例外：
+
+```yaml
+role: fixture      # 缺省 production
+```
+
+`validate` 因此不为夹具打印判据强度与产物完整性两行，`abilities` 也不把它们放进 agent 用来
+路由的名录（只在末尾留一行让人能找到）。
+
+**关键是这个标签不能是绕过判据检查的开关。** 一个只会让报告闭嘴的角色，任何 ability 都能声称。
+所以它被绑在一件结构性的事上，并在加载期强制——**夹具必须不可路由**：
+
+| 规则 | 加载期行为 |
+|---|---|
+| `role` 不在 `production` / `fixture` 里 | exit 2 |
+| 夹具声明了 `when:`（agent 用来找能力的提示） | **exit 2** —— 免于报告就不许可被触及 |
+| production 的 `when:` 短于 20 字符 | exit 2 |
+| production 的 `requires:` 指向一个夹具 | 测试拒绝 —— 夹具不许成为真实工作的承重件 |
+| 什么都不声明 | 落 **production**（严格的那个），因此因缺 `when:` 被拒 |
+
+最后一条是重点：**沉默落在严格的角色上，不是宽松的那个。** 两条约束方向相反，所以两个角色
+都不是「便宜的那个」——想免于判据报告，代价是失去可达性。
+
+这条规则一落地就抓到 ~70 处：测试里所有合成 spec 都因缺 `when:` 变红。正确修法不是给它们
+各编一个 `when:`，而是承认它们本来就是夹具并标出来——共享助手 `_spec()` 现在默认注入
+`role: fixture`。
+
+**另外三处如果删掉夹具会连带变成死代码**（这也是保留它们的实际理由）：`mode: command` +
+`fail_closed`（引擎的「效果」缝，`delivery` 是唯一消费方）、内置 provider `git_tree`
+（同上）、以及 `attest` 谓词（`authoring` 是唯一使用者）。
 
 ### provider 声明它需要什么能力，引擎决定缺失意味着什么
 

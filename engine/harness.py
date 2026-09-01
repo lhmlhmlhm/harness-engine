@@ -86,11 +86,18 @@ def cmd_abilities(args) -> int:
     if not names:
         print("(no abilities installed under abilities/)")
         return OK
+    fixtures = []
     for name in names:
         try:
             f = flowmod.load(name)
         except flowmod.FlowError as exc:
             print(f"❌ {name}: INVALID — {str(exc).splitlines()[0]}")
+            continue
+        if f.role == flowmod.ROLE_FIXTURE:
+            # Kept OUT of the roster an agent reads to route. An entry that cannot be reached
+            # is noise at best and a mis-route at worst; a trailing line keeps it discoverable
+            # by a human without offering it as a choice.
+            fixtures.append(name)
             continue
         gated = sum(1 for s in f.steps.values() if s.gate != flowmod.GATE_NONE)
         checked = sum(1 for s in f.steps.values()
@@ -110,8 +117,10 @@ def cmd_abilities(args) -> int:
                     print(f"     ↳ {line.strip()}")
         print(f"     facts={'+'.join(f.facts_providers)}({len(f.facts_schema)} declared)"
               f"  hooks={len(f.hooks)} ({conditional} conditional, {obliged} obligation)")
+    if fixtures:
+        print(f"\n   fixtures (not routable): {', '.join(fixtures)}")
+        print("   — engine test scaffolding; each flow.yaml header says why it is kept")
     return OK
-
 
 def cmd_validate(args) -> int:
     """Validate one or all flow specs. Intended for CI on an ability's own repo."""
@@ -141,10 +150,19 @@ def cmd_validate(args) -> int:
         import collections as _c
         tiers = _c.Counter(predicates.strength(st.completion) for st in f.steps.values())
         NAMES = {3: "derived", 2: "value-checked", 1: "record-exists", 0: "UNCHECKED"}
-        print("   criteria: " + " · ".join(
-            f"{NAMES[t]}×{tiers.get(t, 0)}" for t in (3, 2, 1, 0)))
+        if f.role == flowmod.ROLE_FIXTURE:
+            # NOT REPORTED, and the omission is the point. A fixture's criteria are weak
+            # because a fixture does not need strong criteria — it needs to be small, stable
+            # and to reach a mechanism. Printing the tiers here invited reading a deliberate
+            # `attest` floor as an unfinished ability, which is exactly what happened for
+            # several rounds before this role existed.
+            print(f"   role: {f.role} — engine test scaffolding, not routable; "
+                  f"criteria strength not reported")
+        else:
+            print("   criteria: " + " · ".join(
+                f"{NAMES[t]}×{tiers.get(t, 0)}" for t in (3, 2, 1, 0)))
         weak = [st.id for st in f.steps.values() if predicates.strength(st.completion) == 0]
-        if weak:
+        if weak and f.role != flowmod.ROLE_FIXTURE:
             print(f"   ⚠️  {len(weak)} step(s) check nothing: {', '.join(weak[:10])}")
         # COMPLETENESS, alongside strength. They are different failures and one hides the
         # other: a step that produces three artifacts and pins the strongest ONE scores well on
@@ -153,8 +171,9 @@ def cmd_validate(args) -> int:
         pinned = [len([r for r in predicates.requirements(st.completion)
                        if r["what"] == "evidence"]) for st in f.steps.values()]
         multi = sum(1 for n in pinned if n >= 2)
-        print(f"   artifacts: {sum(pinned)} pinned across {len(pinned)} steps"
-              f" ({multi} step(s) pin ≥2)")
+        if f.role != flowmod.ROLE_FIXTURE:
+            print(f"   artifacts: {sum(pinned)} pinned across {len(pinned)} steps"
+                  f" ({multi} step(s) pin ≥2)")
         # CAPABILITIES, probed here rather than left to be discovered mid-run. "Can this
         # machine run this flow" is a question an author asks BEFORE opening a run, and until
         # now the only way to answer it was to walk the flow until something failed — by which

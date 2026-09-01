@@ -37,6 +37,27 @@ SPEC_VERSION = 1
 #   affirm        — a human must affirm, proven by an out-of-band signal
 #   preauth:<key> — a config key may stand in for the human, if it is truthy
 GATE_NONE = "none"
+# WHAT AN ABILITY IS FOR. `production` is the default and the only routable role; `fixture`
+# marks a flow that exists to exercise the ENGINE, not to carry work.
+#
+# WHY THIS IS A DECLARED ROLE AND NOT A COMMENT. Two of the flows here are the cheapest
+# fixtures the mechanism tests have — five and ten steps against a hundred-and-one — so every
+# gate, witness, preauth, guard, scope-ambiguity and close-run test drives one of them. That
+# made them look like unfinished abilities in every report: their criteria are weak because a
+# fixture does not need strong criteria, and one of them keeps a deliberate `attest` step to
+# demonstrate the honest floor. Reporting that as a shortfall for several rounds was a category
+# error — a strength bar meant for transcribed real flows applied to test scaffolding.
+#
+# AND WHY THE LABEL CANNOT BUY A FREE PASS. A role that merely silences a report is an escape
+# hatch: any ability could claim it. So the label is tied to something structural and checked
+# at load — a fixture must be UNROUTABLE. It may not carry `when:` (the routing hint an agent
+# reads), and no production ability may `requires:` one. Conversely `production` is the default
+# and it MUST carry routing. The two constraints point in opposite directions, so neither role
+# is the cheap one to claim.
+ROLE_PRODUCTION = "production"
+ROLE_FIXTURE = "fixture"
+ROLES = (ROLE_PRODUCTION, ROLE_FIXTURE)
+
 GATE_AFFIRM = "affirm"
 GATE_PREAUTH_PREFIX = "preauth:"
 
@@ -170,6 +191,7 @@ class Flow:
     # from the abilities the moment one is added — and a routing table that is quietly wrong
     # sends work to the wrong lifecycle, which is worse than having no table.
     when: str
+    role: str
     # Abilities whose extension registrations this one relies on. Declared so a shared source
     # of truth stays singular without an ability secretly depending on load order.
     requires: tuple[str, ...]
@@ -351,7 +373,7 @@ class Flow:
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget", "on_exhausted"}
-TOP_KEYS = {"when", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
+TOP_KEYS = {"role", "when", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
 STAGE_KEYS = {"id", "guide"}
@@ -496,6 +518,32 @@ def _require(raw: dict, key: str, path: Path, kind=None):
 
 def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     _reject_unknown(raw, TOP_KEYS, "the spec root", path)
+
+    role = str(raw.get("role", ROLE_PRODUCTION)).strip() or ROLE_PRODUCTION
+    if role not in ROLES:
+        raise FlowError(
+            f"{path}: role {role!r} is not one of {', '.join(ROLES)}.\n"
+            f"  '{ROLE_FIXTURE}' means this flow exists to exercise the engine and is not "
+            f"routable; anything else carrying work is '{ROLE_PRODUCTION}'."
+        )
+    when_text = str(raw.get("when", "")).strip()
+    if role == ROLE_FIXTURE and when_text:
+        raise FlowError(
+            f"{path}: a '{ROLE_FIXTURE}' declares `when:`, which is the hint an agent reads to "
+            f"REACH for an ability.\n"
+            f"  A fixture is excluded from the criteria-strength report, so it must not also be "
+            f"reachable — otherwise the label is a way to carry real work with weak criteria.\n"
+            f"  Move the text to a comment, or drop `role: {ROLE_FIXTURE}`."
+        )
+    if role == ROLE_PRODUCTION and len(when_text) < 20:
+        raise FlowError(
+            f"{path}: no usable `when:` (needs at least 20 characters saying when to reach for "
+            f"this ability).\n"
+            f"  Routing has to be derivable from the abilities themselves; a hand-kept table "
+            f"elsewhere is stale the moment one lands and reads authoritative while wrong.\n"
+            f"  If this flow exists to exercise the engine rather than carry work, declare "
+            f"`role: {ROLE_FIXTURE}` instead."
+        )
     version = _require(raw, "version", path)
     if version != SPEC_VERSION:
         raise FlowError(
@@ -1036,6 +1084,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
 
     return Flow(
         when=str(raw.get("when", "")).strip(),
+        role=role,
         requires=requires,
         ability=ability,
         title=str(raw.get("title", ability)),

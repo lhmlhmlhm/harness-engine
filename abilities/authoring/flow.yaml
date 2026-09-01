@@ -1,3 +1,13 @@
+# ── role: fixture ───────────────────────────────────────────────────────────────
+# 这条流程不承载工作，它是**机制测试的夹具**，刻意做成与 `delivery` 处处不同，用来防止
+# 引擎朝单一消费方塌陷：不同的 scope 维度（一份文档而非仓库）、零 guard（这里没有不可逆
+# 的动作，所以 guard 表是缺席而不是填个空壳）、菱形依赖图（B 与 C 从 A 分叉、在 D 汇合）、
+# 以及**以 `attest` 为主**——对输出没有机器可见痕迹的步骤诚实标注它只是一本账。
+#
+# 它保留一处 `attest` 是刻意的：那是全仓唯一还在演示「最弱下限」的地方。因为标了 fixture，
+# 判据强度报告不统计它 —— 否则这处刻意的下限会被读成缺口（那正是它此前被误报数轮的原因）。
+#
+# 它**不带 `when:`**，所以不可被路由；这条由加载期强制，不是文档约定。
 # ability: authoring — converge a loose idea into a reviewed document.
 #
 # This ability exists to put PRESSURE on the engine's abstraction, and it is
@@ -19,12 +29,9 @@
 
 version: 1
 ability: authoring
+role: fixture
 title: 文档收敛流程
 scope_kind: document
-
-when: |
-  施压用的异形能力（5 步，scope 是文档，零 guard，以 attest 为主）。
-  它存在的唯一目的是防止引擎朝单一消费方塌陷 —— 不要用它做实际工作。
 
 # 🧩 GENERIC —— 这个 ability 的事实与 delivery 完全不同：没有文件、没有分支、
 # 没有仓库，只有这个 run 自己的进展。它存在的目的是证明条件机制不隐含假设
