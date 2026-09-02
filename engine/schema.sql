@@ -161,3 +161,39 @@ CREATE TABLE IF NOT EXISTS phase_summary (
     at            TEXT NOT NULL,
     PRIMARY KEY (run_id, phase)
 );
+
+-- Who holds authority over a scope while more than one run is open in it.
+--
+-- WHY A LEASE AND NOT A PARENT POINTER. A parent pointer is a genealogy, and a genealogy
+-- immediately demands answers this engine must not give: does closing the parent close the
+-- child, does the child's progress count toward the parent's, does a child's breach surface
+-- on the parent's ledger. Every answer is a consumer's decision, and one picked here would
+-- be wrong for some consumer. It also mis-describes the common case: a flow that hands work
+-- to another flow days later, in another process, possibly never, is not a containment.
+--
+-- What actually happens when one flow delegates is narrower: FOR A WHILE, A DIFFERENT RUN
+-- HAS AUTHORITY OVER THIS SCOPE. That is a lease. It says nothing about progress, scoring or
+-- cascade — only about who a guard should adjudicate against, which is the one question that
+-- becomes unanswerable when two runs share a scope.
+--
+-- Declared, never inferred. Deducing the relation from timing ("this one opened while that
+-- one was live, so it must be inside it") is the same mistake as resolving a guard with
+-- ORDER BY ... LIMIT 1: it produces a confident answer with nothing behind it.
+CREATE TABLE IF NOT EXISTS scope_lease (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- The scope is stored rather than read back through the grantor so that resolving "who
+    -- holds this scope" is one indexed lookup on the columns below instead of a join. It also
+    -- keeps the lease's subject explicit: a lease is ABOUT a scope, and deriving that from a
+    -- run row would couple the two the moment either could disagree.
+    scope_kind      TEXT NOT NULL,
+    scope_key       TEXT NOT NULL,
+    grantor_run_id  TEXT NOT NULL REFERENCES run(run_id) ON DELETE CASCADE,
+    granted_at_step TEXT NOT NULL,          -- where in the grantor's flow this happened
+    holder_run_id   TEXT NOT NULL REFERENCES run(run_id) ON DELETE CASCADE,
+    granted_at      TEXT NOT NULL,
+    released_at     TEXT,
+    released_by     TEXT                    -- what ended it, for the ledger
+);
+
+CREATE INDEX IF NOT EXISTS idx_lease_active
+    ON scope_lease (scope_kind, scope_key) WHERE released_at IS NULL;

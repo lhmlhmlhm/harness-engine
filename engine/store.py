@@ -378,3 +378,127 @@ def step_attempts(conn: sqlite3.Connection, run_id: str, step_id: str) -> int:
         (run_id, step_id),
     ).fetchone()
     return int(row["n"])
+
+
+# ---------------------------------------------------------------- scope leases
+
+def active_leases(conn: sqlite3.Connection, scope_kind: str, scope_key: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM scope_lease WHERE scope_kind = ? AND scope_key = ?"
+        " AND released_at IS NULL ORDER BY id",
+        (scope_kind, scope_key),
+    ).fetchall()
+
+
+def outgoing_lease(conn: sqlite3.Connection, run_id: str,
+                   scope_kind: str, scope_key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM scope_lease WHERE grantor_run_id = ? AND scope_kind = ?"
+        " AND scope_key = ? AND released_at IS NULL",
+        (run_id, scope_kind, scope_key),
+    ).fetchone()
+
+
+def held_lease(conn: sqlite3.Connection, run_id: str,
+               scope_kind: str, scope_key: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM scope_lease WHERE holder_run_id = ? AND scope_kind = ?"
+        " AND scope_key = ? AND released_at IS NULL",
+        (run_id, scope_kind, scope_key),
+    ).fetchone()
+
+
+def grant_lease(conn: sqlite3.Connection, *, scope_kind: str, scope_key: str,
+                grantor_run_id: str, granted_at_step: str, holder_run_id: str) -> None:
+    conn.execute(
+        "INSERT INTO scope_lease (scope_kind, scope_key, grantor_run_id, granted_at_step,"
+        " holder_run_id, granted_at) VALUES (?,?,?,?,?,?)",
+        (scope_kind, scope_key, grantor_run_id, granted_at_step, holder_run_id, now_iso()),
+    )
+    conn.commit()
+
+
+def release_lease(conn: sqlite3.Connection, lease_id: int, reason: str) -> None:
+    conn.execute(
+        "UPDATE scope_lease SET released_at = ?, released_by = ? WHERE id = ?"
+        " AND released_at IS NULL",
+        (now_iso(), reason, lease_id),
+    )
+    conn.commit()
+
+
+def release_leases_touching(conn: sqlite3.Connection, run_id: str, reason: str) -> dict:
+    """End every active lease this run holds OR granted. Returns what was ended.
+
+    Both directions, because a lease naming a closed run is worse than no lease: resolution
+    would keep answering with a run that can no longer act, and the answer would look
+    authoritative. Leaving the row active until someone notices is the failure mode where a
+    guard adjudicates against a finished run forever.
+    """
+    held = conn.execute(
+        "SELECT id FROM scope_lease WHERE holder_run_id = ? AND released_at IS NULL",
+        (run_id,),
+    ).fetchall()
+    granted = conn.execute(
+        "SELECT id FROM scope_lease WHERE grantor_run_id = ? AND released_at IS NULL",
+        (run_id,),
+    ).fetchall()
+    ts = now_iso()
+    for r in held:
+        conn.execute("UPDATE scope_lease SET released_at = ?, released_by = ? WHERE id = ?",
+                     (ts, f"{reason}:holder_closed", r["id"]))
+    for r in granted:
+        conn.execute("UPDATE scope_lease SET released_at = ?, released_by = ? WHERE id = ?",
+                     (ts, f"{reason}:grantor_closed", r["id"]))
+    conn.commit()
+    return {"held": len(held), "granted": len(granted)}
+
+
+def resolve_scope_chain(conn: sqlite3.Connection, scope_kind: str, scope_key: str,
+                        open_run_ids: set[str]) -> tuple[list[str], str | None]:
+    """Order the open runs in one scope into a delegation chain, or say why you cannot.
+
+    Returns `(chain, None)` on success — grantor first, current holder last — or
+    `([], reason)` when the situation is not adjudicable.
+
+    THE POINT OF RETURNING A REASON. Every rejection here sends the caller back to allowing
+    the action without enforcement, which is a real loss of a guarantee. So the caller has to
+    be able to SAY which of these it hit; "could not resolve" recorded without the reason is
+    an audit note nobody can act on.
+
+    Three ways it fails, and none of them is guessable around:
+
+    * `no_lease` — two or more runs share the scope and nothing declares a relation. This is
+      the ordinary concurrent case, and the engine has no business inventing an order for it.
+    * `partial` — a chain exists but does not cover every open run in the scope. The runs
+      outside it are unrelated, so the action may belong to one of them, and demanding a gate
+      from a run that does not own the work is what makes forging the gate the only way out.
+    * `forked` — a run granted the same scope twice, or two runs claim to hold it. Authority
+      that is in two places at once is not authority.
+
+    THERE IS NO CYCLE CHECK, AND THAT IS PROVEN RATHER THAN ASSUMED. Rejecting a repeated
+    grantor or a repeated holder makes the declarations injective on both sides, so the graph
+    is a set of disjoint paths and cycles. Every node in a cycle appears as both a grantor and
+    a holder, so no cycle contains a root — with exactly one root, its component is a path,
+    and cycles elsewhere are simply unreachable from the walk and fall out as `partial`. A
+    guard against them would be a branch that cannot run, which is worse than absent: it reads
+    as a hazard being handled.
+    """
+    leases = active_leases(conn, scope_kind, scope_key)
+    if not leases:
+        return [], "no_lease"
+    forward: dict[str, str] = {}
+    for row in leases:
+        g, h = row["grantor_run_id"], row["holder_run_id"]
+        if g in forward or h in forward.values():
+            return [], "forked"
+        forward[g] = h
+    roots = [g for g in forward if g not in forward.values()]
+    if len(roots) != 1:
+        return [], "forked"
+    chain = [roots[0]]
+    while chain[-1] in forward:
+        chain.append(forward[chain[-1]])
+    if set(chain) != open_run_ids:
+        return [], "partial"
+    return chain, None

@@ -86,7 +86,7 @@ def test_init_creates_every_core_table(env):
     finally:
         conn.close()
     assert names == {"run", "step_log", "gate", "evidence", "violation", "obligation",
-                     "phase_summary", "purge_log"}
+                     "phase_summary", "purge_log", "scope_lease"}
 
 
 def test_commands_refuse_before_init(tmp_path):
@@ -4548,3 +4548,267 @@ def test_the_roots_are_resolved_when_asked_not_when_imported(tmp_path, monkeypat
     monkeypatch.delenv("HARNESS_ABILITIES_PATH")
     back = flowmod.available_abilities()
     assert "greeting" not in back and "cr-reviewer" in back, back
+
+
+# ------------------------------------------------- scope leases: who owns an action
+
+def _rows(env_extra, sql, params=()):
+    c = sqlite3.connect(env_extra["HARNESS_STATE_DIR"] + "/harness.db")
+    c.row_factory = sqlite3.Row
+    try:
+        return c.execute(sql, params).fetchall()
+    finally:
+        c.close()
+
+
+def _unadjudicated(env_extra):
+    return _rows(env_extra,
+                 "SELECT * FROM violation WHERE code = 'guard_unadjudicated' ORDER BY id")
+
+
+def _guard(env_extra, action="commit", scope="/repo/L"):
+    return run(["guard", "--action", action, "--scope-kind", "repo", "--scope", scope],
+               env_extra)
+
+
+def _no_guard_fixture(name: str) -> Path:
+    """A repo-scoped flow that guards nothing — the delegate in the escape test."""
+    d = REPO / "abilities" / name
+    d.mkdir(exist_ok=True)
+    (d / "flow.yaml").write_text(
+        f"version: 1\nability: {name}\nrole: fixture\nscope_kind: repo\n"
+        f"phases:\n  - id: p1\n    title: P1\n"
+        f"steps:\n  - id: W01\n    phase: p1\n    title: Work\n    directive: Work.\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_the_guard_leaves_a_row_when_it_declines_to_adjudicate(env):
+    """Enforcement that silently stops applying is the gap that lasts.
+
+    Declining was already the right call — demanding a gate from a run that may not own the
+    action leaves forging it as the only way forward. What was missing is that the decline
+    went to stderr and nowhere else, so "how often did the guarantee stop applying" had no
+    answer after the fact.
+
+    run_id is NULL on purpose, and asserted: attributing this to one of the ambiguous runs is
+    the very guess the resolution refuses to make.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "L1"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "L2",
+               "--allow-concurrent"], env) == OK
+
+    r = _guard(env)
+    assert r.returncode == OK
+    assert "NOT enforced" in r.stderr and "no_lease" in r.stderr
+
+    v = _unadjudicated(env)
+    assert len(v) == 1, [dict(x) for x in v]
+    assert v[0]["run_id"] is None
+    assert v[0]["severity"] == "breach"          # the guarantee did not hold
+    assert "action=commit" in v[0]["detail"] and "L1,L2" in v[0]["detail"]
+
+    # The guard runs on every tool call; identical situations must not flood the ledger.
+    for _ in range(4):
+        assert _guard(env).returncode == OK
+    assert len(_unadjudicated(env)) == 1
+
+    # A genuinely different situation is a different fact and gets its own row.
+    assert _guard(env, action="publish").returncode == OK
+    assert len(_unadjudicated(env)) == 2
+
+
+def test_a_declared_delegation_makes_the_guard_adjudicate_again(env):
+    """The lease exists for exactly one reason: to restore enforcement, not to describe.
+
+    Two runs in a scope is the state in which the guard gives up. A declared delegation makes
+    "who owns this action" answerable, so the same situation goes from allowed-and-unenforced
+    back to adjudicated — and no decline is recorded, because none happened.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G1"], env) == OK
+    advance_to(env, "G1", None)
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H1",
+               "--leased-from", "G1", "--leased-at", "C01"], env) == OK
+
+    assert _guard(env).returncode == BLOCKED
+    assert _unadjudicated(env) == []
+
+
+def test_delegating_a_scope_does_not_escape_the_gate_that_guards_it(env, tmp_path):
+    """A delegate does not inherit permission the delegator never had.
+
+    If only the innermost holder's gates applied, delegation would BE the bypass: the outer
+    run says "no such action here until a human affirms", hands the scope to a flow that
+    guards nothing, and the action proceeds. So every link that guards the action must have
+    its gate. The outer gate is not an unrelated run's gate — that run authorised the
+    delegation, over this very scope.
+    """
+    d = _no_guard_fixture("zzz_leaseless")
+    try:
+        assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G2"], env) == OK
+        advance_to(env, "G2", None)
+        assert rc(["open", "zzz_leaseless", "--scope", "/repo/L", "--run", "H2",
+                   "--leased-from", "G2", "--leased-at", "C01"], env) == OK
+
+        r = _guard(env)
+        assert r.returncode == BLOCKED
+        assert "G2" in r.stderr and "D02" in r.stderr, r.stderr
+        assert "link 1 of 2" in r.stderr, r.stderr
+
+        t = transcript_with(tmp_path, 1)
+        assert rc(["gate", "--run", "G2", "--step", "D02", "--decision", "affirm"],
+                  env, transcript=t, witness="transcript") == OK
+        assert _guard(env).returncode == OK
+        assert _unadjudicated(env) == []
+    finally:
+        _rm(d)
+
+
+def test_an_unrelated_run_in_the_scope_breaks_the_delegation_chain(env):
+    """A chain that does not cover every open run in the scope is not an answer.
+
+    The runs outside it are unrelated, so the action may belong to one of them — and that is
+    the case where demanding a gate is illegitimate. Partial coverage therefore returns to
+    declining, with the reason recorded so the situation is diagnosable.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G3"], env) == OK
+    advance_to(env, "G3", None)
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H3",
+               "--leased-from", "G3", "--leased-at", "C01"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "X3",
+               "--allow-concurrent"], env) == OK
+
+    r = _guard(env)
+    assert r.returncode == OK
+    assert "partial" in r.stderr, r.stderr
+    v = _unadjudicated(env)
+    assert len(v) == 1 and "reason=partial" in v[0]["detail"], [dict(x) for x in v]
+
+
+@pytest.mark.parametrize("extra, expected, why", [
+    (["--leased-from", "G4"], USAGE, "half a delegation names no step"),
+    (["--leased-at", "C01"], USAGE, "half a delegation names no grantor"),
+    (["--leased-from", "nope", "--leased-at", "C01"], USAGE, "no such grantor"),
+    (["--leased-from", "G4", "--leased-at", "NOPE9"], USAGE, "no such step"),
+    (["--leased-from", "G4", "--leased-at", "D02"], REFUSED, "step not reached yet"),
+])
+def test_a_delegation_must_be_anchored_to_progress_that_happened(env, extra, expected, why):
+    """Each refusal removes a way for a lease to claim authority that was never exercised."""
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G4"], env) == OK
+    assert rc(["evidence", "--run", "G4", "--step", "C01",
+               "--kind", "change_list", "--value", "x"], env) == OK
+    assert rc(["close-step", "--run", "G4", "--step", "C01"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H4", *extra], env) \
+        == expected, why
+
+
+def test_a_lease_covers_one_scope_and_is_granted_once(env):
+    """Two refusals that keep the chain a chain.
+
+    A grantor cannot delegate a scope it does not hold — across scopes there is no ambiguity
+    to resolve, so such a lease would record a relation no guard reads while handing out
+    authority its grantor never had. And one outgoing lease per run per scope, because two
+    would put authority in two places at once, which is not authority.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G5"], env) == OK
+    advance_to(env, "G5", None)
+    # A flow in a different scope dimension entirely — and driven far enough that the
+    # anchoring check would PASS, so this asserts the scope rule and not that one. Without
+    # entering the step, both refusals apply and the mutation that removes the scope check
+    # stays green.
+    assert rc(["open", "push", "--scope", "/ws/x", "--run", "P5",
+               "--variant", "ship-check"], env) == OK
+    assert rc(["enter", "--run", "P5", "--step", "P01"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H5a",
+               "--leased-from", "P5", "--leased-at", "P01"], env) == REFUSED
+
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H5b",
+               "--leased-from", "G5", "--leased-at", "C01"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H5c",
+               "--leased-from", "G5", "--leased-at", "C01"], env) == REFUSED
+
+
+def test_a_lease_ends_when_either_end_of_it_ends(env):
+    """A lease naming a finished run would keep answering with a run that cannot act.
+
+    Both directions are released on close. Closing the GRANTOR while its delegation is still
+    out is recorded and not refused: noticing that authority was handed out and never came
+    back is the engine's job; deciding what that means is the flow's.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "G6"], env) == OK
+    advance_to(env, "G6", None)
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H6",
+               "--leased-from", "G6", "--leased-at", "C01"], env) == OK
+
+    active = "SELECT * FROM scope_lease WHERE released_at IS NULL"
+    assert len(_rows(env, active)) == 1
+    assert rc(["close-run", "--run", "H6", "--result", "done", "--force-steps"], env) == OK
+    assert _rows(env, active) == []
+    assert _rows(env, "SELECT * FROM violation WHERE code='lease_outstanding'") == []
+
+    assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H6b",
+               "--leased-from", "G6", "--leased-at", "C01"], env) == OK
+    assert len(_rows(env, active)) == 1
+    assert rc(["close-run", "--run", "G6", "--result", "done", "--force-steps",
+               "--force-obligations"], env) == OK
+    assert _rows(env, active) == []
+    out = _rows(env, "SELECT * FROM violation WHERE code='lease_outstanding'")
+    assert len(out) == 1 and out[0]["run_id"] == "G6", [dict(x) for x in out]
+
+
+def test_a_malformed_delegation_ledger_refuses_instead_of_walking_it(env):
+    """Resolution treats a corrupt ledger as unanswerable, not as something to interpret.
+
+    Neither shape below can be produced through the CLI — a holder is always a run being
+    opened, so it can hold nothing yet and cannot be its own ancestor. They are reachable by
+    hand-editing the store, which is a real event (it is why a purge ledger exists at all),
+    and the contract of the resolver is stated over the ROWS rather than over the commands
+    that usually write them. Asserted directly for that reason: a branch whose only defence
+    is that today's callers are careful is a branch nobody will notice going wrong.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import store as st
+
+    for rid in ("M1", "M2", "M3", "M4"):
+        assert rc(["open", "delivery", "--scope", "/repo/M", "--run", rid,
+                   *([] if rid == "M1" else ["--allow-concurrent"])], env) == OK
+
+    conn = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db")
+    conn.row_factory = sqlite3.Row
+
+    def relet(pairs):
+        conn.execute("DELETE FROM scope_lease")
+        for g, h in pairs:
+            conn.execute(
+                "INSERT INTO scope_lease (scope_kind, scope_key, grantor_run_id,"
+                " granted_at_step, holder_run_id, granted_at)"
+                " VALUES ('repo','/repo/M',?,'C01',?,'now')", (g, h))
+        conn.commit()
+
+    try:
+        every = {"M1", "M2", "M3", "M4"}
+        # One run handed the same scope to two others: authority in two places is not authority.
+        relet([("M1", "M2"), ("M1", "M3")])
+        assert st.resolve_scope_chain(conn, "repo", "/repo/M", every) == ([], "forked")
+        # Two runs both claim to have handed it to the same one.
+        relet([("M1", "M3"), ("M2", "M3")])
+        assert st.resolve_scope_chain(conn, "repo", "/repo/M", every) == ([], "forked")
+        # A closed loop has no root at all — which is the first half of why no separate cycle
+        # check exists.
+        relet([("M1", "M2"), ("M2", "M3"), ("M3", "M1")])
+        assert st.resolve_scope_chain(conn, "repo", "/repo/M", every) == ([], "forked")
+        # The second half: a loop OFF to one side is exactly what a cycle check would claim to
+        # catch. It is unreachable from the root, so the walk ends by itself and the coverage
+        # check rejects it. This assertion is what makes "no cycle check is needed" a fact
+        # rather than a claim — if the walk could fail to terminate, this test would hang.
+        relet([("M1", "M2"), ("M3", "M4"), ("M4", "M3")])
+        assert st.resolve_scope_chain(conn, "repo", "/repo/M", every) == ([], "partial")
+        # A well-formed chain over the same rows resolves, so the refusals above are not
+        # this function simply always saying no.
+        relet([("M1", "M2"), ("M2", "M3"), ("M3", "M4")])
+        assert st.resolve_scope_chain(conn, "repo", "/repo/M", every) == \
+            (["M1", "M2", "M3", "M4"], None)
+    finally:
+        conn.close()

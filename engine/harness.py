@@ -203,6 +203,105 @@ def cmd_validate(args) -> int:
     return BAD_SPEC if bad else OK
 
 
+UNADJUDICATED = "guard_unadjudicated"
+LEASE_OUTSTANDING = "lease_outstanding"
+
+
+def _validated_grantor(conn, f, args):
+    """Check that a delegation may be recorded. Returns (row, None) or (None, exit_code).
+
+    A lease is granted at the moment the delegate STARTS and never afterwards. Handing
+    authority to a run that is already going would mean authority could be rearranged
+    mid-flight, and then "who owned this action at the time" depends on when you ask — which
+    is the property the lease exists to provide.
+    """
+    if not (args.leased_from and args.leased_at):
+        _err("⛔ --leased-from and --leased-at go together: a delegation has to say "
+             "which run delegated and from where in its flow.")
+        return None, USAGE
+    grantor = store.get_run(conn, args.leased_from)
+    if grantor is None:
+        _err(f"⛔ no run {args.leased_from!r} to delegate from")
+        return None, USAGE
+    if grantor["status"] != "open":
+        _err(f"⛔ run {args.leased_from!r} is {grantor['status']}; a closed run has no "
+             f"authority to hand over")
+        return None, REFUSED
+    if grantor["scope_kind"] != f.scope_kind or grantor["scope_key"] != args.scope:
+        # Not a technicality. A lease exists to answer "who owns actions in THIS scope"; two
+        # runs in different scopes are already unambiguous, so a lease between them would
+        # record a relation no guard reads — and grant authority over a scope the grantor
+        # never had.
+        _err(f"⛔ {args.leased_from!r} holds {grantor['scope_kind']}="
+             f"{grantor['scope_key']!r}, not {f.scope_kind}={args.scope!r}.\n"
+             f"    A lease covers one scope. Different scopes need no lease — they are "
+             f"already unambiguous.")
+        return None, REFUSED
+    try:
+        gf = flowmod.load(grantor["ability"])
+    except flowmod.FlowError as exc:
+        _err(f"⛔ {exc}")
+        return None, BAD_SPEC
+    if args.leased_at not in gf.steps:
+        _err(f"⛔ {args.leased_from!r} has no step {args.leased_at!r}")
+        return None, USAGE
+    if not store.step_events(conn, grantor["run_id"], args.leased_at):
+        _err(f"⛔ {args.leased_from!r} has not reached step {args.leased_at!r}.\n"
+             f"    A delegation is anchored to progress that happened, not to a step "
+             f"someone intends to reach.")
+        return None, REFUSED
+    if store.outgoing_lease(conn, grantor["run_id"], f.scope_kind, args.scope) is not None:
+        _err(f"⛔ {args.leased_from!r} has already delegated this scope.\n"
+             f"    One outgoing lease per run per scope: two would put authority in two "
+             f"places at once, which is not authority.")
+        return None, REFUSED
+    return grantor, None
+
+
+def _record_unadjudicated(scope_kind: str, scope_key: str, action: str,
+                          run_ids: list[str], reason: str) -> None:
+    """Persist that enforcement was SKIPPED. Best-effort; never breaks the caller.
+
+    Until now this only went to stderr, so "how often did the guarantee silently stop
+    applying" was unanswerable after the fact — and an enforcement gap nobody can count is
+    the one that lasts. A neighbouring system's 162 forced acknowledgements were only
+    findable because they left rows.
+
+    The guard's own connection stays READ-ONLY. This is the rare branch, and making the hot
+    path writable to serve it would put a write lock in front of every tool call, so a
+    second short-lived connection is opened here and only here.
+
+    Deduped on the exact situation, because the guard runs on every tool use: an unresolved
+    scope would otherwise write one row per call, and ten thousand identical rows say no more
+    than one while burying everything else. A genuinely different situation — another action,
+    another set of runs, another reason — has a different detail and gets its own row.
+
+    run_id is NULL deliberately. Pinning this on one of the ambiguous runs is exactly the
+    guess the resolution refuses to make; a fact about a scope belongs to no run.
+    """
+    detail = (f"{scope_kind}={scope_key} action={action} reason={reason} "
+              f"runs={','.join(sorted(run_ids))}")
+    try:
+        conn = store.connect()
+    except store.StoreNotInitialised:
+        return
+    try:
+        seen = conn.execute(
+            "SELECT 1 FROM violation WHERE code = ? AND detail = ? LIMIT 1",
+            (UNADJUDICATED, detail),
+        ).fetchone()
+        if seen is None:
+            store.record_violation(conn, None, None, UNADJUDICATED, detail,
+                                   severity="breach")
+    except Exception as exc:
+        # Broad on purpose: a ledger write must never break the caller. The guard runs in
+        # front of every matching tool call, so an exception here would stop the user's work
+        # over an audit note. It is reported, not swallowed.
+        _err(f"⚠️  could not record the unadjudicated guard: {exc}")
+    finally:
+        conn.close()
+
+
 def cmd_open(args) -> int:
     f = _load_flow_or_exit(args.ability)
     run_id = args.run or f"{args.ability}-{uuid.uuid4().hex[:12]}"
@@ -212,7 +311,12 @@ def cmd_open(args) -> int:
             _err(f"⛔ run {run_id!r} already exists")
             return USAGE
         existing = store.open_runs_in_scope(conn, f.scope_kind, args.scope)
-        if existing and not args.allow_concurrent:
+        grantor = None
+        if args.leased_from or args.leased_at:
+            grantor, err = _validated_grantor(conn, f, args)
+            if grantor is None:
+                return err
+        if existing and grantor is None and not args.allow_concurrent:
             # Refuse rather than pick. Two open runs in one scope is precisely the
             # state in which a guard cannot tell which run owns an action, and the
             # cheapest place to prevent that is here, before the second one exists.
@@ -271,6 +375,14 @@ def cmd_open(args) -> int:
             variant=variant,
             metadata={"allow_concurrent": bool(args.allow_concurrent)},
         )
+        if grantor is not None:
+            store.grant_lease(
+                conn, scope_kind=f.scope_kind, scope_key=args.scope,
+                grantor_run_id=grantor["run_id"], granted_at_step=args.leased_at,
+                holder_run_id=run_id,
+            )
+            print(f"   leased {f.scope_kind}={args.scope} from {grantor['run_id']}"
+                  f" at its step {args.leased_at}")
         if variant:
             n_out = sum(1 for x in f.steps if not f.applicable(x, variant))
             print(f"   variant {variant}  ({source}) — {n_out} step(s) not applicable")
@@ -751,35 +863,56 @@ def cmd_guard(args) -> int:
         candidates = store.open_runs_in_scope(conn, args.scope_kind, args.scope)
         if not candidates:
             return OK
-        if len(candidates) > 1:
-            ids = ", ".join(r["run_id"] for r in candidates)
+        by_id = {r["run_id"]: r for r in candidates}
+        if len(candidates) == 1:
+            chain = [candidates[0]["run_id"]]
+        else:
+            # More than one run shares this scope. A DECLARED delegation makes "who owns this
+            # action" answerable; nothing else does. Where it is answerable, adjudicate —
+            # where it is not, keep allowing, but leave a row saying so.
+            chain, why = store.resolve_scope_chain(
+                conn, args.scope_kind, args.scope, set(by_id))
+            if why is not None:
+                _record_unadjudicated(args.scope_kind, args.scope, args.action,
+                                      list(by_id), why)
+                _err(
+                    f"⚠️  guard NOT enforced for action '{args.action}': scope "
+                    f"{args.scope_kind}={args.scope!r} has {len(candidates)} open runs "
+                    f"({', '.join(by_id)}) and no usable delegation ({why}).\n"
+                    f"    Allowing rather than guessing which one owns this action.\n"
+                    f"    Recorded as '{UNADJUDICATED}'. To make this adjudicable, start the "
+                    f"inner run with --leased-from/--leased-at."
+                )
+                return OK
+        # EVERY run in the chain that guards this action must have its gate — not only the
+        # holder. Otherwise delegating becomes the way around a gate: the outer run says "no
+        # such action here until a human affirms", hands the scope to a flow that guards
+        # nothing, and the action goes through. The outer gate is not an unrelated run's gate:
+        # that run authorised the delegation, over this very scope.
+        for i, run_id in enumerate(chain):
+            row = by_id[run_id]
+            try:
+                f = flowmod.load(row["ability"])
+            except flowmod.FlowError:
+                continue  # a broken spec must not brick unrelated tooling
+            step_id = f.guards.get(args.action)
+            if step_id is None:
+                continue  # this ability does not guard this action
+            g = store.get_gate(conn, run_id, step_id)
+            if g is not None and g["decision"] in ("affirm", "preauth"):
+                continue
+            s = f.step(step_id)
+            where = "" if len(chain) == 1 else f" (link {i + 1} of {len(chain)} in this scope)"
             _err(
-                f"⚠️  guard NOT enforced for action '{args.action}': scope "
-                f"{args.scope_kind}={args.scope!r} has {len(candidates)} open runs ({ids}).\n"
-                f"    Allowing rather than guessing which one owns this action."
+                f"⛔ BLOCKED: action '{args.action}' requires gate '{step_id}' "
+                f"({s.title}) on run {run_id}{where}.\n"
+                f"    Do not proceed. Get a real human affirmation, then record it:\n"
+                f"      harness gate --run {run_id} --step {step_id} "
+                f"--decision affirm --evidence \"<what they said>\"\n"
+                f"    Recording it without a witnessed human turn is refused."
             )
-            return OK
-        row = candidates[0]
-        try:
-            f = flowmod.load(row["ability"])
-        except flowmod.FlowError:
-            return OK  # a broken spec must not brick unrelated tooling
-        step_id = f.guards.get(args.action)
-        if step_id is None:
-            return OK  # this ability does not guard this action
-        g = store.get_gate(conn, row["run_id"], step_id)
-        if g is not None and g["decision"] in ("affirm", "preauth"):
-            return OK
-        s = f.step(step_id)
-        _err(
-            f"⛔ BLOCKED: action '{args.action}' requires gate '{step_id}' "
-            f"({s.title}) on run {row['run_id']}.\n"
-            f"    Do not proceed. Get a real human affirmation, then record it:\n"
-            f"      harness gate --run {row['run_id']} --step {step_id} "
-            f"--decision affirm --evidence \"<what they said>\"\n"
-            f"    Recording it without a witnessed human turn is refused."
-        )
-        return BLOCKED
+            return BLOCKED
+        return OK
     finally:
         conn.close()
 
@@ -1165,6 +1298,34 @@ def _coerce(v: str):
         return v
 
 
+def cmd_leases(args) -> int:
+    """Show who currently holds which scope, and where each delegation came from."""
+    conn = store.connect(read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT l.*, gr.ability AS grantor_ability, ho.ability AS holder_ability"
+            " FROM scope_lease l"
+            " JOIN run gr ON gr.run_id = l.grantor_run_id"
+            " JOIN run ho ON ho.run_id = l.holder_run_id"
+            " WHERE l.released_at IS NULL ORDER BY l.scope_kind, l.scope_key, l.id"
+        ).fetchall()
+        if not rows:
+            print("(no scope is delegated)")
+            return OK
+        seen_scope = None
+        for r in rows:
+            here = f"{r['scope_kind']}={r['scope_key']}"
+            if here != seen_scope:
+                print(here)
+                seen_scope = here
+            print(f"  {r['grantor_run_id']} ({r['grantor_ability']}) "
+                  f"at step {r['granted_at_step']}"
+                  f"  →  {r['holder_run_id']} ({r['holder_ability']})   {r['granted_at']}")
+        return OK
+    finally:
+        conn.close()
+
+
 def cmd_audit(args) -> int:
     conn = store.connect(read_only=True)
     try:
@@ -1188,7 +1349,8 @@ def cmd_audit(args) -> int:
         if v:
             print(f"violations: {sum(r['n'] for r in v)}")
             for r in v:
-                print(f"  {r['code']:<24} {r['run_id']}  {r['step_id'] or '-'}  ×{r['n']}")
+                print(f"  {r['code']:<24} {r['run_id'] or '-'}  "
+                      f"{r['step_id'] or '-'}  ×{r['n']}")
         return OK
     finally:
         conn.close()
@@ -1230,8 +1392,31 @@ def cmd_close_run(args) -> int:
         if missing:
             store.record_violation(conn, row["run_id"], None, "forced_close",
                                    f"{len(missing)} step(s) open: {','.join(missing)}")
+        # A lease is ended by the end of a run, in BOTH directions — a row naming a closed
+        # run would keep resolving to something that can no longer act, and that answer looks
+        # as authoritative as a live one.
+        outgoing = conn.execute(
+            "SELECT scope_kind, scope_key, holder_run_id, granted_at_step FROM scope_lease"
+            " WHERE grantor_run_id = ? AND released_at IS NULL", (row["run_id"],)
+        ).fetchall()
+        for lease in outgoing:
+            # Recorded, not refused. The engine's job is to notice that authority was handed
+            # out and never came back; what to DO about it is the flow's own business, and a
+            # hook can raise an obligation over it.
+            store.record_violation(
+                conn, row["run_id"], row["current_step"], LEASE_OUTSTANDING,
+                f"delegated {lease['scope_kind']}={lease['scope_key']} to "
+                f"{lease['holder_run_id']} at step {lease['granted_at_step']}, still held "
+                f"when this run closed",
+                severity="breach")
+        freed = store.release_leases_touching(conn, row["run_id"], "run_closed")
         store.close_run(conn, row["run_id"], args.result)
         print(f"✅ closed run {row['run_id']} → {args.result}")
+        if freed["held"] or freed["granted"]:
+            print(f"   leases released: {freed['held']} held, {freed['granted']} granted")
+        if outgoing:
+            print(f"   ⚠️  {len(outgoing)} delegation(s) were still outstanding "
+                  f"(recorded as '{LEASE_OUTSTANDING}')")
         return OK
     finally:
         conn.close()
@@ -1277,6 +1462,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
     sub.add_parser("abilities", help="list installed abilities").set_defaults(fn=cmd_abilities)
+    sub.add_parser("leases", help="show delegated scopes").set_defaults(fn=cmd_leases)
 
     v = sub.add_parser("validate", help="validate flow spec(s); exit 2 if invalid")
     v.add_argument("ability", nargs="?")
@@ -1289,6 +1475,10 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--title")
     o.add_argument("--allow-concurrent", action="store_true",
                    help="accept another open run in the same scope (guards go inert)")
+    o.add_argument("--leased-from", metavar="RUN",
+                   help="this run is delegated the scope by RUN (guards stay in force)")
+    o.add_argument("--leased-at", metavar="STEP",
+                   help="the step of --leased-from at which it delegated")
     o.add_argument("--variant", help="pick the flow variant explicitly (overrides derivation)")
     o.set_defaults(fn=cmd_open)
 
