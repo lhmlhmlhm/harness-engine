@@ -84,7 +84,8 @@ def cmd_init(args) -> int:
 def cmd_abilities(args) -> int:
     names = flowmod.available_abilities()
     if not names:
-        print("(no abilities installed under abilities/)")
+        roots = ", ".join(str(r) for r in flowmod.abilities_roots())
+        print(f"(none installed under: {roots})")
         return OK
     fixtures = []
     for name in names:
@@ -1410,6 +1411,14 @@ def main(argv: list[str] | None = None) -> int:
     except store.StoreNotInitialised as exc:
         _err(f"⛔ {exc}")
         return USAGE
+    except flowmod.FlowError as exc:
+        # Handled here and not only per call site: discovering WHAT IS INSTALLED can now
+        # fail — a misconfigured root, or one name present in two roots — and that happens
+        # inside commands whose own try/except wraps only the LOADING of a single spec.
+        # Without this, the honest refusal those checks raise reaches the user as a
+        # traceback, which reads as an engine bug rather than as their configuration.
+        _err(f"⛔ {exc}")
+        return BAD_SPEC
     except SystemExit as exc:  # raised by the _or_exit helpers
         return int(exc.code or 0)
 

@@ -4444,3 +4444,107 @@ steps:
         assert note == "forced past open deps", note
     finally:
         _rm(d)
+
+
+# ------------------------------------------------- where flows are allowed to live
+
+def _external_flow(root: Path, name: str, *, title: str = "External") -> Path:
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "flow.yaml").write_text(
+        f"version: 1\nability: {name}\ntitle: {title}\n"
+        f"when: a flow kept outside the engine tree, which is the point of this test\n"
+        f"scope_kind: s\nphases:\n  - id: p1\n    title: P1\n"
+        f"steps:\n  - id: W01\n    phase: p1\n    title: Do it\n    directive: Do the thing.\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_a_flow_outside_the_engine_tree_is_found_and_runnable(env, tmp_path):
+    """A consumer must be able to keep its flows in its own tree.
+
+    WHY THIS IS THE LOAD-BEARING ONE. The purity tests assert the engine names no domain
+    vocabulary; a frozen `abilities/` path asserts the opposite in the filesystem — the only
+    way to install a flow was to put it inside the engine's own repository, which is how a
+    generic base acquires a first consumer it can no longer be separated from.
+
+    Listing is not enough to assert here: a name can appear in a roster and still fail to
+    resolve its spec or its providers. So the flow is actually opened and stepped through.
+    """
+    root = tmp_path / "their-tree"
+    _external_flow(root, "greeting")
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+
+    listed = run(["abilities"], e)
+    assert listed.returncode == OK, listed.stderr
+    assert "greeting" in listed.stdout
+
+    # REPLACES rather than adds: an implicit union means a consumer can never get a clean
+    # set, and a flow arriving from a root nobody named is worse than naming both.
+    assert "cr-reviewer" not in listed.stdout, listed.stdout
+
+    assert rc(["validate", "greeting"], e) == OK
+    assert rc(["open", "greeting", "--scope", "ext", "--run", "x1"], e) == OK
+    assert rc(["enter", "--run", "x1", "--step", "W01"], e) == OK
+
+
+def test_two_roots_holding_the_same_name_are_refused(env, tmp_path):
+    """The engine will not pick between two flows with one name.
+
+    First-wins is the tempting default and it is silent: a root nobody is looking at
+    shadows the one being edited, and "which of the two actually ran" stops being
+    answerable from the spec — the run record would name `greeting` and mean either.
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    _external_flow(a, "greeting", title="From A")
+    _external_flow(b, "greeting", title="From B")
+    import os as _os
+    e = {**env, "HARNESS_ABILITIES_PATH": f"{a}{_os.pathsep}{b}"}
+    out = run(["abilities"], e)
+    assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+    # Both sides named, because the fix requires knowing which two collided.
+    assert str(a) in out.stderr and str(b) in out.stderr, out.stderr
+
+
+def test_a_configured_root_that_is_missing_is_louder_than_an_empty_one(env, tmp_path):
+    """A mistyped root is a configuration error; an empty root is a legitimate state.
+
+    Collapsing the two is the failure this asymmetry exists to avoid: reporting "nothing
+    installed" for a typo sends the reader looking for missing files instead of at the one
+    variable that is wrong. The DEFAULT root is allowed to be absent, because an
+    engine-only checkout legitimately has none — so the loudness is tied to having been
+    ASKED to look somewhere, not to the directory being missing.
+    """
+    missing = tmp_path / "not-there"
+    assert rc(["abilities"], {**env, "HARNESS_ABILITIES_PATH": str(missing)}) == BAD_SPEC
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    out = run(["abilities"], {**env, "HARNESS_ABILITIES_PATH": str(empty)})
+    assert out.returncode == OK, out.stderr
+    assert str(empty) in out.stdout, out.stdout
+
+    # Set but naming nothing at all is a mistake too, not a request for the default.
+    assert rc(["abilities"], {**env, "HARNESS_ABILITIES_PATH": ":"}) == BAD_SPEC
+
+
+def test_the_roots_are_resolved_when_asked_not_when_imported(tmp_path, monkeypatch):
+    """Reading the variable at import time would fail silently, so it is read per call.
+
+    A frozen-at-import root ignores anything set afterwards and reports "that root holds
+    nothing" — which reads as an empty directory rather than as a value that arrived too
+    late, so the variable is the last place anyone looks. This module is already imported
+    by the time this test runs, which is exactly the condition that would expose the bug.
+    """
+    from engine import flow as flowmod
+    root = tmp_path / "late"
+    _external_flow(root, "greeting")
+
+    monkeypatch.setenv("HARNESS_ABILITIES_PATH", str(root))
+    assert flowmod.available_abilities() == ["greeting"]
+    assert flowmod.spec_path("greeting").is_file()
+
+    monkeypatch.delenv("HARNESS_ABILITIES_PATH")
+    back = flowmod.available_abilities()
+    assert "greeting" not in back and "cr-reviewer" in back, back

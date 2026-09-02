@@ -47,9 +47,15 @@ STEP_ID_ALLOW = {
 
 # Distinctive domain nouns — banned as a plain substring anywhere, comments included.
 # Each is a word that only exists because some ability exists.
+#
+# This list is about CONCEPT WORDS, and it is deliberately not the list of installed
+# names: those are derived from disk by the test below, because a hardcoded roster goes
+# stale silently. This one went stale exactly that way — the comment below used to read
+# "the two installed abilities" while seven were installed, so five of them could have
+# been named in engine code with nothing objecting.
 FORBIDDEN_TOKENS = [
     "ship-check", "shipcheck", "ship_check",
-    "delivery", "authoring",          # the two installed abilities, by name
+    "delivery", "authoring",          # two of the installed names, kept as concept words
     "brazil", "taskei", "analyzer", "reviewer",
     "worktree", "plandoc",
 ]
@@ -80,6 +86,19 @@ FORBIDDEN_IDENTIFIER_STEMS = [
 
 def _engine_sources() -> list[tuple[Path, str]]:
     return [(p, p.read_text(encoding="utf-8")) for p in ENGINE_FILES]
+
+
+def _installed_names() -> list[str]:
+    """The names actually installed, read from disk instead of listed in this file.
+
+    Scoped to the in-tree root on purpose. The engine can now be pointed at other roots
+    (`HARNESS_ABILITIES_PATH`), but this file guards THIS repository's sources, and a guard
+    that asks the thing it is guarding where to look can be pointed away from the evidence.
+    """
+    return sorted(
+        p.name for p in ABILITIES_DIR.iterdir()
+        if p.is_dir() and (p / "flow.yaml").is_file()
+    )
 
 
 def test_engine_files_exist():
@@ -154,12 +173,53 @@ def test_engine_does_not_import_abilities():
     """No engine module may import from an ability, and none may read a fixed path."""
     for path, text in _engine_sources():
         assert "abilities." not in text, f"{path.name} imports from abilities/"
-        # ABILITIES_DIR is derived from the repo layout in flow.py; a hardcoded ability
-        # NAME in a path would be the smell.
-        for ability in (p.name for p in ABILITIES_DIR.iterdir() if p.is_dir()):
+        # The abilities ROOT is derived (and now relocatable); a hardcoded ability NAME in
+        # a path is the smell.
+        for ability in _installed_names():
             assert f"/{ability}/" not in text, (
                 f"{path.name} hardcodes a path into ability {ability!r}"
             )
+
+
+def test_engine_does_not_name_an_installed_flow():
+    """No engine source may name an installed flow — as a literal or in an identifier.
+
+    WHY NOT A PLAIN SUBSTRING, WHICH WOULD BE STRICTER: because that is provably wrong
+    here. `predicates.py` justifies a predicate's shape by quoting a real invariant — "the
+    revision whose checks were verified must BE the latest revision pushed" — and one of
+    the installed names is `push`. A bare-substring rule fails on English prose; a guard
+    that fails on prose earns an exemption; an exemption list grows; and a grown exemption
+    list is the fusion this whole file exists to prevent. So the two forms that mean CODE
+    are banned instead: a quoted literal, and the name joined into an identifier.
+
+    FORBIDDEN_TOKENS overlaps this on two names, and that is not redundancy — those
+    entries ban a CONCEPT WORD anywhere including prose, which is the stronger claim, and
+    it holds today. This test is the weaker claim applied to every installed name, so the
+    roster can never again be five names short without anything noticing.
+    """
+    names = _installed_names()
+    assert len(names) >= 2, "fewer than two flows installed; this test would be vacuous"
+    failures = []
+    for path, text in _engine_sources():
+        low = text.lower()
+        for name in names:
+            stem = name.replace("-", "_")
+            forms = (
+                (rf"""['"]{re.escape(name)}['"]""", "a quoted literal"),
+                (rf"\b\w+_{re.escape(stem)}\b|\b{re.escape(stem)}_\w+\b", "an identifier"),
+            )
+            for pattern, form in forms:
+                m = re.search(pattern, low)
+                if m:
+                    line = low[: m.start()].count(chr(10)) + 1
+                    failures.append(
+                        f"{path.name}:{line} names {name!r} as {form}: {m.group(0)!r}"
+                    )
+    assert not failures, (
+        "the engine names flows it must be able to run without having heard of:\n  "
+        + "\n  ".join(failures)
+        + "\n\nReach it through a declared flow field or a registered predicate."
+    )
 
 
 def test_no_fact_names_in_engine_logic():

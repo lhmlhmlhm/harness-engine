@@ -20,6 +20,7 @@ that caused it. Checking at load time turns that into an immediate, legible erro
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -28,7 +29,79 @@ import yaml
 
 ENGINE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENGINE_DIR.parent
-ABILITIES_DIR = REPO_ROOT / "abilities"
+
+# WHERE FLOWS LIVE, AND WHY IT IS NOT A CONSTANT
+#
+# The engine ships a sibling `abilities/` directory, and for anyone developing the engine
+# that is the whole story. A consumer, though, installs the engine and keeps its own flows
+# in its own tree. With a frozen constant its only two options are to fork the engine or to
+# commit its own domain into the engine's repository — and the second one is exactly how a
+# generic base fuses to its first consumer, which is what the purity guards exist to stop.
+# A relocatable root is therefore not a convenience; it is the same property those guards
+# assert, enforced at the filesystem instead of in the source.
+#
+# `HARNESS_ABILITIES_PATH` is an `os.pathsep`-separated list, like PATH. Setting it
+# REPLACES the default rather than adding to it: an implicit union means a consumer can
+# never obtain a clean set, and something appearing from a root nobody named is worse than
+# having to name both roots.
+ABILITIES_ENV = "HARNESS_ABILITIES_PATH"
+ABILITIES_DIR_DEFAULT = REPO_ROOT / "abilities"
+
+
+def abilities_roots() -> list[Path]:
+    """The roots to search, resolved at CALL time.
+
+    Not at import time: a long-lived process — or any caller that sets the variable after
+    importing this module — would otherwise be frozen to whatever the value was when the
+    module first loaded, and that failure is silent. It reads as "that root holds nothing"
+    rather than "you configured it too late", so nobody looks at the variable.
+    """
+    raw = os.environ.get(ABILITIES_ENV, "").strip()
+    if not raw:
+        return [ABILITIES_DIR_DEFAULT]
+    roots = [Path(p).expanduser() for p in raw.split(os.pathsep) if p.strip()]
+    if not roots:
+        raise FlowError(f"{ABILITIES_ENV} is set but names no directory: {raw!r}")
+    return roots
+
+
+def _installed() -> dict[str, Path]:
+    """Map name -> directory, scanning every root in order.
+
+    Two failure modes are refused loudly rather than absorbed:
+
+    * A root named in the environment that is not a directory. A mistyped path would
+      otherwise report "nothing installed", which reads as an empty install rather than a
+      bad configuration — so the variable is the last place anyone would look. The DEFAULT
+      root is allowed to be missing, because an engine-only checkout legitimately has none.
+    * The same name present in two roots. First-wins would let a root nobody is looking at
+      shadow the one being edited, and "which of the two actually ran" stops being
+      answerable from the spec — the engine refuses to pick instead.
+    """
+    configured = bool(os.environ.get(ABILITIES_ENV, "").strip())
+    found: dict[str, Path] = {}
+    for root in abilities_roots():
+        if not root.is_dir():
+            if configured:
+                raise FlowError(
+                    f"{ABILITIES_ENV} names '{root}', which is not a directory.\n"
+                    f"  Fix the variable, or unset it to fall back to"
+                    f" {ABILITIES_DIR_DEFAULT}."
+                )
+            continue
+        for p in sorted(root.iterdir()):
+            if not p.is_dir() or not (p / "flow.yaml").is_file():
+                continue
+            if p.name in found:
+                raise FlowError(
+                    f"'{p.name}' is installed twice:\n"
+                    f"  {found[p.name]}\n"
+                    f"  {p}\n"
+                    f"  Remove one, or narrow {ABILITIES_ENV} — the engine will not pick"
+                    f" for you."
+                )
+            found[p.name] = p
+    return found
 
 SPEC_VERSION = 1
 
@@ -431,16 +504,22 @@ def _reject_unknown(mapping: dict, allowed: set, where: str, path: Path) -> None
 
 
 def available_abilities() -> list[str]:
-    if not ABILITIES_DIR.is_dir():
-        return []
-    return sorted(
-        p.name for p in ABILITIES_DIR.iterdir()
-        if p.is_dir() and (p / "flow.yaml").is_file()
-    )
+    return sorted(_installed())
+
+
+def ability_dir(ability: str) -> Path:
+    """Where `ability` lives — or where it WOULD live if it is not installed.
+
+    The fallback matters for error messages: a caller that cannot find a spec should be
+    able to print the path it looked at, and printing nothing at all makes a typo'd name
+    indistinguishable from a misconfigured root.
+    """
+    found = _installed().get(ability)
+    return found if found is not None else abilities_roots()[0] / ability
 
 
 def spec_path(ability: str) -> Path:
-    return ABILITIES_DIR / ability / "flow.yaml"
+    return ability_dir(ability) / "flow.yaml"
 
 
 _EXTENSIONS_LOADED: set[str] = set()
@@ -468,7 +547,7 @@ def load_extensions(ability: str) -> None:
     """
     if ability in _EXTENSIONS_LOADED:
         return
-    mod_path = ABILITIES_DIR / ability / "providers.py"
+    mod_path = ability_dir(ability) / "providers.py"
     _EXTENSIONS_LOADED.add(ability)
     if not mod_path.is_file():
         return
@@ -968,7 +1047,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     for dep_ability in requires:
         if dep_ability == ability:
             raise FlowError(f"{path}: ability '{ability}' requires itself")
-        if not (ABILITIES_DIR / dep_ability / "flow.yaml").exists():
+        if not spec_path(dep_ability).is_file():
             raise FlowError(
                 f"{path}: requires ability '{dep_ability}', which is not installed.\n"
                 f"  available: {', '.join(available_abilities())}"
