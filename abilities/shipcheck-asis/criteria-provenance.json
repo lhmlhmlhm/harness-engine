@@ -1916,10 +1916,43 @@
        "fact": "metrics_available",
        "equals": false
       }
+     },
+     {
+      "type": "evidence_in",
+      "kind": "session_verdict",
+      "values": [
+       "green",
+       "yellow",
+       "red"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "session_verdict",
+      "claims": [
+       "green",
+       "yellow",
+       "red"
+      ],
+      "disproved_when": {
+       "fact": "slo_readable",
+       "equals": ""
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "session_verdict",
+      "claims": [
+       "green"
+      ],
+      "disproved_when": {
+       "fact": "error_violation_count",
+       "count_gte": 3
+      }
      }
     ]
    },
-   "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。\n[2026-09-01 升级] 散文的完成标准是「指标已汇总」，原判据只要求有这么一行 —— 一份没人产出过的数字与一份如实抄下来的因此不可区分。运行时自己的记录可以独立算出 turns/calls/credits，所以「这些数字来自运行时」这句声称要经它核对；读不到时的诚实出口是 own_account。"
+   "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。\n[2026-09-01 升级] 散文的完成标准是「指标已汇总」，原判据只要求有这么一行 —— 一份没人产出过的数字与一份如实抄下来的因此不可区分。运行时自己的记录可以独立算出 turns/calls/credits，所以「这些数字来自运行时」这句声称要经它核对；读不到时的诚实出口是 own_account。\n[2026-09-02 升级] 增记 session_verdict，但**刻意不要求一个合成分数**。上游声明（loop agents/quality-slo.yaml）把质量分定义为五个加权维度，而实测只有两个的输入是本引擎真正拥有的：completeness（passed/total steps）与 correctness（error/warning violations），合计 0.6。efficiency 0.2 与 cost 0.1 依赖 duration/cost 的 p50/p95，而声明里**七层全部**status: placeholder；adherence 0.1 的 note 明写「MVP: assume 1.0 for both」。把这 0.4 折进一个数字，就得到一个读起来像实测、而近一半是替身的 figure，且折算后替身不可见。所以只核两件事：任何裁决都要求读到过声明的门槛（slo_readable 非空），以及 green 由声明自己判为 critical 的情形（error_violations > 2）反驳。"
   },
   "E20": {
    "tier_at_derivation": "T2",

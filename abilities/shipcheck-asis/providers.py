@@ -77,6 +77,7 @@ def _dir_from_env(var: str, default: str) -> Path:
     """
     return Path(os.environ.get(var) or default)
 PLAN_DIRS = ("pending", "pushed", "in-progress", "done", "shipped")
+QUALITY_SLO_DEFAULT = "~/.kiro/loop agents/quality-slo.yaml"
 SESSIONS_DIR = Path("~/.kiro/sessions/cli")
 
 
@@ -683,4 +684,102 @@ def _plan_writeback(ctx: dict) -> dict:
         got["history_record_exists"] = any(
             (d / "record.md").is_file() for d in hl.iterdir()
             if d.is_dir() and slug in d.name)
+    return got
+
+
+@facts.provider("quality_slo",
+                requires=({"file": QUALITY_SLO_DEFAULT},),
+                schema={
+    # Whether the DECLARATION could be read. A verdict with no declared bar is an opinion.
+    "slo_readable": operators.T_STR,
+    "layer_green_threshold": operators.T_STR,
+    # The honest caveat, as a fact rather than a footnote — see the docstring.
+    "baselines_are_placeholder": operators.T_BOOL,
+    # The two dimensions whose inputs this engine genuinely owns, from its own store.
+    "completeness_rate_pct": operators.T_INT,
+    "error_violation_count": operators.T_INT,
+    "warning_violation_count": operators.T_INT,
+})
+def _quality_slo(ctx: dict) -> dict:
+    """The declared quality bar, plus the two dimensions this engine can actually compute.
+
+    NO SYNTHETIC SCORE, and that is the whole design. The declaration weights five dimensions;
+    measured against what is actually available, only two of them are real here:
+
+        completeness  0.3   passed / total steps          -> this engine knows exactly
+        correctness   0.3   error and warning violations   -> this engine knows exactly
+        efficiency    0.2   needs duration p50/p95         -> every layer's baseline is
+        cost          0.1   needs cost p50/p95                marked `status: placeholder`
+        adherence     0.1   the declaration itself says "MVP: assume 1.0 for both"
+
+    So 40% of the weight is invented or constant. Computing one number from that and calling it
+    the score would produce exactly the artefact this engine exists to refuse: a figure that
+    reads as measured while nearly half of it is a stand-in, and the stand-in is invisible once
+    the weights are folded together. The two real dimensions are therefore exposed SEPARATELY,
+    the placeholder state is exposed AS A FACT, and no total is computed here.
+
+    That also re-characterises a gap reported for several rounds. "Regression baselines are
+    empty" is true, but the missing part is upstream: the declaration's own p50/p95 are
+    placeholders, so there is nothing yet to import. Building a second set here would be the
+    diverging copy this project keeps refusing.
+
+    The declaration is READ, never copied — it is the single source of truth for the bar.
+    """
+    from engine import store
+    empty = {"slo_readable": "", "layer_green_threshold": "",
+             "baselines_are_placeholder": True, "completeness_rate_pct": 0,
+             "error_violation_count": 0, "warning_violation_count": 0}
+    run_id = str(ctx.get("run_id") or "")
+
+    # ── this engine's own two dimensions, from its own store
+    got = dict(empty)
+    conn = store.connect(read_only=True)
+    try:
+        row = store.get_run(conn, run_id)
+        if row is not None:
+            from engine import flow as flowmod
+            f = flowmod.load(str(row["ability"]))
+            required = set(f.required_steps(row["variant"]))
+            done = store.closed_steps(conn, run_id)
+            if required:
+                got["completeness_rate_pct"] = int(100 * len(done & required) / len(required))
+            # blocked / breach map onto the declaration's error / warning. Named here because
+            # the two vocabularies are not the same words and a silent mapping would be a
+            # place for the meaning to drift.
+            got["error_violation_count"] = len(
+                store.violations(conn, run_id, severity="blocked"))
+            got["warning_violation_count"] = len(
+                store.violations(conn, run_id, severity="breach"))
+    finally:
+        conn.close()
+
+    # ── the declared bar
+    path = Path(os.environ.get("HARNESS_QUALITY_SLO")
+                or QUALITY_SLO_DEFAULT).expanduser()
+    # NO `is_file()` PRE-CHECK — it was there and was removed as redundant: a missing file
+    # raises below and lands on the same answer, and a guard that cannot change an outcome is
+    # the thing this engine spends its refusals on elsewhere. (Verified by mutation: removing
+    # it alone changes nothing.)
+    #
+    # The `except` is NOT redundant, and the difference is worth naming. Without it a corrupt
+    # declaration escapes as an exception, which `facts.gather` turns into a loud failure that
+    # REFUSES THE WHOLE RUN. A declaration that cannot be parsed should mean "there is no
+    # declared bar" — the verdict claim below then refuses on its own terms — not "the engine
+    # broke". Missing and corrupt land on the same honest answer by different routes.
+    try:
+        import yaml
+        decl = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa — unreadable, by any route, is "no declared bar"
+        return got
+    slo = ((decl.get("slo") or {}).get("ship-check") or {}).get("_default") or {}
+    layer = (slo.get("layer") or {})
+    if "green" not in layer:
+        return got
+    got["slo_readable"] = "yes"
+    got["layer_green_threshold"] = str(layer["green"])
+    base = (decl.get("baselines") or {}).get("ship-check") or {}
+    # Placeholder unless EVERY layer has moved off it: one real layer among seven does not make
+    # the efficiency and cost dimensions measurable.
+    got["baselines_are_placeholder"] = (
+        not base or any(str(v.get("status")) == "placeholder" for v in base.values()))
     return got

@@ -34,6 +34,7 @@ facts:
   - hot_set
   - worktree_state
   - plan_writeback
+  - quality_slo
 hooks:
 # 上报侧的五个 hook。前四个是**提醒而非义务**，这是刻意的：一个「我报了」的义务可以用
 # 一句散文销账，而那恰恰是参照系统累计 162 次强制确认的形状。真正的强制在 E24 —— 那里
@@ -75,6 +76,26 @@ hooks:
       report_progress(task_id=<C01 记的 fleet_task>, name="创建 CR",
                       description="<一句详情>", checkpoint_id="cr_created")
     到达 {{fact.fleet_event_count}} 条已到达协调方（本 run 目前）。
+# 声明里的异常规则 `high_error_violations`（error_violations > 2 -> critical）——四条规则里
+# 本引擎能完整判定的一条。另三条各缺一样：compaction 计数没有、duration p95 是占位、
+# revision 计数没暴露成事实。**不判不能判的**，所以这里只有一条。
+- id: slo-high-error-violations
+  trigger: phase_end
+  phase: cleanup
+  when:
+    fact: error_violation_count
+    count_gte: 3
+  mode: contract
+  obligation: true
+  contract: |
+    声明把「error 级 violation 超过 2 条」判为 critical，本次有 {{fact.error_violation_count}} 条
+    （另有 {{fact.warning_violation_count}} 条 warning 级）。必需步骤完成率
+    {{fact.completeness_rate_pct}}%，声明的 green 门槛是 {{fact.layer_green_threshold}}。
+    ⚠️ 分层基线仍是占位（`baselines_are_placeholder={{fact.baselines_are_placeholder}}`），
+    所以 efficiency / cost 两维**不可实测** —— 不要据此写出一个像实测的总分。
+    逐条说明这些 error 级 violation 怎么处理的，然后销账：
+      harness discharge --run {{run_id}} --hook slo-high-error-violations \
+        --evidence "<每条怎么处理的>"
 - id: fleet-central-unreachable
   trigger: phase_end
   phase: cleanup
@@ -1915,6 +1936,33 @@ steps:
       disproved_when:
         fact: metrics_available
         equals: false
+    # 会话裁决。**刻意不是一个合成分数**：声明里五个维度只有两个（completeness /
+    # correctness，合计 0.6 权重）的输入是本引擎真正拥有的；efficiency 与 cost 依赖的
+    # p50/p95 在声明里七层全部 status: placeholder，adherence 的 note 明写「MVP: assume
+    # 1.0 for both」。把这 0.4 折进一个数字里，就得到一个读起来像实测、而近一半是替身的
+    # figure —— 而折算之后那个替身再也看不见了。所以这里只要一个裁决，并核两件事。
+    - type: evidence_in
+      kind: session_verdict
+      values:
+      - green
+      - yellow
+      - red
+    - type: claim_corroborated       # 任何裁决 -> 必须读到过那份声明的门槛
+      kind: session_verdict
+      claims:
+      - green
+      - yellow
+      - red
+      disproved_when:
+        fact: slo_readable
+        equals: ''
+    - type: claim_corroborated       # 说 green -> 但声明自己把这种情形判为 critical
+      kind: session_verdict
+      claims:
+      - green
+      disproved_when:
+        fact: error_violation_count
+        count_gte: 3
 - id: E20
   phase: cleanup
   stage: close

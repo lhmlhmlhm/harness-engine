@@ -3680,6 +3680,95 @@ def test_tearing_down_an_isolated_worktree_is_guarded(env, cmd, blocked):
             "--force-steps", "--force-obligations"], env)
 
 
+def test_the_declared_bar_is_read_and_the_unmeasurable_half_stays_visible(
+        env, monkeypatch, tmp_path):
+    """Three classifications the full-flow driver cannot reach, and one design claim.
+
+    The driver's runs carry no blocked violations and always find a readable declaration, so
+    every branch below is unreachable from it — all three mutations stayed green. Each is a way
+    of quietly saying something false:
+
+    1. `placeholder` judged only by "is there a baselines block" would report the efficiency and
+       cost dimensions as measurable while every layer is still a stand-in.
+    2. Swapping the error/warning mapping makes the critical rule fire on the wrong severity —
+       the two vocabularies use different words, so the mapping is a place meaning can drift.
+    3. Treating an unreadable declaration as read turns "judged against the declared bar" into
+       an opinion with no bar, which is the one thing the verdict criterion exists to refuse.
+
+    And the design claim, asserted rather than left in a comment: NO synthetic score. Only the
+    two dimensions this engine owns are exposed, because folding in a 40% stand-in produces a
+    figure that reads as measured and hides the stand-in.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+
+    def decl(text: str) -> str:
+        f = tmp_path / f"slo-{abs(hash(text)) % 10**8}.yaml"
+        f.write_text(text, encoding="utf-8")
+        return str(f)
+
+    ctx = {"run_id": "q1", "scope": str(REPO),
+           "scope_kind": "repo", "ability": "shipcheck-asis"}
+    assert rc(["open", "shipcheck-asis", "--scope", str(REPO), "--run", "q1"], env) == OK
+
+    # ① One layer still a placeholder is enough — the dimensions are not per-layer measurable.
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", decl(
+        "slo:\n  ship-check:\n    _default:\n      layer: {green: 8.0}\n"
+        "baselines:\n  ship-check:\n"
+        "    context: {status: real, duration_p50: 1, duration_p95: 2}\n"
+        "    coding: {status: placeholder, duration_p50: 1, duration_p95: 2}\n"))
+    got = _f.gather("quality_slo", ctx)
+    assert got["slo_readable"] == "yes" and got["layer_green_threshold"] == "8.0", got
+    assert got["baselines_are_placeholder"] is True, got
+
+    # ...and only when NONE of them is does it become measurable.
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", decl(
+        "slo:\n  ship-check:\n    _default:\n      layer: {green: 7.5}\n"
+        "baselines:\n  ship-check:\n"
+        "    context: {status: real, duration_p50: 1, duration_p95: 2}\n"))
+    got = _f.gather("quality_slo", ctx)
+    assert got["baselines_are_placeholder"] is False, got
+    assert got["layer_green_threshold"] == "7.5", got
+
+    # ② A declaration with no threshold at all is NOT a readable bar.
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", decl("slo:\n  ship-check: {}\n"))
+    got = _f.gather("quality_slo", ctx)
+    assert got["slo_readable"] == "", got
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", str(tmp_path / "does-not-exist.yaml"))
+    assert _f.gather("quality_slo", ctx)["slo_readable"] == "", "a missing file is no bar"
+    # A CORRUPT declaration must land on the same answer by a different route. Without the
+    # provider's own catch it escapes as an exception, which the facts layer turns into a loud
+    # failure that refuses the whole run — "the engine broke" instead of "there is no bar".
+    bad = tmp_path / "corrupt.yaml"
+    bad.write_text("slo: [this is: not, a mapping\n  - and unbalanced\n", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", str(bad))
+    assert _f.gather("quality_slo", ctx)["slo_readable"] == "", "corrupt is no bar, not a crash"
+
+    # ③ The severity mapping, pinned by recording one of each.
+    monkeypatch.setenv("HARNESS_QUALITY_SLO", decl(
+        "slo:\n  ship-check:\n    _default:\n      layer: {green: 8.0}\n"))
+    from engine import store as _st
+    conn = _st.connect()
+    try:
+        for sev in ("blocked", "blocked", "blocked", "breach"):
+            _st.record_violation(conn, "q1", None, "probe", "x", severity=sev)
+    finally:
+        conn.close()
+    got = _f.gather("quality_slo", ctx)
+    assert got["error_violation_count"] == 3, got     # blocked -> error
+    assert got["warning_violation_count"] == 1, got   # breach  -> warning
+
+    # The design claim: no total is produced, and the two real dimensions stay separate.
+    schema = _f.schema_of("quality_slo")
+    assert not any("score" in k or "total" in k for k in schema), schema
+    assert "completeness_rate_pct" in schema and "error_violation_count" in schema, schema
+    rc(["close-run", "--run", "q1", "--result", "aborted",
+        "--force-steps", "--force-obligations"], env)
+
+
 def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path):
     """Three resolution details, each of which the full-flow driver cannot reach.
 
