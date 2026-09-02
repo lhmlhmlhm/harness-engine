@@ -13,6 +13,10 @@ version: 1
 ability: cr-reviewer
 title: 代码评审（评审他人的 CR）
 scope_kind: cr
+# 这条 flow 依赖的引擎机制。加载期与 flow 实际做的事**双向核对**：
+# 声明了没用 -> 拒；用了没声明 -> 拒。它不是开关（可关掉的强制不是强制），
+# 而是这条 flow 的表面 + 一份会指名缺了什么的引擎版本契约。
+uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose]
 scope_match: in_payload
 
 when: |

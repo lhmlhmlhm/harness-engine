@@ -18,6 +18,10 @@ version: 1
 ability: plan
 title: 方案生成（真实 plan 转写，双变体）
 scope_kind: plan_slug
+# 这条 flow 依赖的引擎机制。加载期与 flow 实际做的事**双向核对**：
+# 声明了没用 -> 拒；用了没声明 -> 拒。它不是开关（可关掉的强制不是强制），
+# 而是这条 flow 的表面 + 一份会指名缺了什么的引擎版本契约。
+uses: [ability_deps, facts, gates, hooks, obligations, optional_steps, phase_goals, prose, variants]
 
 when: |
   要为**还没开始做**的事出一份结构化方案。产出是一份待推送的方案文档，不是代码。

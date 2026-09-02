@@ -446,7 +446,7 @@ class Flow:
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget", "on_exhausted"}
-TOP_KEYS = {"role", "when", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
+TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
 STAGE_KEYS = {"id", "guide"}
@@ -1161,7 +1161,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             f"{path}: scope_match must be one of {', '.join(SCOPE_MATCH_MODES)}, "
             f"got {scope_match!r}")
 
-    return Flow(
+    built = Flow(
         when=str(raw.get("when", "")).strip(),
         role=role,
         requires=requires,
@@ -1192,6 +1192,107 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         source=path,
         order=order,
     )
+    _check_uses(built, raw.get("uses"), path)
+    return built
+
+
+# WHAT A FLOW DECLARES IT RELIES ON, AND WHY IT IS A CLAIM RATHER THAN A SWITCH
+#
+# `uses:` names the engine mechanisms a flow actually exercises. It is deliberately NOT a
+# feature switch. A mechanism that can be turned off is not enforcement: the value of the step
+# ledger, the violation record and the evidence rows is precisely that nothing can opt out of
+# them, and a flow able to declare `state: off` would be issuing itself a free pass. This
+# repository already settled the same question once, for `role:` — a label buys no exemption
+# there, and the two constraints pull in opposite directions so that neither role is the cheap
+# one. The secondary cost is arithmetic: N switches are 2**N configurations, and the tests
+# cover one of them.
+#
+# So what it buys instead:
+#   * a load-time cross-check in BOTH directions — declared but unused is the "announced and
+#     never read" shape this codebase keeps deleting, and used but undeclared means the list is
+#     not the surface it claims to be;
+#   * a visible minimum for whoever writes the next flow: what must be provided, what can be
+#     left out;
+#   * a version contract that names what is missing. A flow declaring a mechanism this engine
+#     does not implement is refused BY NAME, which is a far more useful answer than comparing
+#     two version numbers — it says which capability is absent.
+#
+# Each entry must be DETECTABLE from the loaded flow. A capability the engine cannot see in a
+# spec could be declared falsely and nothing would notice, and an undetectable entry is exactly
+# the unfalsifiable claim the cross-check exists to prevent.
+ENGINE_CAPABILITIES: dict = {
+    "gates": lambda f: any(st.gate != GATE_NONE for st in f.steps.values()),
+    "guards": lambda f: bool(f.guards),
+    # NOT `facts_providers`: that tuple is never empty — a flow saying nothing still gets
+    # the default provider, so testing it reported every flow as using facts, including
+    # one with no facts block at all. The schema is what "this flow has facts to read"
+    # actually means, and a detector that cannot tell DECLARED from DEFAULTED makes the
+    # whole cross-check demand a declaration for something nobody opted into.
+    "facts": lambda f: bool(f.facts_schema),
+    "variants": lambda f: bool(f.variant_spec),
+    "hooks": lambda f: bool(f.hooks),
+    "obligations": lambda f: any(h.obligation for h in f.hooks),
+    "hook_commands": lambda f: any(h.mode == "command" for h in f.hooks),
+    "prose": lambda f: f.prose_root is not None,
+    "stages": lambda f: any(f.phase_stages.values()),
+    "phase_goals": lambda f: bool(f.phase_goals),
+    "exclusive_groups": lambda f: bool(f.exclusive_groups),
+    "repeatable": lambda f: any(st.repeatable for st in f.steps.values()),
+    "optional_steps": lambda f: any(st.optional for st in f.steps.values()),
+    "ability_deps": lambda f: bool(f.requires),
+}
+
+
+def capabilities_used(f: "Flow") -> tuple[str, ...]:
+    """Which mechanisms this flow actually exercises, read off the flow itself."""
+    return tuple(name for name, seen in ENGINE_CAPABILITIES.items() if seen(f))
+
+
+def _check_uses(f: "Flow", declared_raw, path: Path) -> tuple[str, ...]:
+    """Cross-check `uses:` against what the flow does. Both directions are fatal.
+
+    Silence is tolerated only for a fixture: those exist to exercise the engine, so making each
+    one enumerate the machinery it pokes is churn with no reader. A `production` flow is the
+    thing a consumer picks up, so its surface has to be stated — the same reasoning that makes
+    `when:` mandatory there. And a fixture that DOES declare the list is held to it, because a
+    declaration left to rot is worse than none.
+    """
+    if declared_raw is None:
+        declared: tuple[str, ...] = ()
+        stated = False
+    else:
+        if not isinstance(declared_raw, list):
+            raise FlowError(f"{path}: 'uses' must be a list of engine capability names")
+        declared = tuple(str(x).strip() for x in declared_raw)
+        stated = True
+    unknown = [d for d in declared if d not in ENGINE_CAPABILITIES]
+    if unknown:
+        raise FlowError(
+            f"{path}: declares capabilit{'y' if len(unknown) == 1 else 'ies'} "
+            f"{', '.join(repr(u) for u in unknown)}, which this engine does not implement.\n"
+            f"  known: {', '.join(ENGINE_CAPABILITIES)}\n"
+            f"  Either the name is wrong, or this flow was written for a NEWER engine than "
+            f"this one — that is what the list is for."
+        )
+    if f.role != ROLE_PRODUCTION and not stated:
+        return declared
+    used = set(capabilities_used(f))
+    over = sorted(set(declared) - used)
+    under = sorted(used - set(declared))
+    if over:
+        raise FlowError(
+            f"{path}: declares {', '.join(repr(o) for o in over)} in 'uses', and nothing in "
+            f"this flow exercises it.\n"
+            f"  A declaration nothing reads is the shape that rots first. Remove it, or use it."
+        )
+    if under:
+        raise FlowError(
+            f"{path}: exercises {', '.join(repr(u) for u in under)} without declaring it in "
+            f"'uses'.\n"
+            f"  uses: [{', '.join(sorted(used))}]\n"
+            f"  An incomplete list is worse than none: it reads as a complete surface."
+        )
+    return declared
 
 
 def _topo_order(steps: dict, path: Path) -> tuple[str, ...]:

@@ -5167,3 +5167,196 @@ def test_status_shows_who_delegated_to_whom_and_whether_guards_can_adjudicate(en
                "--allow-concurrent"], env) == OK
     out = run(["status"], env).stdout
     assert "will NOT adjudicate" in out and "(partial)" in out, out
+
+
+# ------------------------------------------------- an exit code for "this is our bug"
+
+INTERNAL = 5
+
+
+def test_a_crash_exits_on_its_own_code_and_not_the_usage_one(monkeypatch, capsys):
+    """1 must mean the input or the environment; the engine failing gets its own number.
+
+    Python exits 1 on an uncaught exception and 1 is also this CLI's usage error, so anything
+    reading the number — a tool hook, and every assertion in this file — could not tell a crash
+    from a refusal. That was not hypothetical: a mutation removing the newer-store refusal fell
+    through to a RuntimeError, and a test asserting `== USAGE` passed and called the crash a
+    refusal.
+
+    Adding a message assertion to each affected test would have been fixing twenty symptoms of
+    one ambiguity. This removes it at the source.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    def boom(_args):
+        raise ValueError("deliberate")
+
+    monkeypatch.setattr(h, "cmd_status", boom)
+    assert h.main(["status"]) == INTERNAL
+    assert INTERNAL != h.USAGE
+    # The traceback still goes out: a defect that hides its location is worse than an ugly code.
+    err = capsys.readouterr().err
+    assert "ValueError: deliberate" in err and "INTERNAL" in err, err
+
+
+def test_a_usage_problem_still_exits_one(env):
+    """The other half — moving crashes to 5 must not move ordinary refusals with them."""
+    c = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db")
+    try:
+        c.execute("PRAGMA user_version = 0")
+        c.commit()
+    finally:
+        c.close()
+    out = run(["status"], env)
+    assert out.returncode == USAGE
+    assert "Traceback" not in out.stderr, out.stderr
+
+
+# ------------------------------------------------- what a flow declares it relies on
+
+def _uses_declared(ability: str) -> set[str]:
+    import yaml as _y
+    spec = _y.safe_load((REPO / "abilities" / ability / "flow.yaml").read_text(encoding="utf-8"))
+    return set(spec.get("uses") or [])
+
+
+def test_every_installed_production_flow_declares_exactly_what_it_uses():
+    """The cross-check, asserted from outside the loader that performs it.
+
+    Load-time enforcement is the mechanism; this is what notices if the mechanism stops running.
+    Reading the yaml directly rather than a field on the loaded flow is deliberate — a check
+    that asks the loader what the loader concluded would agree with it by construction.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as F
+    seen_production = 0
+    for name in F.available_abilities():
+        f = F.load(name)
+        if f.role != F.ROLE_PRODUCTION:
+            continue
+        seen_production += 1
+        assert _uses_declared(name) == set(F.capabilities_used(f)), name
+    assert seen_production >= 2, "fewer than two production flows; this test would be vacuous"
+
+
+def test_every_capability_the_engine_names_is_exercised_by_something():
+    """A detector nothing exercises could be simply wrong, and nothing would say so.
+
+    This is the mirror of the cross-check: the specs prove the vocabulary, the vocabulary
+    constrains the specs. An entry no installed flow reaches is a claim about the engine that
+    has never been evaluated — and `facts` was exactly that kind of mistake, reporting every
+    flow as using it because the underlying tuple is never empty.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as F
+    covered: set[str] = set()
+    for name in F.available_abilities():
+        covered |= set(F.capabilities_used(F.load(name)))
+    missing = sorted(set(F.ENGINE_CAPABILITIES) - covered)
+    assert not missing, f"no installed flow exercises: {', '.join(missing)}"
+
+
+def _uses_spec(name: str, body: str) -> Path:
+    d = REPO / "abilities" / name
+    d.mkdir(exist_ok=True)
+    (d / "flow.yaml").write_text(
+        f"version: 1\nability: {name}\nscope_kind: s\n{body.strip()}\n", encoding="utf-8")
+    return d
+
+
+_BODY_WITH_A_GATE = """
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    gate: affirm
+    directive: Do it.
+"""
+
+
+@pytest.mark.parametrize("head, why", [
+    ("role: production\nwhen: a routable flow that says nothing about what it relies on\n",
+     "production must state its surface"),
+    ("role: production\nwhen: a routable flow claiming something it does not do\n"
+     "uses: [gates, guards]\n",
+     "declared and never exercised"),
+    ("role: fixture\nuses: [gates, guards]\n",
+     "a fixture that declares is held to it"),
+    ("role: production\nwhen: a routable flow naming a mechanism this engine has no idea about\n"
+     "uses: [gates, teleportation]\n",
+     "unknown capability"),
+    ("role: production\nwhen: a routable flow whose uses is the wrong shape entirely\n"
+     "uses: gates\n",
+     "not a list"),
+])
+def test_a_mismatched_capability_list_is_refused_at_load(env, head, why):
+    """Each refusal removes a way for the list to be something other than the surface.
+
+    Silence is tolerated only for a fixture, which exists to exercise the engine — making each
+    one enumerate the machinery it pokes is churn with no reader. A fixture that DOES declare is
+    held to it, because a declaration left to rot is worse than none.
+    """
+    d = _uses_spec("zzz_uses", head + _BODY_WITH_A_GATE)
+    try:
+        assert rc(["validate", "zzz_uses"], env) == BAD_SPEC, why
+    finally:
+        _rm(d)
+
+
+def test_a_fixture_may_stay_silent_and_a_correct_list_passes(env):
+    """The positive control: the refusals above are not this check always saying no."""
+    d = _uses_spec("zzz_uses_ok", "role: fixture\n" + _BODY_WITH_A_GATE)
+    try:
+        assert rc(["validate", "zzz_uses_ok"], env) == OK
+    finally:
+        _rm(d)
+    d = _uses_spec("zzz_uses_ok2",
+                   "role: production\nwhen: a routable flow that states its surface exactly\n"
+                   "uses: [gates]\n" + _BODY_WITH_A_GATE)
+    try:
+        assert rc(["validate", "zzz_uses_ok2"], env) == OK
+    finally:
+        _rm(d)
+
+
+def test_an_unknown_capability_says_the_engine_may_be_the_older_one(env):
+    """The version contract, and why it is better than comparing two numbers.
+
+    A flow written for a newer engine gets told WHICH mechanism is absent. A version comparison
+    would only say that one side is older, leaving the reader to find out what changed.
+    """
+    d = _uses_spec("zzz_uses_new",
+                   "role: production\nwhen: a routable flow from a future engine\n"
+                   "uses: [gates, leases]\n" + _BODY_WITH_A_GATE)
+    try:
+        out = run(["validate", "zzz_uses_new"], env)
+        assert out.returncode == BAD_SPEC
+        assert "'leases'" in out.stderr and "NEWER engine" in out.stderr, out.stderr
+        assert "Traceback" not in out.stderr, out.stderr
+    finally:
+        _rm(d)
+
+
+def test_a_defect_in_the_argument_parser_cannot_escape_as_a_bare_one(monkeypatch):
+    """Parsing is inside the guarded region too, not just command execution.
+
+    A defect in the parser would otherwise leave main() as an exception, and the process would
+    exit 1 — indistinguishable from a usage error, which is the whole ambiguity being removed.
+    Asserted separately because a test that only breaks a COMMAND cannot tell the two placements
+    apart: parse_args succeeds either way.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    def boom():
+        raise RuntimeError("the parser itself is broken")
+
+    monkeypatch.setattr(h, "build_parser", boom)
+    assert h.main(["status"]) == INTERNAL

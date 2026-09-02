@@ -22,13 +22,14 @@ import argparse
 import json
 import os
 import sys
+import traceback
 import uuid
 from pathlib import Path
 
 from . import flow as flowmod
 from . import conditions, facts, hooks as hookmod, predicates, proof, prose, store
 
-OK, USAGE, BAD_SPEC, REFUSED, BLOCKED = 0, 1, 2, 3, 4
+OK, USAGE, BAD_SPEC, REFUSED, BLOCKED, INTERNAL = 0, 1, 2, 3, 4, 5
 
 
 def _err(msg: str) -> None:
@@ -148,6 +149,8 @@ def cmd_validate(args) -> int:
         cov = prose.coverage(f)
         print(f"✅ {name}: {len(f.steps)} steps, {len(f.phases)} phases, "
               f"{len(f.guards)} guard(s); order ok")
+        used = flowmod.capabilities_used(f)
+        print(f"   uses ({len(used)}): {', '.join(used)}")
         # Report criterion STRENGTH, not just "not attest". A flow can be 100% non-attest and
         # still be almost entirely self-reported; printing "machine-checked: N/N" would be
         # true and would mean far less than it sounds.
@@ -1683,8 +1686,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    """Every exit from the CLI passes through here, INCLUDING an unexpected one.
+
+    WHY THERE IS A CODE FOR "THIS IS OUR BUG". Python exits 1 on an uncaught exception, and 1
+    is also this CLI's usage/environment error — so a crash was indistinguishable from a
+    refusal for anything that reads the number, which is what a tool hook and every test here
+    do. It was not theoretical: a mutation that removed the newer-store refusal fell through to
+    a RuntimeError, and the test asserting `== USAGE` passed and called the crash a refusal.
+
+    Fixing that by adding a message assertion to every affected test would have been fixing
+    ~20 symptoms of one ambiguity. A distinct code removes it at the source: 1 now means the
+    input or the environment, 5 means the engine.
+
+    The traceback still goes to stderr — a bug that hides its own location is worse than one
+    with an ugly exit — and `parse_args` is inside the try, so a defect in the parser itself
+    cannot escape as a bare 1 either. `KeyboardInterrupt` is a BaseException and deliberately
+    passes straight through: the user interrupting is not an engine fault.
+    """
     try:
+        args = build_parser().parse_args(argv)
         return args.fn(args)
     except store.StoreUnusable as exc:
         _err(f"⛔ {exc}")
@@ -1697,8 +1717,15 @@ def main(argv: list[str] | None = None) -> int:
         # traceback, which reads as an engine bug rather than as their configuration.
         _err(f"⛔ {exc}")
         return BAD_SPEC
-    except SystemExit as exc:  # raised by the _or_exit helpers
+    except SystemExit as exc:  # raised by the _or_exit helpers, and by argparse
         return int(exc.code or 0)
+    except Exception:
+        traceback.print_exc()
+        _err("⛔ INTERNAL: the engine failed in a way it does not account for.\n"
+             "    This is a defect here, not a problem with your input — the traceback above\n"
+             "    is the whole report. Exit 5 is reserved for it so that nothing has to tell\n"
+             "    a crash apart from a refusal by reading text.")
+        return INTERNAL
 
 
 if __name__ == "__main__":

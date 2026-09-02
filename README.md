@@ -19,7 +19,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   234 个测试
+└── tests/                   246 个测试
 ```
 
 ## 快速开始
@@ -65,9 +65,21 @@ HARNESS_ABILITIES_PATH=/root-a:/root-b    ./bin/harness validate their-flow   # 
 | 2 | **flow spec 本身非法**（fail-closed，不碰状态库） | CI |
 | 3 | **REFUSED** — 规则未满足（依赖未关 / 谓词为假 / gate 无背书） | 能力自己的驱动方 |
 | 4 | **BLOCKED** — 受保护动作缺 gate | 外部工具 hook |
+| 5 | **INTERNAL** — 引擎自己坏了，traceback 在 stderr | 人（这是本仓的 bug） |
 
 3 和 4 分开是因为受众不同。3 回答「你还不能关这一步」；4 回答「不要让这条命令跑」。
 一个 hook 只需要判断 `== 4`，永远不用解析文本。
+
+**5 是后加的，为了消掉一个真实盲区。** Python 未捕获异常退出 1，而 1 也是这里的用法/环境错误——
+于是**任何按数字判断的东西（工具 hook，以及本仓每一条断言）都分不出崩溃与拒绝**。这不是假想：
+一次变异去掉了「库比引擎新」的拒绝，它落到一条 `RuntimeError`，而断言 `== USAGE` 的测试**通过了，
+并把那次崩溃称作一次拒绝**。
+
+给二十条受影响的测试各加一句文案断言，是修同一个歧义的二十个症状。**加一个码是从源头消掉它**：
+现在 1 只表示输入或环境，5 只表示引擎。`parse_args` 也在保护区内（解析器自己的缺陷不能漏成裸 1），
+traceback 照旧打到 stderr（一个藏起自己位置的 bug 比一个退出码难看的更糟），而
+`KeyboardInterrupt` 是 `BaseException`，**刻意直穿**——用户中断不是引擎的过错。
+
 
 ## 一条 flow 长什么样
 
@@ -303,7 +315,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 234 passed
+python3 -m pytest tests/ -q      # 246 passed
 ```
 
 分两类：
@@ -313,7 +325,7 @@ python3 -m pytest tests/ -q      # 234 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（195）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（207）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
@@ -595,7 +607,50 @@ holder 之后，声明在两侧都是单射的，于是图是若干互不相交�
 `partial`。一条跑不到的分支比没有更糟，**它读起来像一个隐患已经被处理了**。这条由一个测试
 钉住：把环放在旁支上，如果走图会不终止，那个测试会挂住。
 
+### `uses:` —— 一条 flow 声明它依赖引擎的哪些机制
+
+```yaml
+uses: [exclusive_groups, facts, gates, guards, hooks, obligations,
+       optional_steps, phase_goals, prose, repeatable, stages]
+```
+
+**它不是开关。** 可关掉的强制不是强制：step 台账、violation 记录、evidence 行的全部价值就在于
+**没人能退出它们**，而一条能声明 `state: off` 的 flow 等于在给自己发免票。本仓已经解过同一道题
+——`role:` 那轮的结论是**标签换不来免票**，而且两条约束方向相反，所以两个角色都不是便宜的那个。
+次要但真实的代价是算术：**N 个开关是 2ⁿ 种配置，而测试覆盖其中一种。**
+
+它买到的是另外三样：
+
+| | |
+|---|---|
+| **加载期双向核对** | 声明了没用 → 拒（那正是本仓反复删掉的「声明了没人读」）；用了没声明 → 拒（一份不完整的清单**比没有更糟**，因为它读起来像一个完整的表面） |
+| **写下一条 flow 时看得见的最小面** | 必须提供什么、可以不碰什么 |
+| **会指名缺了什么的版本契约** | 声明了本引擎没实现的机制 → **按名字**拒绝。这比比较两个版本号有用得多——它说得出**哪一个能力不在** |
+
+```
+$ harness validate <a flow from a newer engine>
+⛔ declares capability 'leases', which this engine does not implement.
+  known: gates, guards, facts, variants, hooks, obligations, hook_commands, prose,
+         stages, phase_goals, exclusive_groups, repeatable, optional_steps, ability_deps
+  Either the name is wrong, or this flow was written for a NEWER engine than this one
+  — that is what the list is for.
+```
+
+**每一项都必须能从已加载的 flow 检测出来。** 一个引擎在 spec 里看不见的能力可以被虚假声明而无人
+察觉，而不可检测的条目正是这套核对要防的「不可证伪的声称」。有一条反向测试要求 **14 项每一项都
+被某条已装 flow 真实行使**——否则那个检测器本身可能是错的而没人会说。
+
+**它抓到的第一个错误就是我自己的**：`facts` 最初检测 `facts_providers`，而那个元组**永不为空**
+（一条什么都不说的 flow 也会拿到默认 provider），于是每条 flow 都被报成「在用 facts」，包括一条
+连 `facts` 块都没有的。**一个分不清「声明」与「默认」的检测器，会让整套核对去要求一份没人选择过的
+声明。** 正确的检测是 `facts_schema` ——「这条 flow 到底有没有事实可读」。
+
+沉默只对**夹具**容忍：它们存在的目的就是行使引擎机制，让每一个都去枚举自己捅过的机械是纯 churn、
+没有读者。`production` 是消费方会拿起来的东西，所以它的表面必须被说出来——这和 `when:` 在那里是
+必填的是同一条理由。而**声明了的夹具会被按声明要求**，因为一份放着腐烂的声明比没有更糟。
+
 ### 多个 session 同时跑：隔离轴是 scope，不是 session
+
 
 引擎里**没有 session 这个概念**——`run` 表 14 列里没有任何一列记「谁开的」，`engine/` 里
 `session` / 进程身份 / agent 身份零命中。这是刻意的：守卫回答的是「这件事能不能对**这个东西**
