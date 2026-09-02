@@ -30,7 +30,63 @@ facts:
   - decision_gate
   - review_comments
   - run_metrics
+  - fleet_central
 hooks:
+# 上报侧的五个 hook。前四个是**提醒而非义务**，这是刻意的：一个「我报了」的义务可以用
+# 一句散文销账，而那恰恰是参照系统累计 162 次强制确认的形状。真正的强制在 E24 —— 那里
+# 三个合法值各有一个派生事实能反驳它。第五个是义务，因为「协调方连不上」是环境事实，
+# 必须留痕而不是消失。
+- id: fleet-milestone-context
+  trigger: phase_end
+  phase: context
+  mode: contract
+  contract: |
+    到达一个标准里程碑。现在上报，用完成态措辞（不要报「开始 X」）：
+      report_progress(task_id=<C01 记的 fleet_task>, name="完成调研",
+                      description="<一句详情>", checkpoint_id="context_explored")
+    到达 {{fact.fleet_event_count}} 条已到达协调方（本 run 目前）。
+- id: fleet-milestone-coding
+  trigger: phase_end
+  phase: coding
+  mode: contract
+  contract: |
+    到达一个标准里程碑。现在上报，用完成态措辞（不要报「开始 X」）：
+      report_progress(task_id=<C01 记的 fleet_task>, name="完成实现",
+                      description="<一句详情>", checkpoint_id="implementation_done")
+    到达 {{fact.fleet_event_count}} 条已到达协调方（本 run 目前）。
+- id: fleet-milestone-verification
+  trigger: phase_end
+  phase: verification
+  mode: contract
+  contract: |
+    到达一个标准里程碑。现在上报，用完成态措辞（不要报「开始 X」）：
+      report_progress(task_id=<C01 记的 fleet_task>, name="单元测试",
+                      description="<一句详情>", checkpoint_id="tests_passed")
+    到达 {{fact.fleet_event_count}} 条已到达协调方（本 run 目前）。
+- id: fleet-milestone-execution
+  trigger: phase_end
+  phase: execution
+  mode: contract
+  contract: |
+    到达一个标准里程碑。现在上报，用完成态措辞（不要报「开始 X」）：
+      report_progress(task_id=<C01 记的 fleet_task>, name="创建 CR",
+                      description="<一句详情>", checkpoint_id="cr_created")
+    到达 {{fact.fleet_event_count}} 条已到达协调方（本 run 目前）。
+- id: fleet-central-unreachable
+  trigger: phase_end
+  phase: cleanup
+  when:
+    all_of:
+    - {fact: fleet_applicable, equals: true}
+    - {fact: fleet_reachable, equals: false}
+  mode: contract
+  obligation: true
+  contract: |
+    这个 run 服务的是一个被派发的任务，但协调方读不到 —— 可能连不上，也可能它答得上话
+    却答不出这个任务（那个工具把后者叫 indeterminate，并且明说「could not look ->
+    NO-OP is NOT granted」）。两种都不是「没什么要报」。说明是哪一种，然后销账：
+      harness discharge --run {{run_id}} --hook fleet-central-unreachable \
+        --evidence "<连不上 / 答不出这个任务；以及上报内容留在了哪里>"
 # 两个 hook 读同一个 provider，但问的是两件不同的事，而这正是能力层与 provider 诚实位
 # 各管一维的示例：能力缺失由引擎回答（该 provider 的事实全部不可用，读它的条件直接拒绝），
 # 「在但没数据」由 provider 自己回答（metrics_available=false）。合成一个布尔就会让
@@ -329,8 +385,15 @@ steps:
     完成：找到方案文档并完成状态迁移
   optional: true
   completion:
-    type: evidence
-    kind: plan_doc
+    type: all_checks
+    checks:
+    - type: evidence
+      kind: plan_doc
+    # 「这个 run 服务的是哪个被派发的任务」以前无处可读，于是后面「已上报」这句声称
+    # 没有任何可核对的对象。值是派发方给的任务 id，或 `local`（不是被派发的活）。
+    # 记在这里而不是收尾处：收尾时才声明是否适用，等于让想跳过上报的人自己决定适用性。
+    - type: evidence
+      kind: fleet_task
 - id: C02
   phase: context
   stage: resume
@@ -1791,6 +1854,35 @@ steps:
       values:
       - persisted
       - warned
+    # 上报的收口。三个合法值**每一个**都有各自的反驳事实 —— 这是刻意的：只核对
+    # 「已上报」会把另两个变成免费出口，而参照系统正是在那里累计了 162 次强制确认。
+    - type: evidence_in
+      kind: fleet_report
+      values:
+      - sent
+      - unreachable
+      - not_applicable
+    - type: claim_corroborated       # 说上报了 -> 协调方那边必须真的有东西到达
+      kind: fleet_report
+      claims:
+      - sent
+      disproved_when:
+        fact: fleet_event_count
+        count_lte: 0
+    - type: claim_corroborated       # 说连不上 -> 但它其实答得上来
+      kind: fleet_report
+      claims:
+      - unreachable
+      disproved_when:
+        fact: fleet_reachable
+        equals: true
+    - type: claim_corroborated       # 说不适用 -> 但 C01 记的是一个真任务 id
+      kind: fleet_report
+      claims:
+      - not_applicable
+      disproved_when:
+        fact: fleet_applicable
+        equals: true
 - id: E25
   phase: cleanup
   stage: close

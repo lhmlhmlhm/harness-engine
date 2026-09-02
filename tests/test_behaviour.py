@@ -3466,6 +3466,155 @@ def test_an_unreachable_review_host_refuses_the_claim_of_having_read_it(env):
         _cap_cleanup(d)
 
 
+def _fleet_fixture() -> pathlib.Path:
+    """A fixture carrying the same three-way corroboration the delivery flow uses on reporting.
+
+    Borrows the real provider through `requires` rather than re-implementing it: the thing under
+    test is whether each legal value of the claim can be contradicted, and a re-implementation
+    would test a copy.
+    """
+    d = REPO / "abilities" / "__fleet_test__"
+    d.mkdir(exist_ok=True)
+    (d / "flow.yaml").write_text(
+        "version: 1\nability: __fleet_test__\nrole: fixture\nscope_kind: repo\n"
+        "requires: [shipcheck-asis]\n"
+        "facts:\n  providers: [fleet_central]\n"
+        "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
+        "steps:\n"
+        "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
+        "    completion: {type: evidence, kind: fleet_task}\n"
+        "  - id: S2\n    phase: p\n    title: t\n    directive: d\n"
+        "    deps: [S1]\n"
+        "    completion:\n"
+        "      type: all_checks\n"
+        "      checks:\n"
+        "      - {type: evidence_in, kind: fleet_report,"
+        " values: [sent, unreachable, not_applicable]}\n"
+        "      - {type: claim_corroborated, kind: fleet_report, claims: [sent],"
+        " disproved_when: {fact: fleet_event_count, count_lte: 0}}\n"
+        "      - {type: claim_corroborated, kind: fleet_report, claims: [unreachable],"
+        " disproved_when: {fact: fleet_reachable, equals: true}}\n"
+        "      - {type: claim_corroborated, kind: fleet_report, claims: [not_applicable],"
+        " disproved_when: {fact: fleet_applicable, equals: true}}\n",
+        encoding="utf-8")
+    return d
+
+
+@pytest.mark.parametrize("task,url,claim,want", [
+    # A run not serving a dispatched task: "nothing to report to" is TRUE and passes.
+    ("local", "", "not_applicable", OK),
+    # ...but the same run may not claim it SENT something. Nothing arrived anywhere.
+    ("local", "", "sent", REFUSED),
+    # A real task id with a coordinator that cannot be reached: "unreachable" is honest.
+    ("T-9999", "https://127.0.0.1:9", "unreachable", OK),
+    # Same run claiming it reported: refused, because nothing arrived.
+    ("T-9999", "https://127.0.0.1:9", "sent", REFUSED),
+    # And it may not claim the task does not apply — one is on the record.
+    ("T-9999", "https://127.0.0.1:9", "not_applicable", REFUSED),
+])
+def test_every_legal_value_of_the_reporting_claim_can_be_contradicted(env, task, url, claim, want):
+    """EACH value, not just the interesting one — that asymmetry is the whole point.
+
+    The behavioural standard for dispatched work asks for a report at each milestone. In the
+    reference system that is prose plus a fire-once hook, so "I reported it" is accepted on its
+    own word; its own ledger carries 162 forced acknowledgements and 24 recorded non-arrivals.
+    Checking only `sent` would move the hole rather than close it: `unreachable` and
+    `not_applicable` would become the free exits. So all three are corroborated, each by a
+    different derived fact, and this asserts all three.
+    """
+    d = _fleet_fixture()
+    e = dict(env)
+    if url:
+        e["FLEET_CENTRAL_URL"] = url
+    try:
+        rid = f"fl-{task}-{claim}".replace("_", "")
+        assert rc(["open", "__fleet_test__", "--scope", str(REPO), "--run", rid], env) == OK
+        assert rc(["evidence", "--run", rid, "--step", "S1",
+                   "--kind", "fleet_task", "--value", task], env) == OK
+        assert rc(["close-step", "--run", rid, "--step", "S1"], env) == OK
+        assert rc(["evidence", "--run", rid, "--step", "S2",
+                   "--kind", "fleet_report", "--value", claim], env) == OK
+        r = run(["close-step", "--run", rid, "--step", "S2"], e)
+        assert r.returncode == want, (task, claim, r.stdout + r.stderr)
+        if want == REFUSED:
+            assert "claim_corroborated" in r.stderr, r.stderr
+    finally:
+        _cap_cleanup(d)
+
+
+def test_the_delivery_flow_actually_uses_the_three_way_corroboration(env):
+    """The fixture above proves the MECHANISM; this pins that the real flow uses it.
+
+    Written after the fixture failed to catch a mutation of the real ability — the fixture
+    carries its own copy of the criteria, so breaking `shipcheck-asis` left it green. A fixture
+    that restates what it is guarding guards only itself.
+
+    The sharpest assertion here is the last one: three claims must be contradicted by three
+    DISTINCT facts. Two claims sharing one disproof reads like full coverage while leaving one
+    value effectively unchecked.
+    """
+    import yaml as _y
+    fl = _y.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
+    e24 = next(x for x in fl["steps"] if x["id"] == "E24")
+    checks = e24["completion"]["checks"]
+    legal = next(c["values"] for c in checks
+                 if c.get("kind") == "fleet_report" and c["type"] == "evidence_in")
+    claims = [c for c in checks
+              if c["type"] == "claim_corroborated" and c.get("kind") == "fleet_report"]
+    assert len(claims) == len(legal), (len(claims), legal)
+    claimed = [v for c in claims for v in c["claims"]]
+    assert sorted(claimed) == sorted(legal), (claimed, legal)
+    facts_used = {c["disproved_when"]["fact"] for c in claims}
+    assert len(facts_used) == len(claims), (
+        f"{len(claims)} claims share only {len(facts_used)} disproving fact(s): {facts_used}. "
+        f"Two claims contradicted by one fact leaves one value effectively unchecked."
+    )
+    # And the run must record WHICH task it serves, early — otherwise the claim at the end has
+    # nothing to be checked against.
+    c01 = next(x for x in fl["steps"] if x["id"] == "C01")
+    kinds = {c.get("kind") for c in c01["completion"]["checks"]}
+    assert "fleet_task" in kinds, kinds
+
+
+def test_a_coordinator_that_answers_but_not_about_this_task_is_not_reachable(env):
+    """"Could not look" must not read as "looked and it was fine".
+
+    An endpoint that responds while knowing nothing about this task is a third state, and the
+    copied tool names it `indeterminate` with the comment "we could not look -> NO-OP is NOT
+    granted". Mapping it to reachable would let a run claim `unreachable` be refused while
+    nothing had in fact been verified — so it maps to NOT reachable, and this pins it with a
+    local server that answers 404 rather than depending on any network.
+    """
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                      # noqa: N802 — http.server names this
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"nope")
+
+        def log_message(self, *a):             # keep the test output clean
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    d = _fleet_fixture()
+    e = {**env, "FLEET_CENTRAL_URL": f"http://127.0.0.1:{srv.server_port}"}
+    try:
+        assert rc(["open", "__fleet_test__", "--scope", str(REPO), "--run", "fli"], env) == OK
+        assert rc(["evidence", "--run", "fli", "--step", "S1",
+                   "--kind", "fleet_task", "--value", "T-1"], env) == OK
+        assert rc(["close-step", "--run", "fli", "--step", "S1"], env) == OK
+        assert rc(["evidence", "--run", "fli", "--step", "S2",
+                   "--kind", "fleet_report", "--value", "unreachable"], env) == OK
+        # The server ANSWERED — so if 404 were read as reachable, this claim would be refused.
+        assert rc(["close-step", "--run", "fli", "--step", "S2"], e) == OK
+    finally:
+        srv.shutdown()
+        _cap_cleanup(d)
+
+
 def test_no_ability_declares_a_provider_nothing_reads(env):
     """A declared provider whose facts no condition reads is DEAD WIRING.
 

@@ -149,10 +149,19 @@
     "kind": "plan_doc"
    },
    "live_spec": {
-    "type": "evidence",
-    "kind": "plan_doc"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence",
+      "kind": "plan_doc"
+     },
+     {
+      "type": "evidence",
+      "kind": "fleet_task"
+     }
+    ]
    },
-   "reason": "散文完成标准：「找到方案文档并完成状态迁移。」输出是「方案文档状态从『已排期』迁到『进行中』，并移动到对应目录」。共享 kind plan_doc（方案文档路径，跨层引用）正是此处该落的记录；记下 plan_doc 路径即证明「找到方案文档」这一前提成立。optional 步骤但按硬约束#1不放宽——evidence（T1）是留痕而非放宽。状态迁移本身的目标态由散文/skip 处理。"
+   "reason": "散文完成标准：「找到方案文档并完成状态迁移。」输出是「方案文档状态从『已排期』迁到『进行中』，并移动到对应目录」。共享 kind plan_doc（方案文档路径，跨层引用）正是此处该落的记录；记下 plan_doc 路径即证明「找到方案文档」这一前提成立。optional 步骤但按硬约束#1不放宽——evidence（T1）是留痕而非放宽。状态迁移本身的目标态由散文/skip 处理。\n[2026-09-02 升级] 增记 fleet_task —— 「这个 run 服务的是哪个被派发的任务」以前无处可读，于是收尾处「已上报」这句声称没有可核对的对象。记在开头而不是收尾：收尾时才声明是否适用，等于让想跳过上报的人自己决定适用性。值是任务 id 或 local。"
   },
   "C02": {
    "tier_at_derivation": "T3",
@@ -1884,10 +1893,52 @@
        "persisted",
        "warned"
       ]
+     },
+     {
+      "type": "evidence_in",
+      "kind": "fleet_report",
+      "values": [
+       "sent",
+       "unreachable",
+       "not_applicable"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "fleet_report",
+      "claims": [
+       "sent"
+      ],
+      "disproved_when": {
+       "fact": "fleet_event_count",
+       "count_lte": 0
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "fleet_report",
+      "claims": [
+       "unreachable"
+      ],
+      "disproved_when": {
+       "fact": "fleet_reachable",
+       "equals": true
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "fleet_report",
+      "claims": [
+       "not_applicable"
+      ],
+      "disproved_when": {
+       "fact": "fleet_applicable",
+       "equals": true
+      }
      }
     ]
    },
-   "reason": "完成标准原文「分数已落库，小结已给出」有两件产物，但散文失败条款明确『写分失败（会话缺数据）只记 warning、不阻断收口——分数缺失是审计信号，不是收口的拦路石』。若把完成绑到『分数落库』并纳入 goal，会让写分失败反而挡死收口，直接违背该条款。故完成绑定恒产出的『最终小结』（散文『写完再给最终小结：耗时、方案文档、评审/任务链接、知识写入数、会话得分』）；分数落库为尽力而为、不作硬门。T1。"
+   "reason": "完成标准原文「分数已落库，小结已给出」有两件产物，但散文失败条款明确『写分失败（会话缺数据）只记 warning、不阻断收口——分数缺失是审计信号，不是收口的拦路石』。若把完成绑到『分数落库』并纳入 goal，会让写分失败反而挡死收口，直接违背该条款。故完成绑定恒产出的『最终小结』（散文『写完再给最终小结：耗时、方案文档、评审/任务链接、知识写入数、会话得分』）；分数落库为尽力而为、不作硬门。T1。\n[2026-09-02 升级] 增记 fleet_report，且三个合法值各有一个派生事实能反驳它 —— sent 由协调方的到达计数反驳，unreachable 由「它其实答得上来」反驳，not_applicable 由「C01 记的是真任务 id」反驳。只核对 sent 会把另两个变成免费出口，而参照系统正是在那里累计了 162 次强制确认。"
   },
   "E25": {
    "tier_at_derivation": "T3",

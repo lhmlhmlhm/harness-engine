@@ -55,6 +55,7 @@ CLASSIFY_GATE = TOOLS / "classify-gate.py"
 NOISE_RULES = TOOLS / "config" / "analyzer-noise-rules.yaml"
 COMMENT_CLASSIFY = TOOLS / "analyzer-comment-classify.py"
 RUN_METRICS = TOOLS / "analyze-run-metrics.py"
+FLEET_PROBE = TOOLS / "fleet_probe.py"
 SESSIONS_DIR = Path("~/.kiro/sessions/cli")
 
 
@@ -392,4 +393,66 @@ def _run_metrics(ctx: dict) -> dict:
     m = re.search(r"Peak context:\s*([\d.]+)%", out)
     if m:
         got["run_peak_ctx_pct"] = int(float(m.group(1)))
+    return got
+
+
+@facts.provider("fleet_central",
+                requires=({"file": "tools/fleet_probe.py"},),
+                schema={
+    # Whether this run is serving a dispatched task at all. Recorded early by the flow, so
+    # "there is nothing to report to" is a fact on the record rather than a late assertion.
+    "fleet_applicable": operators.T_BOOL,
+    # Whether the coordinator could actually be READ. The tool's own vocabulary has three
+    # verdicts and only one of them is this: `indeterminate` (an endpoint that answers but
+    # not about this task) maps to false here, deliberately — its source comment says it best,
+    # "we could not look -> NO-OP is NOT granted".
+    "fleet_reachable": operators.T_BOOL,
+    # What has ARRIVED, which is the only thing that distinguishes reporting from saying so.
+    "fleet_event_count": operators.T_INT,
+    "fleet_artifact_count": operators.T_INT,
+})
+def _fleet_central(ctx: dict) -> dict:
+    """Ask the coordinator what actually arrived for this run's task.
+
+    WHY THIS EXISTS AND WHAT IT REPLACES. The behavioural standard for dispatched work says to
+    report each milestone, and in the reference system that requirement is prose with a
+    fire-once hook — which can be acknowledged with a sentence. Measured over its own ledger
+    that produced 162 forced acknowledgements and 24 recorded non-arrivals: the claim "I
+    reported it" was accepted at face value, and the one thing that could contradict it was
+    never asked. So it is asked here.
+
+    NOT A CAPABILITY, deliberately. The endpoint is DISCOVERED (from the tool's own config or
+    an env override), so there is no fixed target for the engine to probe — a capability
+    descriptor needs a target known when the spec is written. Reachability of a discovered
+    endpoint is therefore a fact, and the tool file is the capability.
+    """
+    from engine import store
+    empty = {"fleet_applicable": False, "fleet_reachable": False,
+             "fleet_event_count": 0, "fleet_artifact_count": 0}
+    conn = store.connect(read_only=True)
+    try:
+        rows = store.find_evidence(conn, str(ctx.get("run_id") or ""), None, "fleet_task")
+    finally:
+        conn.close()
+    if not rows:
+        return empty
+    task_id = str(rows[-1]["value"]).strip()
+    if not task_id or task_id.lower() in ("local", "none", "-"):
+        # A run that is not serving a dispatched task. Recorded, not inferred from silence.
+        return empty
+    proc = subprocess.run(
+        [sys.executable, str(FLEET_PROBE), "snapshot", "--task-id", task_id],
+        capture_output=True, text=True, timeout=60,
+    )
+    got = dict(empty)
+    got["fleet_applicable"] = True
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return got
+    if str(payload.get("verdict")) != "reachable":
+        return got
+    got["fleet_reachable"] = True
+    got["fleet_event_count"] = int(payload.get("events") or 0)
+    got["fleet_artifact_count"] = int(payload.get("artifacts") or 0)
     return got
