@@ -18,6 +18,26 @@ ENGINE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENGINE_DIR.parent
 SCHEMA_PATH = ENGINE_DIR / "schema.sql"
 
+# The shape `schema.sql` currently describes. Bump it together with a migration below, never
+# alone — `init()` refuses if the two disagree, because a bump without its migration turns
+# every subsequent command into a version-mismatch refusal nobody can act on.
+SCHEMA_VERSION = 1
+
+# How to carry an OLDER store forward. Ordered, applied once each, one transaction apiece.
+#
+# WHAT BELONGS HERE: anything `CREATE ... IF NOT EXISTS` cannot do by itself. A NEW table needs
+# no migration — re-running the baseline creates it. A dropped or altered one does, because
+# re-running the baseline is silent about things that should no longer exist or should now look
+# different, so the change would land on new machines and not on upgraded ones.
+MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "drop the open-runs view: it lost its only reader when the run listing began needing "
+        "run metadata, and a view left behind is a shape the code no longer knows about",
+        ("DROP VIEW IF EXISTS v_open_runs;",),
+    ),
+)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -37,22 +57,34 @@ def connect(*, read_only: bool = False) -> sqlite3.Connection:
     Lazy creation is tempting and wrong: it turns "the DB was never initialised"
     (loud, fixable) into "the DB exists but is empty" (silent, and every read
     returns nothing as if the run legitimately did not exist).
+
+    The schema version is checked here for the same reason, in both directions. A store
+    whose shape does not match the code is the silent-divergence failure one level up: reads
+    return plausible answers about a shape that is no longer the one in use.
     """
     path = db_path()
+    if not path.is_file():
+        raise StoreNotInitialised(path)
     if read_only:
-        if not path.is_file():
-            raise StoreNotInitialised(path)
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
     else:
-        if not path.is_file():
-            raise StoreNotInitialised(path)
         conn = sqlite3.connect(path, timeout=5.0)
         conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
+    found = schema_version(conn)
+    if found != SCHEMA_VERSION:
+        conn.close()
+        if found < SCHEMA_VERSION:
+            raise StoreNeedsMigration(path, found)
+        raise StoreFromNewerEngine(path, found)
     return conn
 
 
-class StoreNotInitialised(RuntimeError):
+class StoreUnusable(RuntimeError):
+    """The store cannot be used as it stands. Callers map every case to one exit code."""
+
+
+class StoreNotInitialised(StoreUnusable):
     def __init__(self, path: Path):
         super().__init__(
             f"harness store not initialised at {path}\n"
@@ -61,23 +93,109 @@ class StoreNotInitialised(RuntimeError):
         self.path = path
 
 
-def init() -> Path:
-    """Create the store. Idempotent (the schema is all IF NOT EXISTS).
+class StoreNeedsMigration(StoreUnusable):
+    def __init__(self, path: Path, found: int):
+        super().__init__(
+            f"store at {path} is at schema {found}; this engine expects {SCHEMA_VERSION}\n"
+            f"  run: harness init   (it creates OR migrates, and is safe to re-run)"
+        )
+        self.path, self.found = path, found
+
+
+class StoreFromNewerEngine(StoreUnusable):
+    def __init__(self, path: Path, found: int):
+        super().__init__(
+            f"store at {path} is at schema {found}, which is NEWER than this engine's "
+            f"{SCHEMA_VERSION}.\n"
+            f"  Refusing rather than migrating downwards: the newer engine wrote shapes this\n"
+            f"  one does not know about, and operating on them would produce plausible\n"
+            f"  answers about a store it is misreading.\n"
+            f"  Upgrade the engine, or point HARNESS_STATE_DIR at a different store."
+        )
+        self.path, self.found = path, found
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> list[int]:
+    """Bring an EXISTING store up to date, one migration per exclusive transaction.
+
+    Each one re-reads the version inside its own lock, so two processes running `init` at the
+    same time cannot both apply the same step — the loser sees the winner's version and skips.
+    """
+    applied: list[int] = []
+    prev = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        for version, _why, statements in MIGRATIONS:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if schema_version(conn) >= version:
+                    conn.execute("ROLLBACK")
+                    continue
+                for sql in statements:
+                    conn.execute(sql)
+                conn.execute(f"PRAGMA user_version = {int(version)}")
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            applied.append(version)
+    finally:
+        conn.isolation_level = prev
+    return applied
+
+
+def init() -> tuple[Path, list[int]]:
+    """Create the store, or migrate an existing one. Returns (path, migrations applied).
 
     WAL is set outside a transaction on purpose: `PRAGMA journal_mode=WAL` cannot run
     inside one, and that failure only ever surfaces on a brand-new database — the
     exact path a fresh install takes and a developed-in-place one never does.
+
+    WHY A FRESH STORE IS STAMPED RATHER THAN MIGRATED. `schema.sql` is kept at the LATEST
+    shape, because it is also the readable explanation of that shape — every table there
+    carries the reasoning for its columns. So a brand-new store gets the current schema and is
+    stamped at the current version; migrations exist only to carry an OLD store forward.
+
+    THE HAZARD THAT CREATES, STATED PLAINLY: a migration and an edit to `schema.sql` must have
+    the same effect, and nothing about writing them enforces that. Divergence would be silent
+    and would split the population in two — new machines correct, upgraded ones subtly not.
+    A test closes it by building a store both ways and comparing the resulting schema; that
+    test is the reason this arrangement is safe rather than merely convenient.
     """
     state_dir().mkdir(parents=True, exist_ok=True)
     path = db_path()
+    fresh = not path.is_file()
     conn = sqlite3.connect(path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+        if not fresh and not core_tables(conn):
+            fresh = True  # the file exists but holds nothing; treat it as new, not as v0
+        found = schema_version(conn)
+        if not fresh and found > SCHEMA_VERSION:
+            raise StoreFromNewerEngine(path, found)
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         conn.commit()
+        if fresh:
+            conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+            conn.commit()
+            return path, []
+        applied = _apply_migrations(conn)
+        if schema_version(conn) != SCHEMA_VERSION:
+            # Reachable only if MIGRATIONS does not reach SCHEMA_VERSION — a bump without its
+            # migration. Loud here beats every later command refusing with a version mismatch
+            # nobody can act on.
+            raise RuntimeError(
+                f"schema {SCHEMA_VERSION} is declared but migrations only reach "
+                f"{schema_version(conn)}; add the missing migration"
+            )
+        return path, applied
     finally:
         conn.close()
-    return path
 
 
 def core_tables(conn: sqlite3.Connection) -> set[str]:

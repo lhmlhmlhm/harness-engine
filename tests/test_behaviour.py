@@ -4996,3 +4996,174 @@ def test_an_unpinned_in_process_store_refuses_instead_of_finding_a_real_one():
     with pytest.raises(st.StoreNotInitialised) as caught:
         st.connect()
     assert "unchosen-store" in str(caught.value.path), caught.value.path
+
+
+# ------------------------------------------------- schema versioning and migration
+
+# The shape that existed BEFORE migration 1. Every future migration must record its own
+# "before" here — that is the price of keeping schema.sql readable and at the latest shape,
+# and it is cheaper than keeping every historical baseline in the tree.
+_PRE_V1 = """
+CREATE VIEW IF NOT EXISTS v_open_runs AS
+SELECT run_id, ability, title, scope_kind, scope_key, current_step, opened_at, updated_at
+FROM run WHERE status = 'open';
+"""
+
+
+def _schema_of(db: Path) -> list[tuple]:
+    c = sqlite3.connect(db)
+    try:
+        return sorted(
+            (r[0], r[1], r[2]) for r in c.execute(
+                "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        )
+    finally:
+        c.close()
+
+
+def test_a_migrated_store_ends_up_identical_to_a_fresh_one(tmp_path, monkeypatch):
+    """The one hazard this arrangement creates, closed.
+
+    `schema.sql` is kept at the LATEST shape, because it is also the readable explanation of
+    that shape. So a brand-new store is stamped at the current version rather than migrated —
+    which means a migration and an edit to the baseline must have the SAME effect, and nothing
+    about writing them enforces that. Divergence would be silent and would split the population
+    in two: new machines correct, upgraded ones subtly not.
+
+    So build one store fresh, build another by putting the pre-migration shape back and letting
+    init() carry it forward, and compare what SQLite reports about both.
+    """
+    st = _engine_store()
+    a, b = tmp_path / "fresh", tmp_path / "upgraded"
+
+    monkeypatch.setenv("HARNESS_STATE_DIR", str(a))
+    _, applied = st.init()
+    assert applied == [], "a fresh store is stamped, not migrated"
+    fresh = _schema_of(a / "harness.db")
+
+    monkeypatch.setenv("HARNESS_STATE_DIR", str(b))
+    st.init()
+    old = sqlite3.connect(b / "harness.db")
+    try:
+        old.executescript(_PRE_V1)
+        old.execute("PRAGMA user_version = 0")
+        old.commit()
+    finally:
+        old.close()
+    assert _schema_of(b / "harness.db") != fresh, "the 'before' shape must actually differ"
+
+    _, applied = st.init()
+    assert applied == [1], applied
+    assert _schema_of(b / "harness.db") == fresh
+
+    # And re-running does not re-apply, nor resurrect what the migration removed.
+    _, again = st.init()
+    assert again == []
+    assert _schema_of(b / "harness.db") == fresh
+
+
+def test_the_declared_version_must_be_reachable_by_the_migrations(tmp_path, monkeypatch):
+    """A version bump without its migration is caught at init, not at every later command.
+
+    Left unchecked, the bump alone makes every command refuse with a mismatch the user cannot
+    act on: `harness init` would report success and change nothing, so the advice the refusal
+    gives would be wrong.
+    """
+    st = _engine_store()
+    monkeypatch.setenv("HARNESS_STATE_DIR", str(tmp_path / "s"))
+    st.init()
+    conn = sqlite3.connect(tmp_path / "s" / "harness.db")
+    try:
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(st, "SCHEMA_VERSION", 99)
+    with pytest.raises(RuntimeError, match="migrations only reach"):
+        st.init()
+    assert max(v for v, _, _ in st.MIGRATIONS) == 1, \
+        "MIGRATIONS must reach the declared version; bump them together"
+
+
+@pytest.mark.parametrize("version, expected_phrase", [
+    (0, "run: harness init"),
+    (99, "NEWER than this engine"),
+])
+def test_a_store_whose_shape_does_not_match_the_code_is_refused(env, version, expected_phrase):
+    """Both directions, because reading the wrong shape is worse than not reading.
+
+    Behind: fixable, and the message says how. Ahead: refused rather than migrated downwards —
+    a newer engine wrote shapes this one does not know about, and operating on them would give
+    plausible answers about a store being misread. The version is asserted afterwards, because
+    a refusal that quietly rewrote the header would be the downgrade it claims to refuse.
+    """
+    db = env["HARNESS_STATE_DIR"] + "/harness.db"
+    c = sqlite3.connect(db)
+    try:
+        c.execute(f"PRAGMA user_version = {version}")
+        c.commit()
+    finally:
+        c.close()
+
+    out = run(["status"], env)
+    assert out.returncode == USAGE, out.stdout + out.stderr
+    assert expected_phrase in out.stderr, out.stderr
+
+    if version == 99:
+        # The phrase is asserted, not only the code: an uncaught exception also exits 1, so
+        # `== USAGE` alone would pass on a crash and call it a refusal. (It did — the mutation
+        # that removes this check falls through to a RuntimeError whose traceback exits 1.)
+        gone = run(["init"], env)
+        assert gone.returncode == USAGE, gone.stdout + gone.stderr
+        assert "NEWER than this engine" in gone.stderr, gone.stderr
+        assert "Traceback" not in gone.stderr, gone.stderr
+        c = sqlite3.connect(db)
+        try:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == 99
+        finally:
+            c.close()
+
+
+def test_a_guard_on_an_unreadable_store_allows_but_says_so(env):
+    """The guard runs before every matching tool call, so it must not brick the machine.
+
+    It also cannot RECORD the skip, because recording needs the store it just refused to open —
+    so unlike an unadjudicable scope, this one only prints. Stated because the asymmetry looks
+    like an oversight otherwise.
+    """
+    c = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db")
+    try:
+        c.execute("PRAGMA user_version = 0")
+        c.commit()
+    finally:
+        c.close()
+    r = run(["guard", "--action", "commit", "--scope-kind", "repo", "--scope", "/r"], env)
+    assert r.returncode == OK
+    assert "guard not enforced" in r.stderr and "schema" in r.stderr, r.stderr
+
+
+def test_status_shows_who_delegated_to_whom_and_whether_guards_can_adjudicate(env):
+    """Three concurrent runs must not read as three unrelated peers.
+
+    And the verdict is the part worth having: whether a shared scope is adjudicable at ALL was
+    previously discoverable only by triggering a guard and reading the warning it printed —
+    i.e. the one fact a human wants on seeing two runs in one scope was the one thing the
+    listing did not say.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/S", "--run", "S1"], env) == OK
+    assert rc(["evidence", "--run", "S1", "--step", "C01",
+               "--kind", "change_list", "--value", "x"], env) == OK
+    assert rc(["close-step", "--run", "S1", "--step", "C01"], env) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/S", "--run", "S2",
+               "--leased-from", "S1", "--leased-at", "C01"], env) == OK
+
+    out = run(["status"], env).stdout
+    assert "→ delegated to S2" in out, out
+    assert "← leased from S1" in out, out
+    assert "S1 → S2" in out and "guards adjudicate" in out, out
+
+    # An unrelated third run in the scope takes the verdict the other way.
+    assert rc(["open", "delivery", "--scope", "/repo/S", "--run", "S3",
+               "--allow-concurrent"], env) == OK
+    out = run(["status"], env).stdout
+    assert "will NOT adjudicate" in out and "(partial)" in out, out

@@ -69,13 +69,15 @@ def _flow_for_run(conn, row) -> flowmod.Flow:
 # ------------------------------------------------------------------ commands
 
 def cmd_init(args) -> int:
-    path = store.init()
+    path, applied = store.init()
     conn = store.connect()
     try:
         tables = sorted(store.core_tables(conn))
     finally:
         conn.close()
     print(f"✅ store ready: {path}")
+    print(f"   schema {store.SCHEMA_VERSION}"
+          + (f" — migrated: {', '.join(str(v) for v in applied)}" if applied else ""))
     print(f"   tables ({len(tables)}): {', '.join(tables)}")
     abilities = flowmod.available_abilities()
     print(f"   abilities ({len(abilities)}): {', '.join(abilities) or '(none)'}")
@@ -318,7 +320,7 @@ def _record_unadjudicated(scope_kind: str, scope_key: str, action: str,
               f"runs={','.join(sorted(run_ids))}")
     try:
         conn = store.connect()
-    except store.StoreNotInitialised:
+    except store.StoreUnusable:
         return
     try:
         seen = conn.execute(
@@ -490,11 +492,41 @@ def cmd_status(args) -> int:
         if not rows:
             print("(no open runs)")
             return OK
+        # Delegations, so three concurrent runs do not read as three unrelated peers.
+        grants: dict[str, str] = {}
+        holds: dict[str, str] = {}
+        for lz in conn.execute(
+                "SELECT grantor_run_id g, holder_run_id h FROM scope_lease"
+                " WHERE released_at IS NULL"):
+            grants[lz["g"]] = lz["h"]
+            holds[lz["h"]] = lz["g"]
         for r in rows:
             who = json.loads(r["metadata_json"] or "{}").get("actor")
+            rel = ""
+            if r["run_id"] in holds:
+                rel += f"  ← leased from {holds[r['run_id']]}"
+            if r["run_id"] in grants:
+                rel += f"  → delegated to {grants[r['run_id']]}"
             print(f"{r['run_id']}  {r['ability']:<14} "
                   f"{r['scope_kind']}={r['scope_key']:<28} step={r['current_step']}"
-                  + (f"  actor={who}" if who else ""))
+                  + (f"  actor={who}" if who else "") + rel)
+        # Whether each shared scope is adjudicable AT ALL. This is the question a human
+        # actually has on seeing two runs in one scope, and until now it could only be
+        # discovered by triggering a guard and reading the warning it printed.
+        scopes: dict[tuple[str, str], set[str]] = {}
+        for r in rows:
+            scopes.setdefault((r["scope_kind"], r["scope_key"]), set()).add(r["run_id"])
+        shared = {k: v for k, v in scopes.items() if len(v) > 1}
+        if shared:
+            print()
+            for (kind, key), ids in sorted(shared.items()):
+                chain, why = store.resolve_scope_chain(conn, kind, key, ids)
+                if why is None:
+                    print(f"{kind}={key}: {len(ids)} runs, {' → '.join(chain)}"
+                          f"  — guards adjudicate")
+                else:
+                    print(f"{kind}={key}: {len(ids)} runs, no usable delegation ({why})"
+                          f"  — ⚠️  guards will NOT adjudicate here")
         return OK
     finally:
         conn.close()
@@ -908,8 +940,13 @@ def cmd_guard(args) -> int:
     """
     try:
         conn = store.connect(read_only=True)
-    except store.StoreNotInitialised:
-        return OK  # nothing to guard against yet
+    except store.StoreUnusable as exc:
+        # Allow, but say it out loud. A guard runs in front of every matching tool call, so a
+        # store that is absent — or at a schema this engine will not read — must not brick the
+        # machine. It also cannot be RECORDED, because recording needs the very store just
+        # refused; that asymmetry is why this one prints instead of leaving a row.
+        _err(f"⚠️  guard not enforced: {str(exc).splitlines()[0]}")
+        return OK
     try:
         candidates = store.open_runs_in_scope(conn, args.scope_kind, args.scope)
         if not candidates:
@@ -1199,7 +1236,7 @@ def cmd_guard_tool(args) -> int:
 
     try:
         conn = store.connect(read_only=True)
-    except store.StoreNotInitialised:
+    except store.StoreUnusable:
         return OK
     try:
         hits = []
@@ -1649,7 +1686,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
-    except store.StoreNotInitialised as exc:
+    except store.StoreUnusable as exc:
         _err(f"⛔ {exc}")
         return USAGE
     except flowmod.FlowError as exc:

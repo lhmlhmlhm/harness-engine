@@ -19,7 +19,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   228 个测试
+└── tests/                   234 个测试
 ```
 
 ## 快速开始
@@ -303,7 +303,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 228 passed
+python3 -m pytest tests/ -q      # 234 passed
 ```
 
 分两类：
@@ -313,7 +313,7 @@ python3 -m pytest tests/ -q      # 228 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（189）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（195）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
@@ -556,6 +556,23 @@ harness open <inner> --scope <same> --leased-from <outer-run> --leased-at <its-s
 harness leases          # 谁此刻持有哪个 scope，从谁那里、在哪一步接过来的
 ```
 
+`status` 把关系与**该 scope 到底能不能裁决**一起说出来——后者才是一个人看到同 scope 两条 run 时
+真正想知道的事，而在这之前它只能靠触发一次守卫、读它打印的警告才能发现：
+
+```
+sc1  shipcheck-asis repo=/tmp/r  step=C00  actor=alpha  → delegated to dl1
+dl1  delivery       repo=/tmp/r  step=C01  actor=beta   ← leased from sc1  → delegated to dl2
+dl2  delivery       repo=/tmp/r  step=C01  actor=gamma  ← leased from dl1
+
+repo=/tmp/r: 3 runs, sc1 → dl1 → dl2  — guards adjudicate
+```
+
+再塞进一条无关的 run，判定就翻过去（而这正是强制此刻在这个 scope 上是关着的）：
+
+```
+repo=/tmp/r: 4 runs, no usable delegation (partial)  — ⚠️  guards will NOT adjudicate here
+```
+
 | 规则 | 为什么 |
 |---|---|
 | 只能在 delegate **开始时**授予 | 事后转交意味着权限可以中途重排，那时「当时谁拥有这个动作」取决于你什么时候问——而那正是租约要提供的性质 |
@@ -644,6 +661,44 @@ harness status
 测试，是一个主题未知的测试。**
 
 这道防护落地时立刻抓到一条**既有**测试也在这么干。
+
+### schema 版本与迁移
+
+`init()` 从「创建」变成「**创建或迁移**」，版本号存在 `PRAGMA user_version`（DB 头里的 4 字节，
+不需要为它建表，也就没有自举问题）。
+
+```sh
+$ harness init                    # 全新库
+   schema 1
+$ harness init                    # 旧库（本仓自己的 state 就是 user_version=0）
+   schema 1 — migrated: 1
+$ harness init                    # 再跑一次
+   schema 1
+```
+
+**`schema.sql` 永远保持最新形状**，因为它同时是那个形状的可读解释——每张表都带着它每一列的
+来由。所以**全新库是被盖版本号而不是被迁移**，迁移只负责把**旧**库带上来。
+
+**这个安排制造了一个隐患，必须说清**：一条迁移与一次 `schema.sql` 的编辑必须**效果相同**，而写
+它们的过程对此毫无约束。一旦分叉，症状是静默的，而且会把用户群劈成两半——新机器正确，原地升级
+的机器微妙地不正确。所以有一条测试**把库用两种方式各建一遍并比对 SQLite 报告的 schema**。那条
+测试是这个安排「安全」而不只是「方便」的全部理由。
+
+代价是每条新迁移都要在测试里记下自己的「之前形状」。这比在树里长期保留每一份历史 baseline 便宜。
+
+| 情形 | 行为 |
+|---|---|
+| 新增一张表 | **不需要迁移**——重跑 baseline 的 `IF NOT EXISTS` 就会建出来 |
+| 删除 / 改动一张表或视图 | **需要迁移**——重跑 baseline 对「不该再存在」和「现在长得不一样」是沉默的，于是变更只落在新机器上 |
+| 库落后于引擎 | 每条命令 **exit 1** 并给出 `run: harness init` |
+| 库**新于**引擎 | **exit 1，且拒绝向下迁移**——新引擎写下了这个引擎不认识的形状，在上面操作会对一个被误读的库给出看起来合理的答案。`init` 也拒绝，且不动版本号 |
+| 版本号声明超出了迁移能到达的地方 | `init` 当场报错。否则每条后续命令都会以一个「跑 init」的建议拒绝，而那个建议是错的——`init` 会报成功且什么都不改 |
+
+第一条迁移有真活干：删掉上一个 commit 从 `schema.sql` 里移除、却仍留在每个已有库里的
+`v_open_runs` 视图。**机制一落地就有真实消费方**，而不是一个声明了没人读的骨架。
+
+守卫在库不可用时**放行但大声说**——它跑在每次匹配的工具调用之前，不能因为一次待迁移把机器锁死。
+它**无法留痕**，因为留痕需要它刚刚拒绝打开的那个库；这处不对称是刻意写下来的，否则看起来像疏漏。
 
 ### `role: fixture` —— 以及一个报了数轮的假缺口
 
