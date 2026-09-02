@@ -3828,6 +3828,40 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 
+def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
+    """The snapshot ships in context; the store decides. Both halves pinned.
+
+    Adding the rendered lesson file back as a resource closed a real regression — the criterion
+    could prove the store had been consulted, but the lessons themselves were no longer in front
+    of the agent. It also creates a trap: a file in version control next to a machine-local
+    store that is deliberately NOT, so on a machine whose store was rebuilt the file can be
+    older. Whoever reads the file as the count is then reporting a stale number as a live one.
+
+    So the map has to say which one wins, and the criterion has to keep reading the store.
+    """
+    from engine import flow as flowmod
+    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
+    flat = cap.replace("**", "").replace("`", "")
+    assert "它是快照，不是权威源" in flat, "the map must say which of the two decides"
+    assert "冲突时库赢" in flat, "and it must say which way the conflict resolves"
+
+    # The criterion must still consult the STORE, not the file: the corroborating facts come
+    # from a provider, and a provider reading a checked-in snapshot would defeat the point.
+    import yaml as _y
+    fl = _y.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
+    c00 = next(x for x in fl["steps"] if x["id"] == "C00")
+    claims = [c for c in c00["completion"]["checks"]
+              if c["type"] == "claim_corroborated" and c.get("kind") == "hot_set_state"]
+    assert len(claims) == 3, claims
+    facts_used = {c["disproved_when"]["fact"] for c in claims}
+    assert facts_used == {"hot_set_count", "hot_banner_readable"} or len(facts_used) >= 2, (
+        facts_used
+    )
+    owner = flowmod.load("shipcheck-asis").facts_owner
+    for f in facts_used:
+        assert owner.get(f) == "hot_set", (f, owner.get(f))
+
+
 def test_the_design_lifecycle_is_documented_as_executed_ELSEWHERE(env):
     """A BIDIRECTIONAL invariant, not a keyword-presence check.
 
