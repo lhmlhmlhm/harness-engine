@@ -3828,6 +3828,49 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 
+def test_the_design_lifecycle_is_documented_as_executed_ELSEWHERE(env):
+    """A BIDIRECTIONAL invariant, not a keyword-presence check.
+
+    Two abilities carry a `ux` variant that only DISPATCHES; the design lifecycle itself runs in
+    a different agent. That asymmetry is easy to misread — it was misread here, and the wrong
+    reading ("the variant dispatches to a nonexistent receiver") nearly became a round of work
+    transcribing a lifecycle whose own spec refuses this engine's machinery.
+
+    So the assertion is tied to the ability set rather than to text alone: while no `ux` ability
+    exists, the map must say execution is external; if one is ever added, the map must stop
+    saying so. A one-directional "the sentence is present" test would silently become a lie the
+    day the situation changes, which is the failure mode this whole repo is about.
+    """
+    from engine import flow as flowmod
+    names = set(flowmod.available_abilities())
+    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
+    # Strip markdown emphasis before matching — a phrase split by ** would otherwise not be
+    # found, and the assertion would pass or fail for formatting reasons.
+    flat = cap.replace("**", "").replace("`", "")
+    says_external = "设计流程本身的执行方是另一个" in flat and "ux-agent" in flat
+
+    if "ux" in names:
+        assert not says_external, (
+            "a `ux` ability now exists, but the map still says the design lifecycle runs "
+            "elsewhere — the map has become wrong in the direction that reads authoritative"
+        )
+        return
+
+    assert says_external, (
+        "no `ux` ability exists, so the map MUST say where the design lifecycle actually runs; "
+        "otherwise the dispatch-only variants read as an unfinished hand-off"
+    )
+    # And the dispatching side must actually declare that variant, or the section is describing
+    # something that is not there.
+    for ab in ("push", "plan"):
+        f = flowmod.load(ab)
+        assert "ux" in f.variants, (ab, f.variants)
+        assert "ux-agent" in f.when or "ux 变体" in f.when, (
+            f"{ab}: the routing hint an agent actually reads must say the ux variant only "
+            f"dispatches — the map alone is not where routing is decided"
+        )
+
+
 def test_no_ability_declares_a_provider_nothing_reads(env):
     """A declared provider whose facts no condition reads is DEAD WIRING.
 
