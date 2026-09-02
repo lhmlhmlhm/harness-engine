@@ -117,10 +117,6 @@ CREATE TABLE IF NOT EXISTS purge_log (
     purged_at   TEXT NOT NULL
 );
 
-CREATE VIEW IF NOT EXISTS v_open_runs AS
-SELECT run_id, ability, title, scope_kind, scope_key, current_step, opened_at, updated_at
-FROM run WHERE status = 'open';
-
 -- Obligations raised by a hook at a boundary, and not yet discharged.
 --
 -- `facts_json` is the snapshot of the facts as they were AT THE MOMENT the obligation

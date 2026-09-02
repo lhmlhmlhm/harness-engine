@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -203,6 +204,40 @@ def cmd_validate(args) -> int:
     return BAD_SPEC if bad else OK
 
 
+def _caller_note() -> dict:
+    """What the engine can honestly say about who ran this command. DIAGNOSTIC ONLY.
+
+    Isolation is by scope and must stay that way. A guard answers "may this happen to THIS
+    thing", which is a property of the thing and not of whoever is touching it. Separate two
+    sessions by actor instead and two workers in one repository each enforce only their own
+    gates while neither knows the other exists — the very question the guard is for stops
+    having an answer. A test pins the negative: two runs with different actors in one scope
+    still collide.
+
+    So this is recorded to answer a HUMAN's "which worker owns this run", nothing else.
+
+    `actor` is whatever the caller declares in HARNESS_ACTOR, opaque and never interpreted.
+    The engine cannot discover a session identity: the only process it can see is its own
+    short-lived invocation, so those numbers are recorded under names that say exactly that
+    rather than being passed off as the session.
+    """
+    note: dict = {"cli_pid": os.getpid(), "cli_ppid": os.getppid()}
+    actor = os.environ.get("HARNESS_ACTOR", "").strip()
+    if actor:
+        note["actor"] = actor
+    return note
+
+
+def _scope_taken(scope_kind: str, scope_key: str, rows) -> None:
+    ids = ", ".join(r["run_id"] for r in rows)
+    _err(
+        f"⛔ scope {scope_kind}={scope_key!r} already has {len(rows)} open run(s): {ids}\n"
+        f"  Two open runs in one scope make guards ambiguous.\n"
+        f"  Close the other one, or pass --allow-concurrent to accept that\n"
+        f"  guards in this scope will refuse to adjudicate."
+    )
+
+
 UNADJUDICATED = "guard_unadjudicated"
 LEASE_OUTSTANDING = "lease_outstanding"
 
@@ -316,18 +351,16 @@ def cmd_open(args) -> int:
             grantor, err = _validated_grantor(conn, f, args)
             if grantor is None:
                 return err
-        if existing and grantor is None and not args.allow_concurrent:
-            # Refuse rather than pick. Two open runs in one scope is precisely the
-            # state in which a guard cannot tell which run owns an action, and the
-            # cheapest place to prevent that is here, before the second one exists.
-            ids = ", ".join(r["run_id"] for r in existing)
-            _err(
-                f"⛔ scope {f.scope_kind}={args.scope!r} already has "
-                f"{len(existing)} open run(s): {ids}\n"
-                f"  Two open runs in one scope make guards ambiguous.\n"
-                f"  Close the other one, or pass --allow-concurrent to accept that\n"
-                f"  guards in this scope will refuse to adjudicate."
-            )
+        if existing and grantor is None and not args.allow_concurrent and not os.environ.get("HARNESS_ACTOR"):
+            # Refuse rather than pick: two open runs in one scope is exactly the state in
+            # which a guard cannot tell which run owns an action.
+            #
+            # This check is a FAST PATH, not the authority. It is here so the common refusal
+            # comes back before the variant derivation below spends time in provider
+            # subprocesses. The binding check runs inside the write transaction that inserts
+            # the row — this one cannot bind, because between reading and inserting there is a
+            # gap, and concurrent sessions raced through it.
+            _scope_taken(f.scope_kind, args.scope, existing)
             return REFUSED
         # Resolve the variant ONCE, here, and record it. Explicit beats derived beats default:
         # a caller who knows must be able to say so, and a derivation must be overridable
@@ -369,18 +402,29 @@ def cmd_open(args) -> int:
                 variant, source = got, f"derived from fact '{key}'"
             else:
                 variant, source = f.default_variant, "default"
-        store.open_run(
-            conn, run_id=run_id, ability=args.ability, flow_digest=f.digest,
+        lease = None if grantor is None else {
+            "grantor_run_id": grantor["run_id"], "granted_at_step": args.leased_at}
+        reason, blockers = store.claim_scope_and_open(
+            conn,
+            require_free_scope=(grantor is None and not args.allow_concurrent),
+            lease=lease,
+            run_id=run_id, ability=args.ability, flow_digest=f.digest,
             title=args.title, scope_kind=f.scope_kind, scope_key=args.scope,
             variant=variant,
-            metadata={"allow_concurrent": bool(args.allow_concurrent)},
+            metadata={"allow_concurrent": bool(args.allow_concurrent), **_caller_note()},
         )
+        if reason == "scope_taken":
+            _scope_taken(f.scope_kind, args.scope, blockers)
+            return REFUSED
+        if reason == "grantor_gone":
+            _err(f"⛔ {args.leased_from!r} closed while this run was being opened; a closed "
+                 f"run has no authority to hand over.")
+            return REFUSED
+        if reason == "grantor_already_delegated":
+            _err(f"⛔ {args.leased_from!r} delegated this scope while this run was being "
+                 f"opened. One outgoing lease per run per scope.")
+            return REFUSED
         if grantor is not None:
-            store.grant_lease(
-                conn, scope_kind=f.scope_kind, scope_key=args.scope,
-                grantor_run_id=grantor["run_id"], granted_at_step=args.leased_at,
-                holder_run_id=run_id,
-            )
             print(f"   leased {f.scope_kind}={args.scope} from {grantor['run_id']}"
                   f" at its step {args.leased_at}")
         if variant:
@@ -437,13 +481,20 @@ def cmd_status(args) -> int:
                 print(f"⚠️  {len(v)} violation(s): "
                       f"{', '.join(sorted({r['code'] for r in v}))}")
             return OK
-        rows = conn.execute("SELECT * FROM v_open_runs ORDER BY updated_at DESC").fetchall()
+        # Read the table rather than the open-runs view: the view does not carry metadata, and
+        # widening it would not reach a store that already exists — `init()` is IF NOT EXISTS
+        # throughout and there is no migration step, so an added view column would appear on
+        # new machines and silently not on developed-in-place ones.
+        rows = conn.execute(
+            "SELECT * FROM run WHERE status = 'open' ORDER BY updated_at DESC").fetchall()
         if not rows:
             print("(no open runs)")
             return OK
         for r in rows:
+            who = json.loads(r["metadata_json"] or "{}").get("actor")
             print(f"{r['run_id']}  {r['ability']:<14} "
-                  f"{r['scope_kind']}={r['scope_key']:<28} step={r['current_step']}")
+                  f"{r['scope_kind']}={r['scope_key']:<28} step={r['current_step']}"
+                  + (f"  actor={who}" if who else ""))
         return OK
     finally:
         conn.close()

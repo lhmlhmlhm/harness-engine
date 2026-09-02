@@ -3885,7 +3885,7 @@ def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path)
             assert len(live["hot_set_ids"]) == live["hot_set_count"], live
 
 
-def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
+def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path, monkeypatch):
     """The one discriminator the isolation claim rests on, asserted both ways.
 
     A linked worktree's `.git` is a FILE pointing at the owning repo; a source checkout's is a
@@ -3894,6 +3894,10 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
     green. Built from the structural shape rather than by provisioning a real worktree: this
     test must not mutate any repository to make its point.
     """
+    # The provider under test reads the store IN-PROCESS, which until the conftest guard
+    # landed meant reading whichever store os.environ happened to name — the developer's own.
+    # Say which one out loud.
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
     import sys as _s
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
@@ -4812,3 +4816,183 @@ def test_a_malformed_delegation_ledger_refuses_instead_of_walking_it(env):
             (["M1", "M2", "M3", "M4"], None)
     finally:
         conn.close()
+
+
+# ------------------------------------------------- taking a scope under concurrency
+
+_RUN_INSERT = (
+    "INSERT INTO run (run_id, ability, flow_digest, title, scope_kind, scope_key,"
+    " variant, status, opened_at, updated_at, metadata_json)"
+    " VALUES (?,'delivery','d',NULL,'repo',?,NULL,'open','t','t','{}')"
+)
+
+
+def _engine_store():
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import store as st
+    return st
+
+
+def _claim(st, conn, run_id, scope, **kw):
+    return st.claim_scope_and_open(
+        conn, require_free_scope=kw.pop("require_free_scope", True), lease=kw.pop("lease", None),
+        run_id=run_id, ability="delivery", flow_digest="d", title=None,
+        scope_kind="repo", scope_key=scope, variant=None, metadata={})
+
+
+def test_taking_a_scope_waits_for_the_lock_instead_of_reading_a_stale_view(env, monkeypatch):
+    """The check that binds is taken WITH the write lock, not before it.
+
+    A deferred transaction reads first and locks at its first write, which leaves the same gap
+    the old code had: both processes read an empty scope, both insert. Under WAL the loser does
+    not even get a clean refusal — its snapshot is stale by then, so it fails with a lock error
+    instead of being told the scope is taken.
+
+    Made deterministic rather than raced: a subprocess holds the write lock with the rival row
+    already inserted and uncommitted, so the claim below MUST block until that commit lands and
+    then report the scope as taken. The elapsed-time assertion is the part that pins "locked
+    before reading" — with a deferred begin the read would return immediately and find nothing.
+    """
+    import textwrap
+    import time
+    # conftest points the in-process store at an UNINITIALISED directory, so using it
+    # for real has to be said out loud. This test means to.
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    st = _engine_store()
+    db = env["HARNESS_STATE_DIR"] + "/harness.db"
+
+    holder = subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+        import sqlite3, time
+        c = sqlite3.connect({db!r}, timeout=10.0, isolation_level=None)
+        c.execute("BEGIN IMMEDIATE")
+        c.execute({_RUN_INSERT!r}, ("rival", "/repo/A"))
+        time.sleep(1.2)
+        c.execute("COMMIT")
+        c.close()
+    """)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        time.sleep(0.4)                      # let the lock actually be held
+        conn = st.connect()
+        try:
+            t0 = time.time()
+            reason, blockers = _claim(st, conn, "mine", "/repo/A")
+            waited = time.time() - t0
+        finally:
+            conn.close()
+    finally:
+        holder.wait(timeout=30)
+
+    assert reason == "scope_taken", reason
+    assert [r["run_id"] for r in blockers] == ["rival"]
+    assert waited > 0.4, f"claimed in {waited:.2f}s — it did not wait for the write lock"
+
+
+def test_a_scope_taken_after_the_fast_path_read_still_refuses(env, monkeypatch):
+    """The friendly early check is advisory; this is the one that cannot be raced past.
+
+    Reproduces the old bug's exact shape without threads: read the scope (as the fast path
+    does), let another connection take it, then claim. Before the claim re-checked inside its
+    own transaction, this inserted a second open run in one scope — and two open runs in one
+    scope is precisely the state in which the guard stops adjudicating, so losing the race
+    removed enforcement rather than leaving something visible.
+    """
+    # conftest points the in-process store at an UNINITIALISED directory, so using it
+    # for real has to be said out loud. This test means to.
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    st = _engine_store()
+    conn = st.connect()
+    other = sqlite3.connect(env["HARNESS_STATE_DIR"] + "/harness.db", timeout=10.0)
+    try:
+        assert st.open_runs_in_scope(conn, "repo", "/repo/B") == []      # the fast path's view
+        other.execute(_RUN_INSERT, ("sneak", "/repo/B"))
+        other.commit()
+        reason, blockers = _claim(st, conn, "late", "/repo/B")
+        assert reason == "scope_taken", reason
+        assert [r["run_id"] for r in blockers] == ["sneak"]
+        assert st.get_run(conn, "late") is None, "the refused run must not exist"
+    finally:
+        other.close()
+        conn.close()
+
+
+def test_a_grantor_that_moves_mid_open_is_caught_inside_the_lock(env, monkeypatch):
+    """Delegation is validated before the lock is taken, so it is re-checked under it.
+
+    Both shapes below are only reachable when something happens between validating the grantor
+    and inserting the delegate — which is exactly what a second session does. A lease naming a
+    closed grantor makes the chain unresolvable, and an unresolvable chain silently returns the
+    scope to unenforced, so it must not be recordable at all.
+    """
+    # conftest points the in-process store at an UNINITIALISED directory, so using it
+    # for real has to be said out loud. This test means to.
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    st = _engine_store()
+    conn = st.connect()
+    try:
+        conn.execute(_RUN_INSERT, ("outer", "/repo/C"))
+        conn.commit()
+        lease = {"grantor_run_id": "outer", "granted_at_step": "C01"}
+
+        st.close_run(conn, "outer", "done")
+        reason, _ = _claim(st, conn, "inner", "/repo/C",
+                           require_free_scope=False, lease=lease)
+        assert reason == "grantor_gone", reason
+
+        conn.execute("UPDATE run SET status='open' WHERE run_id='outer'")
+        conn.execute(_RUN_INSERT, ("first", "/repo/C"))   # the lease already out there
+        conn.commit()
+        st.grant_lease(conn, scope_kind="repo", scope_key="/repo/C",
+                       grantor_run_id="outer", granted_at_step="C01", holder_run_id="first")
+        reason, _ = _claim(st, conn, "second", "/repo/C",
+                           require_free_scope=False, lease=lease)
+        assert reason == "grantor_already_delegated", reason
+        assert st.get_run(conn, "second") is None
+    finally:
+        conn.close()
+
+
+def test_the_caller_is_recorded_for_diagnosis_and_never_for_isolation(env):
+    """Who ran the command is answerable; it is not an isolation axis.
+
+    Recorded because a human looking at three concurrent runs needs to know which worker owns
+    which — a need that came up repeatedly while diagnosing a stuck fleet. NOT an isolation
+    axis, and that half is what this test mainly protects: separate sessions by actor and two
+    workers in one repository would each enforce only their own gates while neither knew the
+    other existed, which is the one question the guard exists to answer.
+    """
+    e1 = {**env, "HARNESS_ACTOR": "worker-alpha"}
+    e2 = {**env, "HARNESS_ACTOR": "worker-beta"}
+    assert rc(["open", "delivery", "--scope", "/repo/D", "--run", "D1"], e1) == OK
+
+    out = run(["status"], env).stdout
+    assert "actor=worker-alpha" in out, out
+
+    # A different actor is still the same scope.
+    assert rc(["open", "delivery", "--scope", "/repo/D", "--run", "D2"], e2) == REFUSED
+
+    meta = json.loads(_rows(env, "SELECT metadata_json FROM run WHERE run_id='D1'")[0][0])
+    assert meta["actor"] == "worker-alpha"
+    # Named for what they are: this process is the CLI invocation, not the session.
+    assert "cli_pid" in meta and "session" not in json.dumps(meta)
+
+    # Nothing declared means nothing claimed, rather than a guessed identity.
+    assert rc(["open", "delivery", "--scope", "/repo/E", "--run", "E1"], env) == OK
+    plain = json.loads(_rows(env, "SELECT metadata_json FROM run WHERE run_id='E1'")[0][0])
+    assert "actor" not in plain
+
+
+def test_an_unpinned_in_process_store_refuses_instead_of_finding_a_real_one():
+    """The conftest guard itself, asserted rather than assumed.
+
+    Without it, a test that calls the store in-process reads whichever HARNESS_STATE_DIR the
+    shell happens to carry — which is the developer's own, and three junk runs did land there.
+    Removing the fixture makes this connect succeed against something real, so this goes red.
+
+    The path is asserted, not just the exception: on a machine with no store at all the refusal
+    would happen anyway and the test would pass while proving nothing.
+    """
+    st = _engine_store()
+    with pytest.raises(st.StoreNotInitialised) as caught:
+        st.connect()
+    assert "unchosen-store" in str(caught.value.path), caught.value.path

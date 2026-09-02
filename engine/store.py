@@ -100,6 +100,7 @@ def open_run(
     scope_key: str,
     variant: str | None = None,
     metadata: dict | None = None,
+    commit: bool = True,
 ) -> None:
     ts = now_iso()
     conn.execute(
@@ -109,7 +110,8 @@ def open_run(
         (run_id, ability, flow_digest, title, scope_kind, scope_key, variant, ts, ts,
          json.dumps(metadata or {}, ensure_ascii=False)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
@@ -409,13 +411,15 @@ def held_lease(conn: sqlite3.Connection, run_id: str,
 
 
 def grant_lease(conn: sqlite3.Connection, *, scope_kind: str, scope_key: str,
-                grantor_run_id: str, granted_at_step: str, holder_run_id: str) -> None:
+                grantor_run_id: str, granted_at_step: str, holder_run_id: str,
+                commit: bool = True) -> None:
     conn.execute(
         "INSERT INTO scope_lease (scope_kind, scope_key, grantor_run_id, granted_at_step,"
         " holder_run_id, granted_at) VALUES (?,?,?,?,?,?)",
         (scope_kind, scope_key, grantor_run_id, granted_at_step, holder_run_id, now_iso()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def release_lease(conn: sqlite3.Connection, lease_id: int, reason: str) -> None:
@@ -502,3 +506,82 @@ def resolve_scope_chain(conn: sqlite3.Connection, scope_kind: str, scope_key: st
     if set(chain) != open_run_ids:
         return [], "partial"
     return chain, None
+
+
+def claim_scope_and_open(conn: sqlite3.Connection, *, require_free_scope: bool,
+                        lease: dict | None, **run_kw) -> tuple[str | None, list[sqlite3.Row]]:
+    """Take the scope and insert the run in ONE exclusive transaction.
+
+    Returns `(None, [])` on success, or `(reason, blockers)` — where `reason` is
+    `scope_taken` (with the rows that blocked it), `grantor_gone` or
+    `grantor_already_delegated`.
+
+    WHY THIS IS ONE CALL AND NOT TWO STATEMENTS. Asking "is this scope free" and then
+    inserting were separate, with a gap in between, and concurrent sessions both read zero and
+    both inserted. That broke the invariant this engine leans on hardest — one open run per
+    scope, so a guard knows whose gate applies — and it broke it in the worst direction:
+    LOSING the race lands you in the state where the guard stops adjudicating, so the failure
+    took enforcement away rather than leaving a duplicate row somebody would notice.
+    Measured before this existed: six concurrent opens on one scope produced two runs in one
+    of three trials, intermittently, which is why 200-odd sequential tests never saw it.
+
+    BEGIN IMMEDIATE, not BEGIN. A deferred transaction acquires its write lock at the first
+    WRITE, which is after the read — the same gap, relocated. IMMEDIATE acquires it up front,
+    so a second process waits on `busy_timeout` and then reads the first one's row.
+
+    NOTHING SLOW MAY MOVE IN HERE. The caller resolves the flow variant before calling, and
+    that can spawn provider subprocesses; doing it inside would hold a write lock for the
+    lifetime of a subprocess. That is precisely the lock incident a neighbouring system spent
+    a day diagnosing, and its fix was this same separation — the transaction covers the check
+    and the inserts, and nothing else.
+
+    The lease is inserted here too, rather than after. A run that exists with its delegation
+    still missing is indistinguishable from an unrelated concurrent run, so a crash between
+    two separate writes would look exactly like the ambiguity the lease exists to remove.
+    """
+    prev = conn.isolation_level
+    conn.isolation_level = None  # take manual control; the module's implicit BEGIN is deferred
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if require_free_scope:
+                blockers = conn.execute(
+                    "SELECT * FROM run WHERE scope_kind = ? AND scope_key = ?"
+                    " AND status = 'open' ORDER BY updated_at DESC",
+                    (run_kw["scope_kind"], run_kw["scope_key"]),
+                ).fetchall()
+                if blockers:
+                    conn.execute("ROLLBACK")
+                    return "scope_taken", blockers
+            if lease is not None:
+                # Re-checked inside the lock, because the grantor was validated before it was
+                # taken: it could have closed, or delegated elsewhere, in between. A lease
+                # naming a closed grantor would make the chain unresolvable, which silently
+                # returns the scope to unenforced.
+                g = conn.execute("SELECT status FROM run WHERE run_id = ?",
+                                 (lease["grantor_run_id"],)).fetchone()
+                if g is None or g["status"] != "open":
+                    conn.execute("ROLLBACK")
+                    return "grantor_gone", []
+                dup = conn.execute(
+                    "SELECT 1 FROM scope_lease WHERE grantor_run_id = ? AND scope_kind = ?"
+                    " AND scope_key = ? AND released_at IS NULL",
+                    (lease["grantor_run_id"], run_kw["scope_kind"], run_kw["scope_key"]),
+                ).fetchone()
+                if dup is not None:
+                    conn.execute("ROLLBACK")
+                    return "grantor_already_delegated", []
+            open_run(conn, commit=False, **run_kw)
+            if lease is not None:
+                grant_lease(conn, scope_kind=run_kw["scope_kind"],
+                            scope_key=run_kw["scope_key"],
+                            grantor_run_id=lease["grantor_run_id"],
+                            granted_at_step=lease["granted_at_step"],
+                            holder_run_id=run_kw["run_id"], commit=False)
+            conn.execute("COMMIT")
+            return None, []
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.isolation_level = prev
