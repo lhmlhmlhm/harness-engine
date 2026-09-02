@@ -103,7 +103,7 @@ agent**（`ux-agent`，跑 `~/.kiro/skills/ux/`），不是你。
 
 ### 常驻经验：手上那份是快照，库才是权威
 
-`hot-set.md` 作为资源常驻在你的上下文里，所以那 15 条经验的**正文你已经有了**，不必再去查一遍
+`L2-hot/hot-set.md`（shared-kb 目录下）作为资源常驻在你的上下文里，所以那 15 条经验的**正文你已经有了**，不必再去查一遍
 才能用它们。
 
 但**它是快照，不是权威源**。那个文件由 `memory.py promote` 生成并进了版本控制；真正的状态在
@@ -119,7 +119,9 @@ agent**（`ux-agent`，跑 `~/.kiro/skills/ux/`），不是你。
 ### 知识库
 
 查询走 `shared-kb` 的路由:先读它的 `SKILL.md` 决定该问哪个子库,再查。
-`L0-meta/routing-rules.md` 是路由规则,`L2-hot/hot-set.md` 是热点集合 —— 两者按需读。
+`L0-meta/routing-rules.md` 是路由规则,`L0-meta/kb-registry.md` 是子库注册表,
+`L0-meta/evaluation-criteria.md` 是「什么算一条值得留下的经验」的判据 —— 三者都按需读,
+不要预载。热点集合的正文已经在你上下文里(见上一节)。
 
 配置里挂了若干 knowledgeBase 索引(服务知识 / skills 包 / 后端 / 设计规范 / 统一 MCP /
 marketplace 规范),语义检索直接可用,不需要读文件。
@@ -130,6 +132,25 @@ marketplace 规范),语义检索直接可用,不需要读文件。
 包级 AST 图(导入/调用关系)的路径见 `graph/SKILL.md`。
 
 **先问图谱再 grep**:一个作用域内的子图通常比全仓搜索小得多,也更能回答「改这个会牵连谁」。
+
+### 跨 agent 的追踪与评估
+
+`~/.kiro/loop agents/` 是几个 agent 共用的观测层——不是流程，所以没有 ability，但有三个
+**现成的入口**，需要时直接用：
+
+| 要什么 | 入口 |
+|---|---|
+| 把一次工作在多个系统里的痕迹串起来 | `scripts/trace.py {init,show,find,list,backfill} --format json` |
+| 质量分的阈值与基线（**按 agent × plan_type × layer**） | `quality-slo.yaml` |
+| 「按标准执行」在每个 stage 到底指什么（合规分公式） | `stage-compliance.yaml` |
+
+`CAPABILITIES.md`（那个目录里的那份）是**带状态与版本的能力清单**（Landed / MVP / Planned /
+Explored）——要判断某项能力现在到什么程度，读它而不是猜。
+
+**与本引擎的关系值得点出来**：本引擎还缺的两样结构性东西——回归基线、跨 run 关联——
+**它们的声明和工具就在这里**。`quality-slo.yaml` 已经定义了分层基线，`trace.py` 已经有
+关联表和 CLI。所以哪天要补这两样，**先读这里，不要重新发明一遍**：这套东西的问题从来不是
+「没有第一份」，而是「第二份会静默漂移」。
 
 ## 一条给自己的提醒
 

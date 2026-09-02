@@ -3828,6 +3828,60 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 
+def test_the_map_only_points_at_entry_points_that_exist(env):
+    """A pointer that has rotted is worse than no pointer: it reads authoritative.
+
+    The map deliberately POINTS at non-ability tooling rather than restating it — restating
+    would be a second copy that drifts, which is the failure this whole repo is about. The cost
+    of pointing is that a moved or renamed file turns the map into a confident lie, and nothing
+    would notice. So every path the map names is checked to exist.
+
+    Checked only when the pointed-at tree is INSTALLED. On a machine without it the pointer is
+    still correct as a pointer — it says where the thing would be — and failing there would
+    punish a machine for not having an optional dependency rather than catching drift.
+    """
+    import re as _re
+    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
+    home = pathlib.Path.home()
+
+    # Paths the map names under the shared observability tree, plus the sub-KB meta files.
+    checks = [
+        (home / ".kiro/loop agents", ["scripts/trace.py", "quality-slo.yaml",
+                                      "stage-compliance.yaml", "CAPABILITIES.md"]),
+        (home / ".kiro/skills/shared-kb", ["L0-meta/routing-rules.md",
+                                           "L0-meta/kb-registry.md",
+                                           "L0-meta/evaluation-criteria.md",
+                                           "L2-hot/hot-set.md"]),
+        (home / ".kiro/skills/agent-scheduler", ["references/task-authoring-guide.md"]),
+    ]
+    checked = 0
+    for root, rels in checks:
+        if not root.is_dir():
+            continue                      # not installed here; the pointer still reads true
+        for rel in rels:
+            # The FULL relative path, not just the basename. A basename fallback was tried
+            # and was too loose: the map mentions `trace.py` bare in a later sentence, so
+            # renaming the actual pointer left the check satisfied by the prose. A pointer is
+            # only useful if it is directly actionable, so require the actionable form.
+            # (For a top-level file the two coincide; for `CAPABILITIES.md` the name check is
+            # vacuous because this file is also called that — its existence check still bites.)
+            assert rel in cap, (
+                f"the map no longer names {rel} — if it was dropped on purpose, drop it from "
+                f"this list too, so the two stay in step"
+            )
+            assert (root / rel).is_file(), f"the map names {rel} under {root}, which is gone"
+            checked += 1
+    assert checked, "no pointed-at tree is installed; this test asserted nothing"
+
+    # And the map must record WHERE the two unbuilt structural pieces are already declared, so a
+    # future round reads them instead of inventing a second, quietly diverging copy.
+    flat = cap.replace("**", "").replace("`", "")
+    assert "先读这里，不要重新发明一遍" in flat, (
+        "the map must say that the regression baseline and cross-run correlation are already "
+        "declared elsewhere — the risk here was never a missing first copy, it is a second one"
+    )
+
+
 def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
     """The snapshot ships in context; the store decides. Both halves pinned.
 
