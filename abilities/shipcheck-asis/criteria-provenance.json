@@ -1687,11 +1687,54 @@
     "value": "closed"
    },
    "live_spec": {
-    "type": "evidence_equals",
-    "kind": "task_state",
-    "value": "closed"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence_equals",
+      "kind": "task_state",
+      "value": "closed"
+     },
+     {
+      "type": "evidence_in",
+      "kind": "close_writeback",
+      "values": [
+       "written",
+       "not_applicable"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "close_writeback",
+      "claims": [
+       "written"
+      ],
+      "disproved_when": {
+       "all_of": [
+        {
+         "fact": "shipped_block_present",
+         "equals": false
+        },
+        {
+         "fact": "history_record_exists",
+         "equals": false
+        }
+       ]
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "close_writeback",
+      "claims": [
+       "not_applicable"
+      ],
+      "disproved_when": {
+       "fact": "plan_doc_found",
+       "equals": true
+      }
+     }
+    ]
    },
-   "reason": "完成标准「任务状态已更新为关闭，评论已附上」。散文「在任务系统里把这条任务标记为关闭」。共享 kind task_state（cleanup 层）最新值须精确等于关闭态。无关联任务由 skip 处理。"
+   "reason": "完成标准「任务状态已更新为关闭，评论已附上」。散文「在任务系统里把这条任务标记为关闭」。共享 kind task_state（cleanup 层）最新值须精确等于关闭态。无关联任务由 skip 处理。\n[2026-09-02 升级] 拆成两半，因为两半的可核实性不对等。任务系统那侧**刻意不核**：读它只有 MCP 一条路，而 provider 是子进程调不到 —— 编一个看起来在核的事实比不核更糟（schema 里合理、输出里不可证伪），强制来自 E21 gate 上的 task_close guard。可核的那半是收口写回留下的两处痕迹（## Shipped 块 + history-log 记录），所以「跑过了」不必靠自陈。"
   },
   "E11": {
    "tier_at_derivation": "T1",
@@ -2050,10 +2093,59 @@
        "fact": "own_worktree_exists",
        "equals": true
       }
+     },
+     {
+      "type": "evidence_in",
+      "kind": "plan_disposition",
+      "values": [
+       "filed",
+       "kept_open",
+       "no_plan_doc"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "plan_disposition",
+      "claims": [
+       "filed"
+      ],
+      "disproved_when": {
+       "fact": "plan_doc_dir",
+       "in": [
+        "pending",
+        "pushed",
+        "in-progress"
+       ]
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "plan_disposition",
+      "claims": [
+       "kept_open"
+      ],
+      "disproved_when": {
+       "fact": "plan_doc_dir",
+       "in": [
+        "done",
+        "shipped"
+       ]
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "plan_disposition",
+      "claims": [
+       "no_plan_doc"
+      ],
+      "disproved_when": {
+       "fact": "plan_doc_found",
+       "equals": true
+      }
      }
     ]
    },
-   "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。\n[2026-09-02 升级] no_worktree 这句声称经 own_worktree_exists 反驳，按 run id 匹配而非全局计数 —— 别的 session 的工作树说明不了这一个。"
+   "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。\n[2026-09-02 升级] no_worktree 这句声称经 own_worktree_exists 反驳，按 run id 匹配而非全局计数 —— 别的 session 的工作树说明不了这一个。\n[2026-09-02 升级] 增记 plan_disposition，三个取值各有反驳事实（filed / kept_open / no_plan_doc）。与工作树同一形态：agent 跑写回脚本，引擎只读核实，脚本不复制。关键实现细节：按 slug 解析而非按早先记下的路径 —— 收口的全部意义就是那个文件被移走了，读记录的路径要么找不到（把成功报成失败）、要么还在原处（把没发生的移动报成成功）。目录即状态这个不变量在真实语料上 405/406 成立。"
   },
   "E22b": {
    "tier_at_derivation": "T1",

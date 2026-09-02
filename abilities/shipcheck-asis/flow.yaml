@@ -33,6 +33,7 @@ facts:
   - fleet_central
   - hot_set
   - worktree_state
+  - plan_writeback
 hooks:
 # 上报侧的五个 hook。前四个是**提醒而非义务**，这是刻意的：一个「我报了」的义务可以用
 # 一句散文销账，而那恰恰是参照系统累计 162 次强制确认的形状。真正的强制在 E24 —— 那里
@@ -1739,9 +1740,36 @@ steps:
   deps:
   - E09g
   completion:
-    type: evidence_equals
-    kind: task_state
-    value: closed
+    type: all_checks
+    checks:
+    # 任务系统那一侧**刻意没有核对**，理由要写下来而不是留白：读它只有 MCP 这一条路，
+    # 而 provider 是子进程、调不到 MCP。编一个「看起来在核」的事实比不核更糟 ——
+    # 在 schema 里读着合理，在输出里不可证伪。这里的强制来自 E21 那个 gate 上的
+    # task_close guard：动作发生前就被拦，而不是事后自陈。
+    - type: evidence_equals
+      kind: task_state
+      value: closed
+    # 可核实的那一半：收口写回留下的两处痕迹。「跑过了」因此不必靠自陈。
+    - type: evidence_in
+      kind: close_writeback
+      values:
+      - written
+      - not_applicable
+    - type: claim_corroborated       # 说写回跑过了 -> 但两处痕迹一个都没有
+      kind: close_writeback
+      claims:
+      - written
+      disproved_when:
+        all_of:
+        - {fact: shipped_block_present, equals: false}
+        - {fact: history_record_exists, equals: false}
+    - type: claim_corroborated       # 说不适用 -> 但按 slug 找到了方案文档
+      kind: close_writeback
+      claims:
+      - not_applicable
+      disproved_when:
+        fact: plan_doc_found
+        equals: true
 - id: E11
   phase: cleanup
   stage: writeback
@@ -2033,6 +2061,42 @@ steps:
       - no_worktree
       disproved_when:
         fact: own_worktree_exists
+        equals: true
+    # 方案文档的归位，与工作树同一形态：agent 跑写回脚本，引擎只读核实。
+    # 三个取值各有反驳事实 —— 只核 filed 会把另两个变成免费出口。
+    # 注意「按 slug 解析而非按早先记下的路径」：收口的全部意义就是那个文件被移走了，
+    # 读记录的路径要么找不到（把成功报成失败），要么还在原处（把没发生的移动报成成功）。
+    - type: evidence_in
+      kind: plan_disposition
+      values:
+      - filed
+      - kept_open
+      - no_plan_doc
+    - type: claim_corroborated       # 说已归位 -> 但它还不在完成区
+      kind: plan_disposition
+      claims:
+      - filed
+      disproved_when:
+        fact: plan_doc_dir
+        in:
+        - pending
+        - pushed
+        - in-progress
+    - type: claim_corroborated       # 说仍留着 -> 但它已经在完成区了
+      kind: plan_disposition
+      claims:
+      - kept_open
+      disproved_when:
+        fact: plan_doc_dir
+        in:
+        - done
+        - shipped
+    - type: claim_corroborated       # 说没有方案文档 -> 但按 slug 找到了一份
+      kind: plan_disposition
+      claims:
+      - no_plan_doc
+      disproved_when:
+        fact: plan_doc_found
         equals: true
 - id: E22b
   phase: cleanup

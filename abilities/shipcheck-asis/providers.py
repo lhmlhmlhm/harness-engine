@@ -35,6 +35,7 @@ Two reasons, and the second is why it stays that way:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -58,6 +59,24 @@ RUN_METRICS = TOOLS / "analyze-run-metrics.py"
 FLEET_PROBE = TOOLS / "fleet_probe.py"
 # NOT copied into the ability, deliberately — see `_hot_set`.
 MEMORY_CLI = Path("~/.kiro/skills/shared-kb/memory/memory.py")
+# 与 worktree 同类：这两处的效果由 agent 跑脚本完成，引擎只读核实，所以脚本一个字节都不复制。
+# 两个位置都可用环境变量覆盖，而这不是为了灵活：**没有覆盖口的话，测试只能读用户真实的
+# 方案语料**（几百份文档），而一个粗心的测试会写进去。这类事在相邻项目里发生过一次——一套
+# 测试扫掉了 772MB 真实存储——所以给读取真实位置的 provider 留一个重定向口是安全属性，
+# 不是便利。被读的 CLI 自己也有同样的口（MEMORY_DB_PATH），这里与它对称。
+PLAN_DATA_DEFAULT = "~/.kiro/skills/plan/data"
+HISTORY_LOG_DEFAULT = "~/.kiro/skills/ship-check/history-log"
+
+
+def _dir_from_env(var: str, default: str) -> Path:
+    """Resolve an override AT CALL TIME, not at import.
+
+    Read at import it would be frozen for the life of the process — correct for a one-shot CLI
+    and wrong for anything long-lived, and it silently defeats a caller that sets the override
+    after loading this module. A path that can change should be read when it is used.
+    """
+    return Path(os.environ.get(var) or default)
+PLAN_DIRS = ("pending", "pushed", "in-progress", "done", "shipped")
 SESSIONS_DIR = Path("~/.kiro/sessions/cli")
 
 
@@ -585,4 +604,83 @@ def _worktree_state(ctx: dict) -> dict:
         refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads/shipcheck/*")
         got["own_worktree_exists"] = any(
             r.strip().endswith(short) for r in refs.splitlines() if r.strip())
+    return got
+
+
+@facts.provider("plan_writeback",
+                requires=({"file": PLAN_DATA_DEFAULT},),
+                schema={
+    # Where the plan document actually SITS now. The directory is the status in this layout —
+    # measured over the real corpus, directory and frontmatter agree in 405 of 406 documents —
+    # so a claim that it was filed away has something to be checked against.
+    "plan_doc_dir": operators.T_STR,
+    "plan_doc_status": operators.T_STR,
+    "plan_doc_found": operators.T_BOOL,
+    # The two artefacts the closing writeback leaves behind. Their presence is what makes
+    # "the writeback ran" checkable without re-running anything.
+    "shipped_block_present": operators.T_BOOL,
+    "history_record_exists": operators.T_BOOL,
+})
+def _plan_writeback(ctx: dict) -> dict:
+    """Where the plan document ended up, and whether the closing writeback left its traces.
+
+    RESOLVED BY SLUG, NOT BY THE RECORDED PATH — and that is the whole subtlety. The path
+    captured early in the run is stale BY DESIGN at closing time, because moving the document
+    between status folders is precisely the effect under test. A provider that read the recorded
+    path would find the file missing and report the move as a failure, or worse, find it still
+    there and report success for a move that never happened. So the slug is taken from the
+    recorded path and the document is looked up wherever it now lives.
+
+    Same division of labour as worktree provisioning: the agent runs the writeback, the engine
+    asks the filesystem what is true. Neither script is copied here — an effect does not belong
+    to the engine, and these two move files, rewrite frontmatter and create directories.
+    """
+    from engine import store
+    empty = {"plan_doc_dir": "", "plan_doc_status": "", "plan_doc_found": False,
+             "shipped_block_present": False, "history_record_exists": False}
+    conn = store.connect(read_only=True)
+    try:
+        rows = store.find_evidence(conn, str(ctx.get("run_id") or ""), None, "plan_doc")
+    finally:
+        conn.close()
+    if not rows:
+        return empty
+    slug = Path(str(rows[-1]["value"]).strip()).name
+    if slug.endswith(".md"):
+        slug = slug[:-3]
+    if not slug:
+        return empty
+
+    got = dict(empty)
+    base = _dir_from_env("HARNESS_PLAN_DATA_DIR", PLAN_DATA_DEFAULT).expanduser()
+    hit = None
+    for d in PLAN_DIRS:
+        cand = base / d / f"{slug}.md"
+        if cand.is_file():
+            hit, got["plan_doc_dir"] = cand, d
+            break
+    if hit is None:
+        return got
+    got["plan_doc_found"] = True
+    try:
+        text = hit.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return got
+    # Anchored to the LEADING frontmatter block. A first-match scan of the whole document
+    # happens to agree across the corpus today, but documents quote code that contains the same
+    # key, so anything that collected every match would read a snippet as the status.
+    fm = re.match(r"---\n(.*?)\n---", text, re.S)
+    if fm:
+        m = re.search(r"^status:\s*(\S+)", fm.group(1), re.M)
+        got["plan_doc_status"] = m.group(1) if m else ""
+    got["shipped_block_present"] = bool(re.search(r"^##\s+Shipped\b", text, re.M))
+
+    # Matched by CONTAINS, not by an exact directory name: the writer's naming has changed over
+    # time (of 205 real entries only 18 carry a date prefix), so an exact-name lookup would
+    # report a present record as missing for every older shape.
+    hl = _dir_from_env("HARNESS_HISTORY_LOG_DIR", HISTORY_LOG_DEFAULT).expanduser()
+    if hl.is_dir():
+        got["history_record_exists"] = any(
+            (d / "record.md").is_file() for d in hl.iterdir()
+            if d.is_dir() and slug in d.name)
     return got

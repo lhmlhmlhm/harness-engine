@@ -3680,6 +3680,85 @@ def test_tearing_down_an_isolated_worktree_is_guarded(env, cmd, blocked):
             "--force-steps", "--force-obligations"], env)
 
 
+def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path):
+    """Three resolution details, each of which the full-flow driver cannot reach.
+
+    The driver records a synthetic plan-doc value that resolves to no real file, so every line
+    of the lookup below is unreachable from it — mutating any of the three left the suite green.
+    They are exactly the three subtleties this provider exists to get right:
+
+    1. RESOLVED BY SLUG, not by the recorded path. The recorded path is stale BY DESIGN at
+       closing time, because moving the document is the effect under test. Reading it would
+       report a successful move as a failure, or an absent move as a success.
+    2. The history record is matched by CONTAINS. The writer's naming changed over time — of
+       205 real entries only 18 carry a date prefix — so an exact-name lookup reports a present
+       record as missing for every older shape.
+    3. The frontmatter is read from the LEADING block only. A document that lost its frontmatter
+       but quotes a yaml block later would otherwise have a snippet read as its status.
+
+    Run against a temporary corpus, never the real one: without a redirect a test here would
+    read several hundred of the user's real documents, and a careless one would write into them.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+
+    data, hlog = tmp_path / "plan", tmp_path / "hlog"
+    for d in ("pending", "pushed", "in-progress", "done", "shipped"):
+        (data / d).mkdir(parents=True)
+    hlog.mkdir()
+    monkeypatch.setenv("HARNESS_PLAN_DATA_DIR", str(data))
+    monkeypatch.setenv("HARNESS_HISTORY_LOG_DIR", str(hlog))
+
+    slug = "some-task-slug"
+    ctx = {"run_id": "pw", "scope": str(REPO),
+           "scope_kind": "repo", "ability": "shipcheck-asis"}
+    assert rc(["open", "shipcheck-asis", "--scope", str(REPO), "--run", "pw"], env) == OK
+    # The path recorded EARLY — pointing at pushed/, which is where it no longer is.
+    assert rc(["evidence", "--run", "pw", "--step", "C01", "--kind", "plan_doc",
+               "--value", str(data / "pushed" / f"{slug}.md")], env) == OK
+
+    # ① It actually ended up in done/. Found by slug, in the folder it now occupies.
+    (data / "done" / f"{slug}.md").write_text(
+        f"---\nstatus: done\nslug: {slug}\n---\n\n# T\n\n## Shipped\n\ncommit abc\n",
+        encoding="utf-8")
+    got = _f.gather("plan_writeback", ctx)
+    assert got["plan_doc_found"] is True and got["plan_doc_dir"] == "done", got
+    assert got["plan_doc_status"] == "done", got
+    assert got["shipped_block_present"] is True, got
+
+    # ② A record whose directory carries a date prefix — the current writer's shape.
+    assert got["history_record_exists"] is False, got
+    rec = hlog / f"2026-09-02_bms_{slug}"
+    rec.mkdir()
+    (rec / "record.md").write_text("x\n", encoding="utf-8")
+    assert _f.gather("plan_writeback", ctx)["history_record_exists"] is True
+
+    # ③ A document that LOST its frontmatter but quotes a yaml block later. The leading-block
+    #    read reports no status; a whole-document search would report the snippet's.
+    (data / "done" / f"{slug}.md").write_text(
+        "# Title\n\nsome prose\n\n---\nstatus: bogus-from-a-quoted-block\n---\n",
+        encoding="utf-8")
+    drifted = _f.gather("plan_writeback", ctx)
+    assert drifted["plan_doc_found"] is True, drifted
+    assert drifted["plan_doc_status"] == "", drifted
+    assert drifted["shipped_block_present"] is False, drifted
+
+    # ④ A document that TALKS about shipping without carrying the section. Plan prose routinely
+    #    does — "will be shipped in a follow-up" — so a substring match would report the
+    #    writeback's artefact as present in a document it never touched.
+    (data / "done" / f"{slug}.md").write_text(
+        "---\nstatus: done\n---\n\n# T\n\nThis will be Shipped in a follow-up change.\n",
+        encoding="utf-8")
+    talks = _f.gather("plan_writeback", ctx)
+    assert talks["plan_doc_status"] == "done", talks
+    assert talks["shipped_block_present"] is False, talks
+    rc(["close-run", "--run", "pw", "--result", "aborted",
+        "--force-steps", "--force-obligations"], env)
+
+
 def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path):
     """The pairing, asserted separately because the flow closes either way.
 
