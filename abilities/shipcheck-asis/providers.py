@@ -56,6 +56,8 @@ NOISE_RULES = TOOLS / "config" / "analyzer-noise-rules.yaml"
 COMMENT_CLASSIFY = TOOLS / "analyzer-comment-classify.py"
 RUN_METRICS = TOOLS / "analyze-run-metrics.py"
 FLEET_PROBE = TOOLS / "fleet_probe.py"
+# NOT copied into the ability, deliberately — see `_hot_set`.
+MEMORY_CLI = Path("~/.kiro/skills/shared-kb/memory/memory.py")
 SESSIONS_DIR = Path("~/.kiro/sessions/cli")
 
 
@@ -455,4 +457,132 @@ def _fleet_central(ctx: dict) -> dict:
     got["fleet_reachable"] = True
     got["fleet_event_count"] = int(payload.get("events") or 0)
     got["fleet_artifact_count"] = int(payload.get("artifacts") or 0)
+    return got
+
+
+@facts.provider("hot_set",
+                requires=({"file": "~/.kiro/skills/shared-kb/memory/memory.py"},),
+                schema={
+    # Whether the store could be READ. Paired with the count on purpose: "consulted and
+    # genuinely empty" and "never consulted" both render as zero, and the standing instruction
+    # in this space is explicitly not to let the second become the first.
+    "hot_banner_readable": operators.T_BOOL,
+    "hot_set_count": operators.T_INT,
+    "hot_set_ids": operators.T_LIST,
+})
+def _hot_set(ctx: dict) -> dict:
+    """The always-resident slice of accumulated lessons, read from wherever it actually lives.
+
+    WHY THIS TOOL IS NOT COPIED, unlike every other one here. The others are algorithms, and an
+    algorithm travels. This one's value is a LIVE LOCAL STORE — a database that is deliberately
+    not in version control because it accumulates per-machine usage signal. Copying the reader
+    would produce a reader pointed at nothing. So the capability names the path where it lives,
+    and absence there is reported rather than papered over.
+
+    That is the general rule this case establishes: a tool whose value is its own accumulated
+    state cannot be vendored, and the capability declaration is what keeps its absence honest.
+
+    The command is a pure read (SELECTs only, no counter or timestamp touched), so calling it
+    repeatedly to evaluate a criterion is safe. Its sibling `recall` is NOT — it records usage
+    unless told otherwise — which is exactly why this provider calls the one that does not.
+    """
+    empty = {"hot_banner_readable": False, "hot_set_count": 0, "hot_set_ids": []}
+    cli = MEMORY_CLI.expanduser()
+    try:
+        proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return empty
+    # exit 3 = the store exists but was never migrated; exit 1 = locked or crashed. Both are
+    # "could not look", and the count they imply is an artefact of failure, not a result.
+    if proc.returncode != 0:
+        return empty
+    ids = re.findall(r"└─ \[([^\]]+)\]", proc.stdout)
+    m = re.search(r"Hot Set:\s*(\d+)\s*loaded", proc.stdout)
+    if not m:
+        return empty
+    return {"hot_banner_readable": True,
+            "hot_set_count": int(m.group(1)),
+            "hot_set_ids": ids}
+
+
+@facts.provider("worktree_state",
+                requires=({"cmd": "git"},),
+                schema={
+    # What the PLAN asked for, read from the plan doc this run recorded. Without it, "I am
+    # deliberately working in the shared tree" would be the one claim nothing could contradict.
+    "isolation_declared": operators.T_BOOL,
+    "plan_doc_readable": operators.T_BOOL,
+    # What is actually TRUE of the directory this run is scoped to. A linked worktree's `.git`
+    # is a file pointing at the owning repo; a source checkout's is a directory.
+    "in_linked_worktree": operators.T_BOOL,
+    "on_isolation_branch": operators.T_BOOL,
+    "worktree_dirty": operators.T_BOOL,
+    # Whether THIS run's own worktree still exists, matched by the run id rather than by a
+    # global count — another session's worktree says nothing about this one.
+    "own_worktree_exists": operators.T_BOOL,
+})
+def _worktree_state(ctx: dict) -> dict:
+    """Whether this run is really isolated, derived with read-only git — never by provisioning.
+
+    THIS IS THE SHAPE FOR AN EFFECT. Provisioning a worktree creates branches, checkouts and a
+    copied build skeleton; tearing one down runs guarded deletes. The engine performs none of
+    it. The agent runs the tool, and the engine independently asks the world what is true —
+    which is the only arrangement in which "I isolated the work" can be contradicted.
+
+    The reference implementation states the failure mode this closes, and it is worth quoting
+    because it is why a criterion here is not decoration: provisioning "FAILS HARD on error
+    rather than falling back to the shared tree. A silent fallback would hand back exactly the
+    shared-working-tree behaviour the caller asked to be isolated FROM, while reporting
+    success." A recorded claim of isolation with no check is that same fallback, one layer up.
+    """
+    from engine import store
+    empty = {"isolation_declared": False, "plan_doc_readable": False,
+             "in_linked_worktree": False, "on_isolation_branch": False,
+             "worktree_dirty": False, "own_worktree_exists": False}
+    run_id = str(ctx.get("run_id") or "")
+    conn = store.connect(read_only=True)
+    try:
+        docs = store.find_evidence(conn, run_id, None, "plan_doc")
+    finally:
+        conn.close()
+    got = dict(empty)
+
+    # What was asked for. The plan doc path comes from the run's own evidence, so the answer
+    # stays derived from what the run said rather than from a second place that could disagree.
+    for row in reversed(docs):
+        cand = Path(str(row["value"]).strip()).expanduser()
+        if cand.is_file():
+            try:
+                head = cand.read_text(encoding="utf-8", errors="replace")[:4000]
+            except OSError:
+                break
+            got["plan_doc_readable"] = True
+            m = re.search(r"^worktree_isolation:\s*(\S+)", head, re.M)
+            got["isolation_declared"] = bool(m) and m.group(1).lower() in ("true", "yes", "on")
+            break
+
+    # What is actually true.
+    root = Path(str(ctx.get("scope") or ".")).expanduser()
+    if not root.is_dir():
+        return got
+    dotgit = root / ".git"
+    got["in_linked_worktree"] = dotgit.is_file()
+
+    def git(*args: str) -> str:
+        try:
+            r = subprocess.run(["git", "-C", str(root), *args],
+                               capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+    got["on_isolation_branch"] = branch.startswith("shipcheck/")
+    got["worktree_dirty"] = bool(git("status", "--porcelain").strip())
+    short = run_id[:8]
+    if short:
+        refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads/shipcheck/*")
+        got["own_worktree_exists"] = any(
+            r.strip().endswith(short) for r in refs.splitlines() if r.strip())
     return got

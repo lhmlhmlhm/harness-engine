@@ -137,10 +137,57 @@
     "kind": "activation_banner"
    },
    "live_spec": {
-    "type": "evidence",
-    "kind": "activation_banner"
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence",
+      "kind": "activation_banner"
+     },
+     {
+      "type": "evidence_in",
+      "kind": "hot_set_state",
+      "values": [
+       "loaded",
+       "empty",
+       "unavailable"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "hot_set_state",
+      "claims": [
+       "loaded"
+      ],
+      "disproved_when": {
+       "fact": "hot_set_count",
+       "count_lte": 0
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "hot_set_state",
+      "claims": [
+       "empty"
+      ],
+      "disproved_when": {
+       "fact": "hot_set_count",
+       "count_gte": 1
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "hot_set_state",
+      "claims": [
+       "unavailable"
+      ],
+      "disproved_when": {
+       "fact": "hot_banner_readable",
+       "equals": true
+      }
+     }
+    ]
    },
-   "reason": "散文完成标准：「横幅作为本阶段第一条叙述输出打出，且只打这一次。」输出是「一行激活横幅，末尾带上本次加载的历史经验条数，并逐条列出经验 id」。「第一条叙述 / 只打一次」这种叙述顺序无法用现有任何谓词机器化，但散文强调「条数必须来自脚本对库的实际计数」（topic hot-set-fabrication）——所以最强可机检项是强制留下一条可审计的横幅内容行（条数 + id 明细），故用 evidence(activation_banner)（T1）而非 attest。顺序/唯一性的缺口见 notes。"
+   "reason": "散文完成标准：「横幅作为本阶段第一条叙述输出打出，且只打这一次。」输出是「一行激活横幅，末尾带上本次加载的历史经验条数，并逐条列出经验 id」。「第一条叙述 / 只打一次」这种叙述顺序无法用现有任何谓词机器化，但散文强调「条数必须来自脚本对库的实际计数」（topic hot-set-fabrication）——所以最强可机检项是强制留下一条可审计的横幅内容行（条数 + id 明细），故用 evidence(activation_banner)（T1）而非 attest。顺序/唯一性的缺口见 notes。\n[2026-09-02 升级] 增记 hot_set_state，三个取值各有反驳事实。散文的完成标准要求横幅带上加载条数并逐条列出 id；而「查了确实是空」与「压根没查到」都渲染成 0，源系统的常驻指令只能靠散文说「命令失败不是编造 Hot Set: 0 的许可」。现在由 hot_set_count 的两个方向与 hot_banner_readable 各守一个取值。"
   },
   "C01": {
    "tier_at_derivation": "T1",
@@ -1992,10 +2039,21 @@
        "kept_dirty",
        "no_worktree"
       ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "worktree_disposition",
+      "claims": [
+       "no_worktree"
+      ],
+      "disproved_when": {
+       "fact": "own_worktree_exists",
+       "equals": true
+      }
      }
     ]
    },
-   "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。"
+   "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。\n[2026-09-02 升级] no_worktree 这句声称经 own_worktree_exists 反驳，按 run id 匹配而非全局计数 —— 别的 session 的工作树说明不了这一个。"
   },
   "E22b": {
    "tier_at_derivation": "T1",
@@ -2008,6 +2066,46 @@
     "kind": "deferred_close"
    },
    "reason": "完成标准「已给出稍后如何关闭的提示」。散文「人选择暂不关闭时走这条：不动文档、不归档，给出『稍后用某命令再关』的提示即可」，并「E22a 与 E22b 二选一、只走一个」。T1 记录延后关闭提示行。与 E22a 互斥。"
+  },
+  "C02b": {
+   "phase": "context",
+   "spec_at_derivation": "layers/1-context.md「Worktree provisioning（conditional — worktree_isolation=true 时在此发生）」一节，含 _provision_worktree 的 docstring 原文与 agent 侧三条后果。",
+   "live_spec": {
+    "type": "all_checks",
+    "checks": [
+     {
+      "type": "evidence_in",
+      "kind": "worktree_mode",
+      "values": [
+       "isolated",
+       "shared_declared"
+      ]
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "worktree_mode",
+      "claims": [
+       "isolated"
+      ],
+      "disproved_when": {
+       "fact": "in_linked_worktree",
+       "equals": false
+      }
+     },
+     {
+      "type": "claim_corroborated",
+      "kind": "worktree_mode",
+      "claims": [
+       "shared_declared"
+      ],
+      "disproved_when": {
+       "fact": "isolation_declared",
+       "equals": true
+      }
+     }
+    ]
+   },
+   "reason": "源文把这一步要消除的失效模式写成可引用的一句：provisioning「FAILS HARD on error rather than falling back to the shared tree. A silent fallback would hand back exactly the shared-working-tree behaviour the caller asked to be isolated FROM, while reporting success」。一句没人核对的「已隔离」就是同一个退回上移一层，所以两个取值各有反驳事实：isolated 由「这个目录不是链接工作树」反驳（链接工作树的 .git 是文件，源检出是目录），shared_declared 由方案文档声明的 worktree_isolation 反驳。引擎只做只读核实，效果由 agent 跑脚本完成 —— 这是 C3 类的形态。"
   }
  }
 }

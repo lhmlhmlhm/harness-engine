@@ -31,6 +31,8 @@ facts:
   - review_comments
   - run_metrics
   - fleet_central
+  - hot_set
+  - worktree_state
 hooks:
 # 上报侧的五个 hook。前四个是**提醒而非义务**，这是刻意的：一个「我报了」的义务可以用
 # 一句散文销账，而那恰恰是参照系统累计 162 次强制确认的形状。真正的强制在 E24 —— 那里
@@ -265,6 +267,28 @@ guards:
     matches:
       - tool: TaskeiUpdateTask
         pattern: '"status"\s*:\s*"Closed"'
+  # 拆除隔离工作树是不可逆的：它 remove worktree、`branch -D`、并做带守卫的 rm -rf。
+  # 因此挂在 Y/N 关闭决策这个 gate 上 —— 与 task_close / plan_mv 同一个授权点。
+  # 三条规则同时拦脚本与它的破坏性原语：只拦脚本的话，改个措辞就能绕过这道门。
+  worktree_teardown:
+    step: E21
+    matches:
+    # 两条规则而不是一条放宽的：只锚定命令开头会漏掉 `bash <path>/worktree-teardown.sh`
+    # （实测漏），而放宽到任意空白边界会连 `echo 'run worktree-teardown.sh later'` 一起拦
+    # （也实测到了）。本引擎的 matcher **没有引号感知** —— 保护来自命令开头锚定本身，
+    # 所以任何拆掉锚点的改法都会同时拆掉那层保护。解释器是可枚举的，提及不是。
+    - tool: shell
+      field: command
+      pattern: (^|[;&|]\s*)\S*worktree-teardown\.sh\b
+    - tool: shell
+      field: command
+      pattern: (^|[;&|]\s*)(bash|sh|zsh|dash|ksh|python3?)\s+\S*worktree-teardown\.sh\b
+    - tool: shell
+      field: command
+      pattern: (^|[;&|]\s*)git\b[^;&|]*?\s+worktree\s+remove\b
+    - tool: shell
+      field: command
+      pattern: (^|[;&|]\s*)git\b[^;&|]*?\s+branch\s+-[dD]\b[^;&|]*?shipcheck/
   plan_mv:
     step: E21
     matches:
@@ -374,8 +398,40 @@ steps:
     产出：一行激活横幅，末尾带上本次加载的历史经验条数，并逐条列出经验 id
     完成：横幅作为本阶段第一条叙述输出打出，且只打这一次
   completion:
-    type: evidence
-    kind: activation_banner
+    type: all_checks
+    checks:
+    - type: evidence
+      kind: activation_banner
+    # 横幅要带上加载的经验条数。三个取值各有反驳事实 —— 「查了确实是空」与「压根没查到」
+    # 都渲染成 0，而源系统的常驻指令正是「命令失败不是编造 Hot Set: 0 的许可」。
+    # 那句话此前只能靠散文说，这里由三个派生事实各自守一个取值。
+    - type: evidence_in
+      kind: hot_set_state
+      values:
+      - loaded
+      - empty
+      - unavailable
+    - type: claim_corroborated       # 说加载了 -> 库里必须真有 hot 条目
+      kind: hot_set_state
+      claims:
+      - loaded
+      disproved_when:
+        fact: hot_set_count
+        count_lte: 0
+    - type: claim_corroborated       # 说是空的 -> 但库里明明有
+      kind: hot_set_state
+      claims:
+      - empty
+      disproved_when:
+        fact: hot_set_count
+        count_gte: 1
+    - type: claim_corroborated       # 说读不到 -> 但它读得到
+      kind: hot_set_state
+      claims:
+      - unavailable
+      disproved_when:
+        fact: hot_banner_readable
+        equals: true
 - id: C01
   phase: context
   stage: resume
@@ -406,6 +462,43 @@ steps:
     type: phases_summarized
     exclude:
     - context
+- id: C02b
+  phase: context
+  stage: resume
+  title: Worktree isolation state
+  directive: |
+    产出：本次 run 的工作树形态 —— 隔离到专属工作树，或按方案声明留在共享树
+    完成：形态已记录，且与方案声明一致；隔离形态经只读 git 独立核实
+    注意：不要 `git checkout -b` —— 隔离分支已存在且工作树已 checkout 在它上面，
+          切分支反而破坏隔离
+  deps:
+  - C01
+  completion:
+    type: all_checks
+    checks:
+    # 两个取值各有反驳事实。这一步的存在理由是源实现自己写下的失效模式：provisioning
+    # 「FAILS HARD rather than falling back to the shared tree —— 静默退回会把调用方明确
+    # 要求隔离掉的那个共享工作树行为原样交回去，同时报告成功」。一句没人核的「已隔离」
+    # 就是同一个退回，只是上移了一层。
+    - type: evidence_in
+      kind: worktree_mode
+      values:
+      - isolated
+      - shared_declared
+    - type: claim_corroborated       # 说隔离了 -> 但这个目录不是链接工作树
+      kind: worktree_mode
+      claims:
+      - isolated
+      disproved_when:
+        fact: in_linked_worktree
+        equals: false
+    - type: claim_corroborated       # 说按声明留在共享树 -> 但方案声明的是隔离
+      kind: worktree_mode
+      claims:
+      - shared_declared
+      disproved_when:
+        fact: isolation_declared
+        equals: true
 - id: C03
   phase: context
   stage: pre-flight
@@ -431,6 +524,7 @@ steps:
     完成：工作区不落后于远端，或确认无需同步
   deps:
   - C03
+  - C02b
   completion:
     type: evidence_in
     kind: code_sync_state
@@ -1931,6 +2025,15 @@ steps:
       - kept_review_open
       - kept_dirty
       - no_worktree
+    # 「本来就没有工作树」是 21 处按自己的话被接受的声称之一。按 run id 匹配而不是数
+    # 全局数量：别的 session 的工作树说明不了这一个。
+    - type: claim_corroborated
+      kind: worktree_disposition
+      claims:
+      - no_worktree
+      disproved_when:
+        fact: own_worktree_exists
+        equals: true
 - id: E22b
   phase: cleanup
   stage: close

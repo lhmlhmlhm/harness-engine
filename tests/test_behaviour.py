@@ -179,9 +179,14 @@ def test_transcribed_flow_has_all_four_prose_tiers(env):
     """
     r = run(["validate", "shipcheck-asis"], env)
     assert r.returncode == OK, r.stderr
-    assert "directive 101/101" in r.stdout
-    assert "guide 101/101" in r.stdout
-    assert "own section 101" in r.stdout, (
+    # Asserted as FULL coverage, not a literal count. Pinning 101 made a legitimate addition
+    # look like a regression — the invariant is that every step has both layers, whatever the
+    # step count happens to be.
+    from engine import flow as _fl
+    n = len(_fl.load("shipcheck-asis").steps)
+    assert f"directive {n}/{n}" in r.stdout, (n, r.stdout)
+    assert f"guide {n}/{n}" in r.stdout, (n, r.stdout)
+    assert f"own section {n}" in r.stdout, (
         "every step must resolve to its OWN prose section — a step falling back to the "
         "whole file means its anchor stopped matching"
     )
@@ -230,14 +235,26 @@ def _close_step_honestly(env, run_id: str, sid: str, step_raw: dict, counts: dic
                 continue
             legal = rq.get("must_be_one_of") or _truthful_values(step_raw, rq["kind"])
             alt = [v for v in legal if v not in rq["claims"]]
-            # A step MAY legitimately offer no alternative — a criterion whose every legal
-            # value asserts having consulted something external cannot be satisfied when that
-            # thing is unreachable. Saying so beats a StopIteration from inside the driver.
-            assert alt, (
-                f"{sid}: the claim on {rq['kind']!r} was disproved and the flow declares no "
-                f"honest alternative (legal values {legal}, all of them claims). This step "
-                f"cannot be closed in this environment."
-            )
+            if not alt:
+                # EVERY legal value is a claim, each with its own disproving fact. Then exactly
+                # ONE of them should survive here, and which one is a property of the world
+                # rather than of the flow — so try them and let the engine pick. This also
+                # asserts the interesting thing about such an enum: it is a real PARTITION.
+                # If none survives, the values do not cover the world; if two do, one of the
+                # corroborations is inert.
+                survivors = []
+                for v in legal:
+                    assert rc(["evidence", "--run", run_id, "--step", sid,
+                               "--kind", rq["kind"], "--value", v], env) == OK, sid
+                    if run(["close-step", "--run", run_id, "--step", sid],
+                           env).returncode == OK:
+                        survivors.append(v)
+                        break
+                assert survivors, (
+                    f"{sid}: every legal value of {rq['kind']!r} is a corroborated claim "
+                    f"({legal}) and NONE of them survives — the values do not cover the world."
+                )
+                continue
             assert rc(["evidence", "--run", run_id, "--step", sid,
                        "--kind", rq["kind"], "--value", alt[0]], env) == OK, sid
         r = run(["close-step", "--run", run_id, "--step", sid], env)
@@ -526,7 +543,10 @@ def test_the_transcribed_real_flow_validates(env):
     # no content anywhere (eight in one phase, plus a step whose real work is its two
     # exclusive branches). Cross-checked against the source's own per-step table, which
     # has no row for any of them. Transcribing a registry verbatim imports its placeholders.
-    assert "101 steps" in r.stdout
+    # Derived, not pinned: a legitimately added step must not read as a regression.
+    from engine import flow as _flmod
+    _n = len(_flmod.load("shipcheck-asis").steps)
+    assert f"{_n} steps" in r.stdout
 
 
 # ------------------------------------------------------------------ control flow
@@ -1501,7 +1521,11 @@ def test_domain_analysis_decides_the_flow(env):
             assert rc(["gate", "--run", "seam", "--step", sid, "--decision", "preauth"],
                       env) == OK
         _satisfy(env, "seam", sid, s.get("completion") or {})
-        r = run(["close-step", "--run", "seam", "--step", sid], env)
+        # Third driver to reach for the shared helper. The first two drifted apart the same
+        # way and were merged last round; this one surfaced when a corroborated criterion
+        # landed on a step it walks. A driver duplicated is a driver that stops testing the
+        # same thing.
+        r = _close_step_honestly(env, "seam", sid, s)
         assert r.returncode == OK, f"{sid}: {r.stderr}"
         fired = r.stdout
 
@@ -3615,6 +3639,116 @@ def test_a_coordinator_that_answers_but_not_about_this_task_is_not_reachable(env
         _cap_cleanup(d)
 
 
+@pytest.mark.parametrize("cmd,blocked", [
+    ("worktree-teardown.sh --uuid abc --source-repo /x", True),
+    ("bash ~/x/worktree-teardown.sh --gc --source-repo /x", True),
+    ("cd /tmp && sh ./worktree-teardown.sh --uuid a", True),
+    ("python3 ./worktree-teardown.sh", True),
+    ("git -C /x worktree remove /y", True),
+    ("git -C /x branch -D shipcheck/abc12345", True),
+    ("git worktree list", False),
+    ("git worktree prune", False),
+    ("git branch -D feature/foo", False),
+    ("echo 'run worktree-teardown.sh later'", False),
+    ("echo run worktree-teardown.sh later", False),
+])
+def test_tearing_down_an_isolated_worktree_is_guarded(env, cmd, blocked):
+    """Teardown is irreversible, so it is gated — and the RULES had to be found by trying them.
+
+    Two lessons are baked into the cases. First, guarding only the script name misses
+    `bash <path>/worktree-teardown.sh`, and guarding only the script misses the destructive
+    primitives it wraps: `git worktree remove` and `git branch -D shipcheck/*` do the same
+    damage without it, so a gate that only knows the wrapper can be dodged by rephrasing.
+
+    Second, and the reason the pattern is two anchored rules rather than one loose one: this
+    engine's matcher has NO quote awareness. The protection against a command that merely
+    MENTIONS the script comes from anchoring at the start of a command, so loosening the anchor
+    to any whitespace boundary — tried, and it blocked `echo 'run worktree-teardown.sh later'` —
+    removes that protection along with the miss it was meant to fix. Interpreters are
+    enumerable; mentions are not.
+    """
+    assert rc(["open", "shipcheck-asis", "--scope", str(REPO), "--run", "gwt"], env) == OK
+    try:
+        r = run(["guard-tool", "--tool", "shell",
+                 "--input-json", json.dumps({"command": cmd}),
+                 "--cwd", str(REPO)], env)
+        assert (r.returncode == BLOCKED) is blocked, (cmd, r.returncode, r.stdout + r.stderr)
+        if blocked:
+            assert "E21" in r.stdout + r.stderr, r.stdout + r.stderr
+    finally:
+        rc(["close-run", "--run", "gwt", "--result", "aborted",
+            "--force-steps", "--force-obligations"], env)
+
+
+def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path):
+    """The pairing, asserted separately because the flow closes either way.
+
+    "Consulted and genuinely empty" and "could not be consulted" both render as zero, and the
+    standing instruction in this space is explicit that a failing command is not a licence to
+    write down zero. The full-flow driver cannot prove this: it records whichever legal value
+    survives, so both outcomes close the step. Pinned here as what it actually is — the flag is
+    true exactly when the reader succeeded.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+
+    # A path with no store at all: the CLI creates an empty database, finds no tables, and
+    # exits non-zero. The count it implies is an artefact of that failure.
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "nope.db"))
+    got = _f.gather("hot_set", {})
+    assert got["hot_banner_readable"] is False, got
+    assert got["hot_set_count"] == 0 and got["hot_set_ids"] == [], got
+
+    # And with the real store, the flag must track the reader's exit code rather than being
+    # assumed — compared against an independent invocation so the assertion holds on a machine
+    # whose store is missing too.
+    monkeypatch.delenv("MEMORY_DB_PATH", raising=False)
+    cli = pathlib.Path("~/.kiro/skills/shared-kb/memory/memory.py").expanduser()
+    if cli.is_file():
+        proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
+                              capture_output=True, text=True)
+        live = _f.gather("hot_set", {})
+        assert live["hot_banner_readable"] is (proc.returncode == 0), (proc.returncode, live)
+        if proc.returncode == 0:
+            # The listing lines are load-bearing: a count with the per-entry lines dropped is
+            # the observed way this banner degrades.
+            assert len(live["hot_set_ids"]) == live["hot_set_count"], live
+
+
+def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path):
+    """The one discriminator the isolation claim rests on, asserted both ways.
+
+    A linked worktree's `.git` is a FILE pointing at the owning repo; a source checkout's is a
+    DIRECTORY. Everything about "am I really isolated" hangs on that, and the full-flow driver
+    only ever sees the second kind — so mutating the check to accept either left the suite
+    green. Built from the structural shape rather than by provisioning a real worktree: this
+    test must not mutate any repository to make its point.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("shipcheck-asis")
+
+    # This repository IS a source checkout — `.git` is a directory.
+    assert (REPO / ".git").is_dir()
+    src = _f.gather("worktree_state", {"run_id": "none", "scope": str(REPO)})
+    assert src["in_linked_worktree"] is False, src
+
+    # The shape of a linked worktree, without touching a real one.
+    wt = tmp_path / "linked"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {REPO}/.git/worktrees/probe\n", encoding="utf-8")
+    linked = _f.gather("worktree_state", {"run_id": "none", "scope": str(wt)})
+    assert linked["in_linked_worktree"] is True, linked
+    # A directory that is not a repository at all is neither isolated nor on a branch.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    bare = _f.gather("worktree_state", {"run_id": "none", "scope": str(plain)})
+    assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
+
+
 def test_no_ability_declares_a_provider_nothing_reads(env):
     """A declared provider whose facts no condition reads is DEAD WIRING.
 
@@ -3637,6 +3771,25 @@ def test_no_ability_declares_a_provider_nothing_reads(env):
             read |= set(_re.findall(r"\{\{\s*fact\.([A-Za-z0-9_]+)\s*\}\}", h.body or ""))
         if f.variant_spec.get("fact"):
             read.add(f.variant_spec["fact"])
+
+        # COMPLETION CRITERIA COUNT AS READERS. This test predates the criterion that consults
+        # derived facts, and it only walked hook conditions and templates — so a provider whose
+        # only consumer was a CRITERION reported as unread, and the honest repair for that false
+        # alarm would have been to delete a live provider. A "nothing reads it" check that
+        # cannot see one of the two things that read is worse than none.
+        def _crit_facts(spec, into):
+            if not isinstance(spec, dict):
+                return
+            for sub in spec.get("checks") or []:
+                _crit_facts(sub, into)
+            if spec.get("disproved_when"):
+                into |= conditions.facts_referenced(spec["disproved_when"])
+
+        for st in f.steps.values():
+            _crit_facts(st.completion, read)
+        for goal in f.phase_goals.values():
+            _crit_facts(goal, read)
+
         for provider in f.facts_providers:
             owned = {k for k, v in f.facts_owner.items() if v == provider}
             assert owned & read, (

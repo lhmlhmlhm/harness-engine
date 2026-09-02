@@ -594,6 +594,55 @@ role: fixture      # 缺省 production
 接进来的那一个买到了什么：一步的判据从「有这么一行」变成「这些数字来自运行时」是一句可被独立记录
 反驳的声称。原来的判据接受**没人产出过的数字**。
 
+### 效果类（C3）的形态：agent 执行，引擎用只读命令独立核实
+
+隔离一个工作树会建分支、建检出、复制一份构建骨架；拆除它会 `worktree remove` + `branch -D`
++ 带守卫的 `rm -rf`。**引擎一件都不做。** agent 跑脚本，引擎随后问世界到底怎样——这个分工
+不是洁癖，它是「我隔离了」这句话唯一能被反驳的安排。
+
+源实现自己写下了它要消除的失效模式，值得原样引用，因为它就是这里加判据的理由：
+
+> provisioning **FAILS HARD on error rather than falling back to the shared tree**. A silent
+> fallback would hand back exactly the shared-working-tree behaviour the caller asked to be
+> isolated FROM, while reporting success.
+
+一句没人核对的「已隔离」就是同一个退回上移了一层。所以两个取值各有反驳事实：
+
+| 声称 | 反驳它的事实 | 依据 |
+|---|---|---|
+| `isolated` | `in_linked_worktree equals false` | 链接工作树的 `.git` 是**文件**（指向拥有它的仓库），源检出的是**目录** |
+| `shared_declared` | `isolation_declared equals true` | 方案文档里声明的 `worktree_isolation`——否则它是跳过隔离的免费出口 |
+
+不可逆的那一半由 guard 管，挂在 Y/N 关闭决策那个 gate 上。守卫**同时拦脚本与它包装的破坏性
+原语**（`git worktree remove` / `git branch -D shipcheck/*`）——只认包装器的门，改个措辞就能绕过。
+
+一处实测得来的约束：**本引擎的 matcher 没有引号感知**，防「命令里只是提到脚本名」靠的是
+**命令开头锚定**。所以把锚点放宽到任意空白边界会同时拆掉那层保护（试过，它把
+`echo 'run worktree-teardown.sh later'` 一起拦了）。正确形状是两条锚定规则：裸调用 +
+枚举的解释器前缀。解释器可枚举，提及不可枚举。
+
+### 有一种工具不能 vendor：它的价值是自己累积的状态
+
+其余每个领域工具都是逐字节复制进 ability 的，因为**算法可以搬运**。常驻经验库的读取器不行——
+它的价值是一个**活的本地存储**：一个刻意不进版本控制的数据库，因为它累积的是本机的使用信号。
+把读取器复制过来，只会得到一个指向空处的读取器。
+
+所以能力声明指向它**实际所在的路径**，缺失由能力层如实报出：
+
+```python
+@facts.provider("hot_set", requires=({"file": "~/.kiro/skills/shared-kb/memory/memory.py"},), ...)
+```
+
+这确立了一条通则：**一个价值在于自身累积状态的工具不可 vendor，而能力声明是让它的缺失保持诚实
+的那一半。**
+
+顺带一条必须核对的纪律：那个 CLI 的 `hot-banner` 是纯读（只有 SELECT），所以反复调用安全；
+它的兄弟 `recall` 看起来也像读，**实际会写使用记录**，除非显式关掉。provider 调的是前者。
+
+激活横幅的三个取值同样各有反驳事实（`loaded` ← 计数为 0；`empty` ← 计数 ≥1；`unavailable`
+← 其实读得到）。这条把源系统只能用散文说的那句话变成了机制：**命令失败不是编造「Hot Set: 0」
+的许可。**
+
 ### 上报：把「我报了」变成可被协调方反驳的声称
 
 派发式工作的行为规范要求每到一个里程碑就上报。参照系统把这条写成散文 + 一个 fire-once
