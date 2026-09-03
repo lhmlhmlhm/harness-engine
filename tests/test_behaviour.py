@@ -5927,3 +5927,133 @@ def test_the_portable_copy_says_what_it_is(env):
     import engine
     for text in (portable, local):
         assert f"from engine {engine.__version__}" in text.splitlines()[0], text.splitlines()[0]
+
+
+# ------------------------------------------------- how the spec format is read
+
+_VER_BODY = """scope_kind: s
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+"""
+
+
+def _ver_spec(root: Path, name: str, head: str, body: str = _VER_BODY) -> None:
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "flow.yaml").write_text(f"ability: {name}\n{head}{body}", encoding="utf-8")
+
+
+def _ver_env(env, root: Path) -> dict:
+    return {**env, "HARNESS_ABILITIES_PATH": str(root)}
+
+
+@pytest.mark.parametrize("version", ["1", '"1.0"', '"1.7"'])
+def test_the_same_major_is_readable_whatever_the_minor(env, tmp_path, version):
+    """MAJOR is the readability claim; MINOR only says keys were added.
+
+    `1` and `"1.0"` must mean the same thing, or every existing spec would have to be rewritten
+    to gain a minor. And a NEWER minor is read rather than refused: the structure is unchanged, so
+    refusing it would be refusing something this engine can in fact read.
+    """
+    root = tmp_path / f"r{version.strip(chr(34)).replace('.', '_')}"
+    _ver_spec(root, "ok", f"version: {version}\nwhen: a flow at some minor of the readable "
+                          f"major\nuses: []\n")
+    assert rc(["validate", "ok"], _ver_env(env, root)) == OK
+
+
+def test_a_key_from_a_newer_minor_is_refused_as_a_version_gap_not_a_typo(env, tmp_path):
+    """Both framings exist and must not be swapped — that swap is the defect being fixed.
+
+    The unknown-key refusal used to talk about typos unconditionally, so a spec from a newer
+    format was told to check its spelling. Asserted in BOTH directions: a newer minor gets the
+    version framing and NOT the typo advice; a spec at this very format gets the typo framing and
+    no mention of a version.
+    """
+    root = tmp_path / "minor"
+    _ver_spec(root, "newer", 'version: "1.4"\nwhen: a flow from a newer minor carrying an '
+                             'unknown key\nuses: []\nretry_policy: aggressive\n')
+    _ver_spec(root, "typo", 'version: 1\nwhen: a flow at this format that simply misspells a '
+                            'key\nuses: []\nretry_polcy: aggressive\n')
+
+    newer = run(["validate", "newer"], _ver_env(env, root))
+    assert newer.returncode == BAD_SPEC
+    assert "format 1.4" in newer.stderr and "same MAJOR" in newer.stderr, newer.stderr
+    assert "A typo here" not in newer.stderr, "a version gap was reported as a typo"
+
+    typo = run(["validate", "typo"], _ver_env(env, root))
+    assert typo.returncode == BAD_SPEC
+    assert "A typo here" in typo.stderr, typo.stderr
+    assert "MAJOR" not in typo.stderr, "a plain typo was reported as a version gap"
+
+
+def test_the_version_is_read_before_any_key_is_judged(env, tmp_path):
+    """Order alone decides which of two true things the reader is told.
+
+    A spec that is BOTH a newer major AND carries an unknown key is two problems, and only one of
+    them is actionable: the key is unknown BECAUSE the format moved. Judging keys first reported
+    the symptom and never mentioned the cause — which is exactly what happened.
+    """
+    root = tmp_path / "order"
+    _ver_spec(root, "both", "version: 2\nwhen: a newer major that also carries an unknown "
+                            "key\nuses: []\nretry_policy: aggressive\n")
+    out = run(["validate", "both"], _ver_env(env, root))
+    assert out.returncode == BAD_SPEC
+    assert "spec format 2.0 cannot be read" in out.stderr, out.stderr
+    # The crisp discriminator is the KEY NAME: it can only appear if the key check ran. Phrases
+    # like "does not know" are no good here — the correct message contains one of its own
+    # ("does not know what moved"), so asserting on those passes for the wrong reason.
+    assert "retry_policy" not in out.stderr, \
+        "the key was judged before the version, so the cause went unmentioned"
+
+
+def test_an_unreadable_major_says_whether_the_machinery_is_missing_too(env, tmp_path):
+    """Two different problems wear the same version number, and the answers differ.
+
+    A spec whose `uses:` this engine fully implements is a FORMAT gap — everything it needs is
+    here, only the writing is newer. One naming an absent mechanism needs more than a newer
+    reader. The version number alone cannot tell them apart, so the refusal does.
+    """
+    root = tmp_path / "gap"
+    _ver_spec(root, "formatonly", "version: 2\nwhen: a newer major needing nothing this engine "
+                                  "lacks\nuses: [gates, prose]\n")
+    _ver_spec(root, "alsomissing", "version: 2\nwhen: a newer major that also needs absent "
+                                   "machinery\nuses: [gates, leases]\n")
+
+    fmt = run(["validate", "formatonly"], _ver_env(env, root))
+    assert fmt.returncode == BAD_SPEC
+    assert "format gap and not a machinery gap" in fmt.stderr, fmt.stderr
+
+    also = run(["validate", "alsomissing"], _ver_env(env, root))
+    assert also.returncode == BAD_SPEC
+    assert "does NOT implement: leases" in also.stderr, also.stderr
+    assert "format gap and not a machinery gap" not in also.stderr
+
+
+def test_a_float_version_is_refused_because_minors_would_collide(env, tmp_path):
+    """`1.10` and `1.1` are the SAME float, so two minors would become one silently.
+
+    The engine already guards the key side of this coercion (`on:`/`yes:` becoming booleans);
+    this is the value side. The assertion reads the collision off the message itself: the spec
+    says 1.10 and what arrives is 1.1.
+    """
+    root = tmp_path / "float"
+    _ver_spec(root, "floaty", "version: 1.10\nwhen: a flow whose version was left unquoted\n"
+                              "uses: []\n")
+    out = run(["validate", "floaty"], _ver_env(env, root))
+    assert out.returncode == BAD_SPEC
+    assert "is a float (1.1)" in out.stderr, out.stderr
+    assert "SAME" in out.stderr and "Quote it" in out.stderr
+
+
+@pytest.mark.parametrize("bad", ['"1.2.3"', '"one"', '""', "true", '"1."'])
+def test_a_version_that_is_not_a_format_is_refused(env, tmp_path, bad):
+    """Anything that is not an integer major or a quoted MAJOR.MINOR is not a format."""
+    root = tmp_path / f"bad{abs(hash(bad))}"
+    _ver_spec(root, "b", f"version: {bad}\nwhen: a flow whose version is not a format at all\n"
+                         f"uses: []\n")
+    assert rc(["validate", "b"], _ver_env(env, root)) == BAD_SPEC

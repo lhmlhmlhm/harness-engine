@@ -19,6 +19,7 @@ that caused it. Checking at load time turns that into an immediate, legible erro
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
 import re
@@ -103,7 +104,78 @@ def _installed() -> dict[str, Path]:
             found[p.name] = p
     return found
 
-SPEC_VERSION = 1
+# The spec format, as MAJOR.MINOR.
+#
+# MAJOR is a readability claim: a different major means the structure changed, and an older
+# engine cannot read it — not because it refuses to try, but because it does not know what
+# moved. MINOR means keys were ADDED. The structure is still readable, so a newer minor is
+# accepted and read; what it costs is that keys added after this engine are unknown here, and
+# the refusal for those says so instead of looking like a typo.
+#
+# There is deliberately no reader for a future MAJOR. Accepting one and reading it as this
+# major would silently misinterpret it, and a claim that cannot be falsified is exactly what
+# this engine refuses everywhere else. When a major 2 actually exists, supporting it is a
+# reader plus a fixture per version — mechanical, and guarded.
+SPEC_MAJOR = 1
+SPEC_MINOR = 0
+
+
+def spec_format() -> str:
+    return f"{SPEC_MAJOR}.{SPEC_MINOR}"
+
+
+def _parse_spec_version(value, path: Path) -> tuple[int, int]:
+    """Read `version:` as (major, minor). `1` means 1.0.
+
+    A FLOAT is refused, and that is not pedantry: YAML reads `1.10` and `1.1` as the same
+    float, so two different minors would collide into one and the engine would read the wrong
+    one without noticing. The same coercion trap already has a guard for keys (`on:`/`yes:`
+    becoming booleans); this is the value side of it. Write a minor as a quoted string.
+    """
+    if isinstance(value, bool):
+        raise FlowError(f"{path}: 'version' is a boolean — YAML coerced it. Quote it.")
+    if isinstance(value, int):
+        return value, 0
+    if isinstance(value, float):
+        raise FlowError(
+            f"{path}: 'version' is a float ({value!r}). YAML reads 1.10 and 1.1 as the SAME\n"
+            f"  float, so two different minors would collide and the wrong one would be read\n"
+            f"  silently. Quote it: version: \"{value}\""
+        )
+    if isinstance(value, str):
+        text = value.strip()
+        parts = text.split(".")
+        if len(parts) <= 2 and all(x.isdigit() for x in parts) and parts[0]:
+            return int(parts[0]), int(parts[1]) if len(parts) == 2 else 0
+    raise FlowError(
+        f"{path}: 'version' must be an integer major, or a quoted \"MAJOR.MINOR\"; "
+        f"got {value!r}"
+    )
+
+
+def _capability_gap(raw: dict) -> str:
+    """When the format is unreadable, say whether the MACHINERY is also missing.
+
+    The two are different problems with different answers, and the version number alone cannot
+    tell them apart. A spec whose `uses:` this engine fully implements is a pure format gap —
+    everything it needs exists here, the writing does not. One naming an absent mechanism needs
+    more than a newer reader. Saying which is the difference between a useful refusal and a
+    number.
+    """
+    declared = raw.get("uses")
+    if not isinstance(declared, list):
+        return ("  It declares no capability list, so nothing can be said about which mechanisms\n"
+                "  it needs — only that the structure is unreadable here.")
+    names = [str(x).strip() for x in declared]
+    missing = [n for n in names if n not in ENGINE_CAPABILITIES]
+    if not missing:
+        have = ", ".join(names) if names else "none"
+        return (f"  Its `uses:` names only mechanisms this engine HAS ({have}), so this is a\n"
+                f"  format gap and not a machinery gap: a newer engine can read it unchanged.")
+    return (f"  Its `uses:` also names mechanisms this engine does NOT implement: "
+            f"{', '.join(sorted(missing))}.\n"
+            f"  So a newer reader alone would not be enough — the flow needs machinery that is\n"
+            f"  absent here.")
 
 # A gate policy says what authorises passing a step.
 #   none          — no gate; closing the step is enough
@@ -479,7 +551,8 @@ def _require_plain_id(value, where: str, path: Path) -> str:
     return value
 
 
-def _reject_unknown(mapping: dict, allowed: set, where: str, path: Path) -> None:
+def _reject_unknown(mapping: dict, allowed: set, where: str, path: Path, *,
+                    newer_by: tuple[int, int] | None = None) -> None:
     # A non-string KEY means YAML coerced it — `on:` / `no:` / `yes:` are booleans in
     # YAML 1.1, so a key spelled that way silently becomes True/False and stops matching
     # anything. Caught separately because the coerced value would otherwise blow up
@@ -493,14 +566,28 @@ def _reject_unknown(mapping: dict, allowed: set, where: str, path: Path) -> None
               "key, or use a name that is not reserved."
         )
     unknown = sorted(set(mapping) - allowed)
-    if unknown:
+    if not unknown:
+        return
+    if newer_by:
+        # A version gap and a typo used to produce the same message, so whoever hit it was told
+        # to check their spelling when the truth was that their spec is newer than this engine.
         raise FlowError(
-            f"{path}: {where} has unsupported key(s): {', '.join(unknown)}\n"
-            f"  supported: {', '.join(sorted(allowed))}\n"
-            f"  A typo here would silently change what this spec means, so it is fatal.\n"
-            f"  If you need a construct the engine lacks, that is an engine gap — put it\n"
-            f"  in a comment and raise it, rather than a key that does nothing."
+            f"{path}: {where} has key(s) this engine does not know: {', '.join(unknown)}\n"
+            f"  This spec declares format {newer_by[0]}.{newer_by[1]} and this engine reads "
+            f"{spec_format()} — same MAJOR, so the structure IS readable, but those keys were\n"
+            f"  added after this engine.\n"
+            f"  supported here: {', '.join(sorted(allowed))}\n"
+            f"  Still fatal, and not because of the version: a key that is silently dropped\n"
+            f"  reads as though it took effect, and one of them may be the constraint the flow\n"
+            f"  is relying on. Upgrade the engine, or write the flow at {spec_format()}."
         )
+    raise FlowError(
+        f"{path}: {where} has unsupported key(s): {', '.join(unknown)}\n"
+        f"  supported: {', '.join(sorted(allowed))}\n"
+        f"  A typo here would silently change what this spec means, so it is fatal.\n"
+        f"  If you need a construct the engine lacks, that is an engine gap — put it\n"
+        f"  in a comment and raise it, rather than a key that does nothing."
+    )
 
 
 def available_abilities() -> list[str]:
@@ -596,7 +683,27 @@ def _require(raw: dict, key: str, path: Path, kind=None):
 
 
 def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
-    _reject_unknown(raw, TOP_KEYS, "the spec root", path)
+    # THE VERSION IS READ FIRST, before any key is judged.
+    #
+    # It used to be checked after the unknown-key rejection, and the consequence was a message
+    # that lied by omission: a spec from a newer format carrying a new key was refused as
+    # "unsupported key(s)" with advice about typos, and its version was never mentioned. Whoever
+    # hit it was told to check their spelling. Order alone fixes that.
+    major, minor = _parse_spec_version(_require(raw, "version", path), path)
+    if major != SPEC_MAJOR:
+        raise FlowError(
+            f"{path}: spec format {major}.{minor} cannot be read; this engine reads "
+            f"{spec_format()}.\n"
+            f"  A different MAJOR means the structure changed, and this engine does not know\n"
+            f"  what moved — reading it anyway would misinterpret it silently.\n"
+            + _capability_gap(raw)
+        )
+    # A newer MINOR is readable: the structure is unchanged and only keys were added. Carried
+    # into every key check so an unknown key can be named as a version gap rather than a typo.
+    newer_by = (major, minor) if minor > SPEC_MINOR else None
+    reject = functools.partial(_reject_unknown, newer_by=newer_by)
+
+    reject(raw, TOP_KEYS, "the spec root", path)
 
     role = str(raw.get("role", ROLE_PRODUCTION)).strip() or ROLE_PRODUCTION
     if role not in ROLES:
@@ -623,12 +730,6 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             f"  If this flow exists to exercise the engine rather than carry work, declare "
             f"`role: {ROLE_FIXTURE}` instead."
         )
-    version = _require(raw, "version", path)
-    if version != SPEC_VERSION:
-        raise FlowError(
-            f"{path}: spec version {version!r} unsupported (engine speaks {SPEC_VERSION})"
-        )
-
     declared = _require(raw, "ability", path, str)
     if declared != ability:
         # A mismatch means the folder and the spec disagree about identity. Guessing
@@ -649,7 +750,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         raise FlowError(f"{path}: 'variants' must be a mapping")
     variant_spec: dict = {}
     if var_raw:
-        _reject_unknown(var_raw, VARIANT_KEYS, "the 'variants' block", path)
+        reject(var_raw, VARIANT_KEYS, "the 'variants' block", path)
         vals = var_raw.get("values")
         if not isinstance(vals, list) or len(vals) < 2:
             raise FlowError(
@@ -683,7 +784,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     for i, p in enumerate(phases_raw):
         if not isinstance(p, dict) or "id" not in p:
             raise FlowError(f"{path}: phases[{i}] must be a mapping with an 'id'")
-        _reject_unknown(p, PHASE_KEYS, f"phases[{i}]", path)
+        reject(p, PHASE_KEYS, f"phases[{i}]", path)
         pid = _require_plain_id(p["id"], f"phases[{i}]", path)
         if pid in phase_titles:
             raise FlowError(f"{path}: duplicate phase id '{pid}'")
@@ -707,7 +808,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             # A stage may be a bare id, or a mapping that also carries a guide pointer.
             # Both forms are supported so an existing flat spec keeps working.
             if isinstance(st, dict):
-                _reject_unknown(st, STAGE_KEYS, f"phase '{pid}' stage entry", path)
+                reject(st, STAGE_KEYS, f"phase '{pid}' stage entry", path)
                 sid_ = _require_plain_id(st.get("id"), f"phase '{pid}' stage entry", path)
                 if st.get("guide"):
                     stage_guides[(pid, sid_)] = str(st["guide"])
@@ -726,7 +827,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     for i, s in enumerate(steps_raw):
         if not isinstance(s, dict) or "id" not in s:
             raise FlowError(f"{path}: steps[{i}] must be a mapping with an 'id'")
-        _reject_unknown(s, STEP_KEYS, f"step '{s['id']}'", path)
+        reject(s, STEP_KEYS, f"step '{s['id']}'", path)
         sid = _require_plain_id(s["id"], f"steps[{i}]", path)
         if sid in steps:
             raise FlowError(f"{path}: duplicate step id '{sid}'")
@@ -915,7 +1016,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         # lets a runtime recognise the action in a tool call BEFORE making it, without the
         # engine learning what the tool call means.
         if isinstance(spec, dict):
-            _reject_unknown(spec, GUARD_KEYS, f"guard '{action}'", path)
+            reject(spec, GUARD_KEYS, f"guard '{action}'", path)
             sid = str(spec.get("step") or "")
             rules = spec.get("matches") or []
             if not isinstance(rules, list):
@@ -926,7 +1027,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
                     raise FlowError(
                         f"{path}: guard '{action}' matches[{j}] must be a mapping "
                         f"with 'tool' and 'pattern'")
-                _reject_unknown(rule, GUARD_MATCH_KEYS, f"guard '{action}' matches[{j}]", path)
+                reject(rule, GUARD_MATCH_KEYS, f"guard '{action}' matches[{j}]", path)
                 tool = str(rule.get("tool") or "").strip()
                 pat = str(rule.get("pattern") or "")
                 if not tool:
@@ -1003,7 +1104,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     prose_raw = raw.get("prose") or {}
     if not isinstance(prose_raw, dict):
         raise FlowError(f"{path}: 'prose' must be a mapping")
-    _reject_unknown(prose_raw, PROSE_KEYS, "the 'prose' block", path)
+    reject(prose_raw, PROSE_KEYS, "the 'prose' block", path)
     prose_root = None
     if prose_raw.get("root"):
         prose_root = (path.parent / str(prose_raw["root"])).resolve()
@@ -1057,7 +1158,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     facts_raw = raw.get("facts") or {}
     if not isinstance(facts_raw, dict):
         raise FlowError(f"{path}: 'facts' must be a mapping")
-    _reject_unknown(facts_raw, FACTS_KEYS, "the 'facts' block", path)
+    reject(facts_raw, FACTS_KEYS, "the 'facts' block", path)
     # One provider (`provider: x`) or several (`providers: [x, y]`). Several is the normal
     # case for a mature flow: its facts come from genuinely different sources — what changed,
     # what an analysis computed, what an external system reports — and forcing them through one
@@ -1147,7 +1248,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     hooks_raw = raw.get("hooks") or []
     try:
         hook_list = hooksmod.parse(hooks_raw, steps, tuple(phases), facts_schema,
-                                   _reject_unknown, path)
+                                   reject, path)
     except (hooksmod.HookError, ConditionErrorAlias) as exc:
         raise FlowError(str(exc)) from None
 

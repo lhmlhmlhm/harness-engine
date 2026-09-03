@@ -23,7 +23,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   270 个测试
+└── tests/                   282 个测试
 ```
 
 ## 快速开始
@@ -94,6 +94,53 @@ macOS 没有原生 XDG 位置，而为了算一个「按平台正确」的路径
 
 第三条出路（在新位置全新开一个）**必须可达**，因为旧库存在时连 `init` 也会被拒——所以那条消息把
 它写了出来，并有一条测试断言那句话是真的。
+
+### spec 格式的版本：MAJOR 是可读性声明，MINOR 只说加了键
+
+```yaml
+version: 1        # = 1.0
+version: "1.4"    # 更新的 minor：结构不变，可读
+version: 1.10     # ⛔ 拒绝 —— 见下
+```
+
+| 情形 | 行为 |
+|---|---|
+| 同 MAJOR，MINOR ≤ 本引擎 | 正常读 |
+| 同 MAJOR，MINOR **更新** | **读它**——结构没变，拒绝它就是拒绝一份本来读得懂的东西。但它带的未知键仍然致命，**而消息会说这是版本差距** |
+| 不同 MAJOR | 拒绝，**并报出能力图景**（见下） |
+| `version: 1.10` 这种裸小数 | 拒绝：YAML 把 `1.10` 与 `1.1` 读成**同一个 float**，两个不同的 minor 会静默合成一个 |
+
+**没有为未来 MAJOR 准备 reader，这是刻意的。** 接受一个更新的 major 并按当前 major 读，就是静默
+误读它——而一个不可证伪的声称正是这个引擎在别处到处拒绝的东西。等真有 major 2 时，支持它是
+「每版一个 reader + 每版一份固定 spec」，机械且被守着。
+
+#### 三处此前会误导人的地方
+
+**① 版本检查曾在未知键拒绝之后。** 于是一份来自更新格式、带了新键的 spec 会先以「unsupported
+key(s)」被拒，消息里全是关于拼写错误的建议，**版本一个字都没提**——写它的人被告知去检查拼写。
+**只改顺序就修好了**，而这条由一条测试钉住：一份同时是「更新 major」且「带未知键」的 spec，
+它的报错里**那个键名根本不该出现**（键名是唯一精确的判别式；像 "does not know" 这样的措辞
+在正确消息里也有一份，断言它会为了错误的理由通过——我第一版就是这么写错的）。
+
+**② 未知键的措辞现在有两种，且不许互换。** 同格式的拼写错误照旧讲拼写；更新 minor 的未知键讲
+版本差距。**两个方向都有断言**，因为只查一边的话，「永远讲版本」也能通过。
+
+而 minor 更新的未知键**仍然致命**——理由不是版本，是那条不许忽略未知键的老纪律：一个被静默
+丢掉的键读起来像生效了，而它可能正是这条 flow 依赖的那个约束。
+
+**③ 不可读的 MAJOR 现在会说清是哪种缺口。** 同一个版本号底下藏着两个不同的问题：
+
+```
+Its `uses:` names only mechanisms this engine HAS (gates, prose), so this is a
+format gap and not a machinery gap: a newer engine can read it unchanged.
+```
+```
+Its `uses:` also names mechanisms this engine does NOT implement: leases.
+So a newer reader alone would not be enough — the flow needs machinery that is absent here.
+```
+
+**版本号本身分不出这两者**，而 `uses:` 分得出——这也说明 `uses:` 是比版本号更细的那个向前兼容
+机制：**它按名字告诉你缺什么。**
 
 ### 接一个 agent：一段生成的 prompt + 一份契约
 
@@ -449,7 +496,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 270 passed
+python3 -m pytest tests/ -q      # 282 passed
 ```
 
 分两类：
@@ -459,7 +506,7 @@ python3 -m pytest tests/ -q      # 270 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（228）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（240）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
