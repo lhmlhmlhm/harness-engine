@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+# Build output from `pip install .` / `python -m build`. Regenerable, and it duplicates
+# every engine source file — committing it once put 7,500 lines of copies into history.
+build/
+dist/
+*.egg-info/

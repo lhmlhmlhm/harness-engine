@@ -5569,3 +5569,25 @@ def test_a_store_left_at_the_old_default_is_refused_not_orphaned(monkeypatch, tm
     monkeypatch.delenv("HARNESS_STATE_DIR")
     assert st.db_path().parent == now / "harness-engine"
     st.connect().close()
+
+
+def test_no_build_output_is_tracked():
+    """A guard whose first run audits a mistake made minutes earlier.
+
+    `pip install .` leaves build/ and *.egg-info/ behind, and one commit picked them up — 7,500
+    lines of duplicated engine source, in history, permanently. The copies are also actively
+    misleading: a reader grepping the tree finds two versions of every module and no indication
+    which one runs.
+
+    Asserted from git's index rather than from the filesystem, because the files being PRESENT
+    is normal after a build; being TRACKED is the defect.
+    """
+    listed = subprocess.run(["git", "ls-files"], cwd=str(REPO),
+                            capture_output=True, text=True, check=True).stdout.split("\n")
+    assert len(listed) > 10, "git ls-files returned almost nothing; this test would be vacuous"
+    offenders = [f for f in listed
+                 if f.startswith(("build/", "dist/")) or ".egg-info/" in f]
+    assert not offenders, (
+        f"{len(offenders)} build artefact(s) are tracked, e.g. {offenders[:3]}\n"
+        f"  git rm -r --cached <path>   — and check .gitignore covers it"
+    )
