@@ -21,11 +21,15 @@ what K means to an ability.
 """
 from __future__ import annotations
 
+from . import registry
+
 from typing import Callable
 
 from . import conditions, store
 
 _REGISTRY: dict[str, dict] = {}
+# Who claimed each name, so a collision can name BOTH sides rather than only the loser.
+_OWNERS: dict[str, str] = {}
 
 
 def predicate(name: str, *, requires: tuple[str, ...] = (),
@@ -43,8 +47,7 @@ def predicate(name: str, *, requires: tuple[str, ...] = (),
     an ability using such a predicate actually declares a provider for the fact.
     """
     def deco(fn: Callable) -> Callable:
-        if name in _REGISTRY:
-            raise RuntimeError(f"completion predicate '{name}' already registered")
+        registry.claim("completion predicate", name, _REGISTRY, _OWNERS, fn)
         _REGISTRY[name] = {"fn": fn, "requires": requires, "needs_facts": needs_facts}
         return fn
     return deco

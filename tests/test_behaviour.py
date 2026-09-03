@@ -1070,12 +1070,12 @@ def test_unknown_fact_is_fatal_with_a_suggestion(env):
     """
     d = _spec(env, "__f1__", """
 facts:
-  provider: git_tree
+  provider: run_progress
 hooks:
   - id: h
     trigger: phase_end
     phase: p
-    when: { fact: changed_file, matches_any: ["*"] }
+    when: { fact: closed_step, matches_any: ["*"] }
     contract: x
 phases:
   - id: p
@@ -1087,7 +1087,7 @@ steps:
         r = run(["validate", "__f1__"], env)
         assert r.returncode == BAD_SPEC
         assert "not in the provider's schema" in r.stderr
-        assert "did you mean 'changed_files'" in r.stderr
+        assert "did you mean 'closed_steps'" in r.stderr
     finally:
         _rm(d)
 
@@ -1095,12 +1095,12 @@ steps:
 def test_operator_type_mismatch_is_fatal(env):
     d = _spec(env, "__f2__", """
 facts:
-  provider: git_tree
+  provider: scope_only
 hooks:
   - id: h
     trigger: phase_end
     phase: p
-    when: { fact: vcs_branch, count_gte: 3 }
+    when: { fact: scope, count_gte: 3 }
     contract: x
 phases:
   - id: p
@@ -1119,12 +1119,12 @@ steps:
 def test_unknown_operator_is_fatal_with_a_suggestion(env):
     d = _spec(env, "__f3__", """
 facts:
-  provider: git_tree
+  provider: run_progress
 hooks:
   - id: h
     trigger: phase_end
     phase: p
-    when: { fact: changed_files, matchs_any: ["*"] }
+    when: { fact: closed_steps, matchs_any: ["*"] }
     contract: x
 phases:
   - id: p
@@ -1996,7 +1996,7 @@ def test_two_providers_may_not_declare_the_same_fact(env):
     """A condition names a fact, not a provider — so a collision has no defined winner."""
     d = _spec(env, "factclash", """
 facts:
-  providers: [git_tree, git_tree]
+  providers: [run_progress, run_progress]
 phases: [{id: p1}]
 steps: [{id: A, phase: p1}]
 """)
@@ -2010,7 +2010,7 @@ steps: [{id: A, phase: p1}]
 def test_provider_and_providers_together_is_fatal(env):
     d = _spec(env, "factboth", """
 facts:
-  provider: git_tree
+  provider: scope_only
   providers: [run_progress]
 phases: [{id: p1}]
 steps: [{id: A, phase: p1}]
@@ -6057,3 +6057,199 @@ def test_a_version_that_is_not_a_format_is_refused(env, tmp_path, bad):
     _ver_spec(root, "b", f"version: {bad}\nwhen: a flow whose version is not a format at all\n"
                          f"uses: []\n")
     assert rc(["validate", "b"], _ver_env(env, root)) == BAD_SPEC
+
+
+# ------------------------------------------------- the base names no external tool
+
+def test_the_builtin_providers_report_only_what_the_engine_holds(env):
+    """The built-in set is exactly the providers that need nothing outside the engine.
+
+    One used to invoke a version-control tool. It was convenient, it was domain knowledge in the
+    base, and it bypassed the base's own seam: a provider needing a tool declares
+    `requires={"cmd": ...}` so that "I could not look" stops looking like "nothing found", and a
+    built-in cannot state that without the ENGINE depending on the tool.
+
+    Pinned as an exact set rather than a floor, because the failure being prevented is a NEW
+    built-in that reaches outside, and a floor would not notice one.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as fa, flow as fl
+
+    src = (REPO / "engine" / "facts.py").read_text(encoding="utf-8")
+    declared = set(re.findall(r'@provider\("([^"]+)"', src))
+    assert declared == {"static", "scope_only", "run_progress"}, sorted(declared)
+
+    # And the flow that used the moved provider still gets it — from its own file.
+    f = fl.load("delivery")
+    assert "git_tree" in f.facts_providers
+    assert (REPO / "abilities" / "delivery" / "providers.py").is_file()
+    assert "git_tree" in fa.registered()
+    # Now that it lives with a flow, it can declare the tool it needs — which as a built-in it
+    # could not, and that declaration is the whole difference between an absent tool and an
+    # empty answer.
+    assert any("git" in str(d) for d in fa.capabilities("git_tree")), fa.capabilities("git_tree")
+
+
+# ------------------------------------------------- a name collision names both sides
+
+def test_a_registration_collision_names_both_sides(env, tmp_path):
+    """Two independent flows claiming one name must not read as a defect in the loser.
+
+    The registries are process-global and load order is alphabetical, so the old message — which
+    named only the second — accused whichever author happened to sort later. Nothing here removes
+    the collision; this removes the wrong diagnosis, which is the part that sends someone looking
+    in the wrong file.
+    """
+    root = tmp_path / "clash"
+    for name in ("aaa", "bbb"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "providers.py").write_text(
+            "from engine.predicates import predicate\n"
+            "@predicate('shared_name')\n"
+            "def _c(conn, run_id, step, spec):\n    return True, 'ok'\n", encoding="utf-8")
+        (d / "flow.yaml").write_text(
+            f"version: 1\nability: {name}\n"
+            f"when: one of two flows that happen to pick the same extension name\n"
+            f"uses: []\nscope_kind: s\nphases:\n  - id: p1\n    title: P1\n"
+            f"steps:\n  - id: W01\n    phase: p1\n    completion: {{type: shared_name}}\n"
+            f"    directive: Do it.\n", encoding="utf-8")
+
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    assert rc(["validate", "aaa"], e) == OK, "each is fine on its own"
+    assert rc(["validate", "bbb"], e) == OK
+
+    both = run(["validate"], e)
+    assert both.returncode == BAD_SPEC
+    assert "claimed twice" in both.stderr, both.stderr
+    assert str(root / "aaa") in both.stderr and str(root / "bbb") in both.stderr, \
+        "the message must name both sides, not only the one that lost"
+    assert "not a defect in" in both.stderr
+
+
+def test_the_registry_itself_decides_whether_a_name_is_taken(env):
+    """The owner map is advisory; two dictionaries that must agree is a bug waiting to happen.
+
+    It happened at once: cleanup code that removed a name from the registry left it in the owner
+    map, and the next registration of that name was refused as a collision with nobody. Out of
+    sync the owner map now degrades a message; it cannot invent a conflict.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import predicates as pr
+
+    def probe(conn, run_id, step, spec):
+        return True, "ok"
+
+    pr.predicate("zzz_probe_name")(probe)
+    assert pr.is_registered("zzz_probe_name")
+    try:
+        # Remove it the way real cleanup does — from the registry only.
+        pr._REGISTRY.pop("zzz_probe_name")
+        pr.predicate("zzz_probe_name")(probe)      # must NOT raise
+        assert pr.is_registered("zzz_probe_name")
+    finally:
+        pr._REGISTRY.pop("zzz_probe_name", None)
+        pr._OWNERS.pop("zzz_probe_name", None)
+
+
+# ------------------------------------------------- an exhausted budget just refuses
+
+def test_on_exhausted_is_gone_and_a_used_up_budget_refuses(env):
+    """A key that can only say one thing says nothing.
+
+    `on_exhausted` chose between refusing and escalating to a human gate. Nothing ever chose to
+    escalate — eight declarations across the installed flows, every one restating the default.
+    Deleting the unused branch would have left a single-valued key, so the key went too.
+    """
+    d = _spec(env, "zzz_budget", """
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    repeatable: true
+    budget: 1
+    directive: Do it.
+""")
+    try:
+        assert rc(["open", "zzz_budget", "--scope", "b1", "--run", "b1"], env) == OK
+        assert rc(["enter", "--run", "b1", "--step", "W01"], env) == OK
+        again = run(["enter", "--run", "b1", "--step", "W01"], env)
+        assert again.returncode == REFUSED
+        assert "used its budget" in again.stderr, again.stderr
+        assert "on_exhausted" not in again.stderr and "escalate" not in again.stderr
+        assert _rows(env, "SELECT code FROM violation WHERE run_id='b1'")[0]["code"] \
+            == "budget_exhausted"
+    finally:
+        _rm(d)
+
+    d = _spec(env, "zzz_oe", """
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    repeatable: true
+    budget: 1
+    on_exhausted: escalate
+    directive: Do it.
+""")
+    try:
+        out = run(["validate", "zzz_oe"], env)
+        assert out.returncode == BAD_SPEC
+        assert "on_exhausted" in out.stderr and "unsupported key" in out.stderr, out.stderr
+    finally:
+        _rm(d)
+
+
+# ------------------------------------------------- the read commands speak JSON too
+
+def test_every_read_command_can_answer_in_json(env):
+    """The exit codes were the contract; the DETAIL was human prose only.
+
+    Anything that is not a shell — a second runtime's adapter, a dashboard, a monitor — had to
+    regex formatted text to learn what step was next or what was owed. Asserted for every read
+    command at once, so adding one without a machine form is what fails.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/J", "--run", "J1"],
+              {**env, "HARNESS_ACTOR": "json-probe"}) == OK
+    assert rc(["evidence", "--run", "J1", "--step", "C01",
+               "--kind", "change_list", "--value", "x"], env) == OK
+
+    for argv in (["status"], ["status", "--run", "J1"], ["next", "--run", "J1"],
+                 ["obligations", "--run", "J1"], ["history"], ["history", "--actors"],
+                 ["audit"], ["leases"], ["abilities"]):
+        out = run([*argv, "--json"], env)
+        assert out.returncode == OK, (argv, out.stderr)
+        try:
+            parsed = json.loads(out.stdout)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(f"{argv} --json is not JSON: {exc}\n{out.stdout[:300]}")
+        assert isinstance(parsed, dict) and parsed, argv
+        # The text form must still be text — a command that only speaks JSON has moved, not gained.
+        plain = run(argv, env).stdout
+        assert plain and not plain.lstrip().startswith("{"), argv
+
+
+def test_next_states_its_requirements_as_data(env):
+    """`next` exists to say what a step REQUIRES, and it was saying it in columns.
+
+    `predicates.requirements()` already returns a machine-readable list; the text form flattens
+    it into lines. The JSON form carries it unflattened, which is the point of the whole flag.
+    """
+    assert rc(["open", "shipcheck-asis", "--scope", "/repo/K", "--run", "K1"], env) == OK
+    out = run(["next", "--run", "K1", "--json"], env)
+    assert out.returncode == OK, out.stderr
+    d = json.loads(out.stdout)
+
+    assert d["step"] and d["completion"] and d["phase"]
+    reqs = d["requirements"]
+    assert isinstance(reqs, list) and reqs, d
+    assert all(isinstance(r, dict) and "what" in r for r in reqs), reqs
+    # The pointer, not the text — the tiering must survive the machine form.
+    assert d["guide"] is None or "file" in d["guide"]
+    assert "directive" in d and len(d["remaining"]) > 1

@@ -33,17 +33,20 @@ Two things follow, and both are load-bearing here:
 """
 from __future__ import annotations
 
+from . import registry
+
 import inspect
 import os
 import shutil
 import socket
-import subprocess
 from pathlib import Path
 from typing import Callable
 
 from . import operators
 
 _PROVIDERS: dict[str, dict] = {}
+# Who claimed each name, so a collision can name BOTH sides rather than only the loser.
+_OWNERS: dict[str, str] = {}
 
 
 class FactsError(ValueError):
@@ -85,7 +88,7 @@ class FactUnavailable(FactsError):
 # The engine understands four descriptor kinds and nothing about what any argument means:
 #
 #   {"file": "tools/x.py"}     a path exists (relative to the registering module's dir)
-#   {"cmd": "git"}             an executable is on PATH
+#   {"cmd": "some-tool"}       an executable is on PATH
 #   {"env": "SOME_TOKEN"}      an environment variable is set and non-empty
 #   {"net": "host[:port]"}     a TCP connection can be opened (port defaults to 443)
 #
@@ -195,8 +198,7 @@ def provider(name: str, *, schema: dict, requires: tuple = ()) -> Callable:
         reqs.append({kind: str(desc[kind])})
 
     def deco(fn: Callable) -> Callable:
-        if name in _PROVIDERS:
-            raise RuntimeError(f"fact provider '{name}' already registered")
+        registry.claim("fact provider", name, _PROVIDERS, _OWNERS, fn)
         # A relative `file` resolves against the directory that REGISTERED the provider, so
         # an ability names its own tools the way it stores them and stays movable.
         try:
@@ -308,56 +310,17 @@ def _scope_only(ctx: dict) -> dict:
     return {"scope": str(ctx.get("scope") or ""), "run_id": str(ctx.get("run_id") or "")}
 
 
-@provider("git_tree", schema={
-    "changed_files": operators.T_LIST,
-    "vcs_branch": operators.T_STR,
-    "dirty": operators.T_BOOL,
-    "change_count": operators.T_INT,
-})
-def _git_tree(ctx: dict) -> dict:
-    """Uncommitted paths in the run's scope, treated as a directory.
-
-    Ships as a built-in because "what did I touch" is the most common thing a condition
-    asks, but it is still just a provider — an ability that means something else by
-    "changed" registers its own and the engine is none the wiser.
-
-    Degrades to empty when the scope is not a repository. That is NOT the silent-false
-    problem: absence of changes is a real, correct answer here, whereas a provider that
-    ERRORS must raise (see `gather`).
-    """
-    root = Path(str(ctx.get("scope") or ".")).expanduser()
-    if not root.is_dir():
-        return {"changed_files": [], "vcs_branch": "", "dirty": False, "change_count": 0}
-
-    def git(*args: str) -> str:
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(root), *args],
-                capture_output=True, text=True, timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return r.stdout if r.returncode == 0 else ""
-
-    inside = git("rev-parse", "--is-inside-work-tree").strip()
-    if inside != "true":
-        return {"changed_files": [], "vcs_branch": "", "dirty": False, "change_count": 0}
-
-    paths: list[str] = []
-    for line in git("status", "--porcelain").splitlines():
-        if len(line) > 3:
-            p = line[3:].strip()
-            if " -> " in p:      # a rename reports old -> new; the new path is the subject
-                p = p.split(" -> ", 1)[1]
-            paths.append(p.strip('"'))
-    vcs_branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
-    return {
-        "changed_files": sorted(set(paths)),
-        "vcs_branch": vcs_branch,
-        "dirty": bool(paths),
-        "change_count": len(set(paths)),
-    }
-
+# NO BUILT-IN PROVIDER MAY SHELL OUT, AND THAT IS ENFORCED.
+#
+# One used to: a provider here invoked a specific version-control tool, because "what did I
+# touch" is the most common thing a condition asks. It was a convenience and it was domain
+# knowledge in the base, and it bypassed the very seam the capability layer provides — a
+# provider that needs a tool declares `requires={"cmd": ...}` so that "I could not look" stops
+# looking like "nothing found". A built-in cannot make that declaration meaningfully, because
+# the engine would then depend on a tool for one of its own facts.
+#
+# It now lives with the one flow that used it. The built-ins that remain report only what the
+# engine ALREADY holds: nothing, the run's own identity, and the run's own progress.
 
 @provider("run_progress", schema={
     "closed_steps": operators.T_LIST,
@@ -368,10 +331,11 @@ def _git_tree(ctx: dict) -> dict:
 def _run_progress(ctx: dict) -> dict:
     """Facts about the run's OWN progress — no filesystem, no external world.
 
-    Ships alongside `git_tree` on purpose: the two have nothing in common, and an ability
-    built on this one exercises the condition machinery without touching a repository at
-    all. If any part of the engine had quietly assumed facts are file-shaped, an ability
-    using this provider would not work — which is why one exists in the test set.
+    The only kind of built-in left, and the shape the others share: it reports what the engine
+    already holds. Worth having as a built-in precisely because it needs nothing — an ability
+    built on this alone exercises the whole condition machinery without touching anything
+    outside the store, so a hidden assumption that facts come from files would show up
+    immediately. One such ability exists in the test set for that reason.
     """
     from . import store
     conn = store.connect(read_only=True)

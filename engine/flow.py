@@ -245,14 +245,15 @@ class Step:
     repeatable: bool = False
     # How many attempts the budget allows. 0 = unlimited.
     budget: int = 0
-    # WHAT HAPPENS WHEN THE BUDGET RUNS OUT — declared by the flow, never decided by the
-    # engine. Introducing a counter forces this question ("refuse? escalate? carry on?")
-    # and answering it in the engine would bake one ability's answer into everyone's:
-    #   refuse   — the step cannot be entered again (exit 3); the run is stuck by design
-    #   escalate — further attempts require a human gate on this step
-    # Both are legitimate; which is right depends on whether exceeding the budget means
-    # "this is broken" or "a person should look".
-    on_exhausted: str = "refuse"
+    # An exhausted budget REFUSES, unconditionally. This used to be a declared choice between
+    # refusing and escalating to a human gate, on the reasoning that the right answer depends on
+    # whether exceeding a budget means "this is broken" or "a person should look".
+    #
+    # In practice nothing ever chose to escalate — eight declarations across the installed flows,
+    # every one of them restating the default. Deleting the unused branch would have left a key
+    # with a single legal value, and a key that can only say one thing says nothing. So the key
+    # went too. Escalation comes back the way anything does: a value, its branch, and a flow that
+    # selects it.
     # Which VARIANTS this step belongs to. Empty = the shared core, applicable under every
     # variant. A step listed here is NOT APPLICABLE under any other variant — distinct from
     # `optional` (may be skipped by a decision) and from a skip (a decision was recorded).
@@ -517,7 +518,7 @@ class Flow:
 # prevent here, expensive to debug later.
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
              "autonomy", "optional", "strict_witness", "guide", "topics",
-             "repeatable", "budget", "on_exhausted"}
+             "repeatable", "budget"}
 TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
@@ -881,12 +882,6 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
                 )
         repeatable = bool(s.get("repeatable", False))
         budget = int(s.get("budget", 0) or 0)
-        on_exhausted = str(s.get("on_exhausted", "refuse"))
-        if on_exhausted not in ("refuse", "escalate"):
-            raise FlowError(
-                f"{path}: step '{sid}' has on_exhausted='{on_exhausted}'; "
-                f"expected 'refuse' or 'escalate'"
-            )
         if budget and not repeatable:
             raise FlowError(
                 f"{path}: step '{sid}' sets a budget but is not repeatable — a step that "
@@ -894,13 +889,6 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             )
         if budget < 0:
             raise FlowError(f"{path}: step '{sid}' has a negative budget")
-        if on_exhausted == "escalate" and budget and s.get("gate", GATE_NONE) == GATE_NONE:
-            # Escalation means "a human must approve further attempts", which needs
-            # somewhere to record that approval.
-            raise FlowError(
-                f"{path}: step '{sid}' escalates on exhaustion but declares no gate — "
-                f"there would be nowhere to record the human's decision"
-            )
         optional = bool(s.get("optional", False))
         strict = bool(s.get("strict_witness", False))
         if strict and gate == GATE_NONE:
@@ -930,7 +918,6 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             stage=stage,
             repeatable=repeatable,
             budget=budget,
-            on_exhausted=on_exhausted,
             guide=guide,
             topics=topics,
             optional=optional,

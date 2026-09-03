@@ -43,6 +43,31 @@ def _err(msg: str) -> None:
 
 # ------------------------------------------------------------------ helpers
 
+def _rowdicts(rows) -> list[dict]:
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+def _emit(args, data: dict, render) -> int:
+    """One data structure, two renderings — so the two cannot disagree.
+
+    Every read command builds its answer as DATA first and then either dumps it or prints it.
+    Producing the machine form separately would be a second implementation of the same query,
+    and the two would drift the moment one of them gained a field.
+
+    Why a machine form is needed at all: the exit codes are the contract, but until now the
+    DETAIL was human prose only. Anything that is not a shell — a second runtime's adapter, a
+    dashboard, a monitor — had to regex formatted text to learn what step was next or what was
+    owed. `next` in particular exists to state a step's requirements AS DATA, and it was
+    stating them as columns.
+    """
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        return OK
+    render(data)
+    return OK
+
+
+
 def _load_flow_or_exit(ability: str) -> flowmod.Flow:
     try:
         return flowmod.load(ability)
@@ -106,6 +131,32 @@ def cmd_init(args) -> int:
 
 def cmd_abilities(args) -> int:
     names = flowmod.available_abilities()
+    if args.json:
+        out: list[dict] = []
+        for name in names:
+            try:
+                f = flowmod.load(name)
+            except flowmod.FlowError as exc:
+                out.append({"ability": name, "valid": False,
+                            "error": str(exc).splitlines()[0]})
+                continue
+            out.append({
+                "ability": name, "valid": True, "title": f.title, "role": f.role,
+                "routable": f.role == flowmod.ROLE_PRODUCTION, "when": f.when,
+                "scope_kind": f.scope_kind, "scope_match": f.scope_match,
+                "phases": list(f.phases), "steps": len(f.steps),
+                "required_steps": len(f.required_steps()),
+                "optional_steps": sum(1 for st in f.steps.values() if st.optional),
+                "gated_steps": sum(1 for st in f.steps.values()
+                                   if st.gate != flowmod.GATE_NONE),
+                "guards": sorted(f.guards), "variants": list(f.variants),
+                "requires": list(f.requires),
+                "facts_providers": list(f.facts_providers),
+                "facts": sorted(f.facts_schema),
+                "hooks": len(f.hooks), "uses": list(flowmod.capabilities_used(f)),
+            })
+        return _emit(args, {"roots": [str(r) for r in flowmod.abilities_roots()],
+                            "abilities": out}, lambda _d: None)
     if not names:
         roots = ", ".join(str(r) for r in flowmod.abilities_roots())
         print(f"(none installed under: {roots})")
@@ -472,6 +523,24 @@ def cmd_status(args) -> int:
             row = _run_or_exit(conn, args.run)
             f = _flow_for_run(conn, row)
             done = store.closed_steps(conn, row["run_id"])
+            owed_ids = [x for x in f.required_steps(row["variant"]) if x not in done]
+            nxt_ids = [x for x in f.order
+                       if x not in done and f.applicable(x, row["variant"])]
+            if args.json:
+                return _emit(args, {
+                    "run": {k: row[k] for k in row.keys() if k != "metadata_json"},
+                    "actor": json.loads(row["metadata_json"] or "{}").get("actor"),
+                    "ability": row["ability"], "title": f.title,
+                    "closed_steps": sorted(done), "step_count": len(f.steps),
+                    "owed": owed_ids, "closeable": not owed_ids,
+                    "next": nxt_ids[0] if nxt_ids else None,
+                    "phases": [{"phase": ph, "title": f.phase_titles[ph],
+                                "steps": [{"step": st.id, "closed": st.id in done,
+                                           "optional": st.optional, "stage": st.stage}
+                                          for st in f.steps_in_phase(ph)]}
+                               for ph in f.phases],
+                    "violations": _rowdicts(store.violations(conn, row["run_id"])),
+                }, lambda _d: None)
             print(f"run     {row['run_id']}")
             print(f"ability {row['ability']}  ({f.title})")
             print(f"scope   {row['scope_kind']}={row['scope_key']}")
@@ -493,13 +562,10 @@ def cmd_status(args) -> int:
                             continue
                         marks = "".join(_mark(s, done) for s in steps)
                         print(f"    {marks:<14} {stage or '(unstaged)'}")
-            owed = [s for s in f.required_steps(row["variant"]) if s not in done]
-            print(f"owed    {len(owed)} required step(s) remain" if owed
+            print(f"owed    {len(owed_ids)} required step(s) remain" if owed_ids
                   else "owed    nothing — closeable")
-            nxt = [s for s in f.order
-                   if s not in done and f.applicable(s, row["variant"])]
-            if nxt:
-                print(f"next    {nxt[0]}  ({f.step(nxt[0]).title})")
+            if nxt_ids:
+                print(f"next    {nxt_ids[0]}  ({f.step(nxt_ids[0]).title})")
             v = store.violations(conn, row["run_id"])
             if v:
                 print(f"⚠️  {len(v)} violation(s): "
@@ -511,9 +577,6 @@ def cmd_status(args) -> int:
         # new machines and silently not on developed-in-place ones.
         rows = conn.execute(
             "SELECT * FROM run WHERE status = 'open' ORDER BY updated_at DESC").fetchall()
-        if not rows:
-            print("(no open runs)")
-            return OK
         # Delegations, so three concurrent runs do not read as three unrelated peers.
         grants: dict[str, str] = {}
         holds: dict[str, str] = {}
@@ -522,6 +585,28 @@ def cmd_status(args) -> int:
                 " WHERE released_at IS NULL"):
             grants[lz["g"]] = lz["h"]
             holds[lz["h"]] = lz["g"]
+        scopes: dict[tuple[str, str], set[str]] = {}
+        for r in rows:
+            scopes.setdefault((r["scope_kind"], r["scope_key"]), set()).add(r["run_id"])
+        shared = {k: v for k, v in scopes.items() if len(v) > 1}
+        if args.json:
+            verdicts = []
+            for (kind, key), ids in sorted(shared.items()):
+                chain, why = store.resolve_scope_chain(conn, kind, key, ids)
+                verdicts.append({"scope_kind": kind, "scope_key": key,
+                                 "runs": sorted(ids), "adjudicable": why is None,
+                                 "chain": chain, "reason": why})
+            return _emit(args, {
+                "open_runs": [{**{k: r[k] for k in r.keys() if k != "metadata_json"},
+                               "actor": json.loads(r["metadata_json"] or "{}").get("actor"),
+                               "leased_from": holds.get(r["run_id"]),
+                               "delegated_to": grants.get(r["run_id"])}
+                              for r in rows],
+                "shared_scopes": verdicts,
+            }, lambda _d: None)
+        if not rows:
+            print("(no open runs)")
+            return OK
         for r in rows:
             who = json.loads(r["metadata_json"] or "{}").get("actor")
             rel = ""
@@ -535,10 +620,6 @@ def cmd_status(args) -> int:
         # Whether each shared scope is adjudicable AT ALL. This is the question a human
         # actually has on seeing two runs in one scope, and until now it could only be
         # discovered by triggering a guard and reading the warning it printed.
-        scopes: dict[tuple[str, str], set[str]] = {}
-        for r in rows:
-            scopes.setdefault((r["scope_kind"], r["scope_key"]), set()).add(r["run_id"])
-        shared = {k: v for k, v in scopes.items() if len(v) > 1}
         if shared:
             print()
             for (kind, key), ids in sorted(shared.items()):
@@ -568,6 +649,32 @@ def cmd_next(args) -> int:
         sid = pending[0]
         s = f.step(sid)
         blocked = [d for d in s.deps if d not in done]
+        try:
+            guide = prose.resolve_guide(f, s.id)
+        except prose.ProseError as exc:
+            _err(f"  ⚠️  guide unresolvable: {exc}")
+            guide = None
+        if args.json:
+            # `requirements()` is already a machine-readable statement of what the step asks
+            # for — it was being rendered into columns. This is the same list, unflattened.
+            return _emit(args, {
+                "run": args.run, "step": s.id, "title": s.title,
+                "phase": s.phase, "phase_title": f.phase_titles[s.phase], "stage": s.stage,
+                "autonomy": s.autonomy, "gate": s.gate,
+                "strict_witness": s.strict_witness,
+                "completion": s.completion.get("type"),
+                "requirements": predicates.requirements(s.completion),
+                "repeatable": s.repeatable, "budget": s.budget,
+                "optional": s.optional,
+                "exclusive_group": list(f.group_of(s.id) or ()),
+                "blocked_on": blocked,
+                "directive": s.directive,
+                "guide": None if guide is None else {
+                    "file": str(guide.path), "level": guide.level,
+                    "whole_file": guide.whole_file, "anchor": guide.anchor},
+                "topics": list(s.topics),
+                "remaining": pending,
+            }, lambda _d: None)
         print(f"▶ {s.id}  {s.title}")
         print(f"  phase      {s.phase} ({f.phase_titles[s.phase]})")
         print(f"  autonomy   {s.autonomy}")
@@ -593,7 +700,7 @@ def cmd_next(args) -> int:
         if s.repeatable:
             used = store.step_attempts(conn, args.run, s.id) if False else None
             print(f"  ↻ repeatable"
-                  + (f", budget {s.budget} (on exhaustion: {s.on_exhausted})"
+                  + (f", budget {s.budget} (refused once used up)"
                      if s.budget else " (no budget)"))
         if s.optional:
             print(f"  ⏭  OPTIONAL — may be skipped: "
@@ -609,15 +716,10 @@ def cmd_next(args) -> int:
                 print(f"  {line}")
         # Deliberately the POINTER, not the text. Dumping a document on every `next`
         # would drown the driver and defeat the point of tiering it.
-        try:
-            r = prose.resolve_guide(f, s.id)
-        except prose.ProseError as exc:
-            _err(f"  ⚠️  guide unresolvable: {exc}")
-            r = None
-        if r is not None:
-            where = "whole file" if r.whole_file else f"section '{r.anchor}'"
-            print(f"  ── guide ({r.level}-level, {where}) ──")
-            print(f"  {r.path.name}   →  harness show --run {args.run} --step {s.id}")
+        if guide is not None:
+            where = "whole file" if guide.whole_file else f"section '{guide.anchor}'"
+            print(f"  ── guide ({guide.level}-level, {where}) ──")
+            print(f"  {guide.path.name}   →  harness show --run {args.run} --step {s.id}")
         if s.topics:
             print(f"  ── topics (read only if you hit trouble) ──")
             for name in s.topics:
@@ -659,27 +761,16 @@ def cmd_enter(args) -> int:
             )
             return REFUSED
         if s.budget and attempts >= s.budget:
-            if s.on_exhausted == "refuse":
-                store.record_violation(conn, row["run_id"], s.id, "budget_exhausted",
-                                       f"{attempts} attempt(s), budget {s.budget}",
-                                       severity="blocked")
-                _err(
-                    f"⛔ REFUSED: '{s.id}' has used its budget of {s.budget} attempt(s).\n"
-                    f"    The flow declares on_exhausted: refuse — repeating past the budget\n"
-                    f"    is not a matter of trying harder. Change approach, or raise the\n"
-                    f"    budget in the spec if {s.budget} was simply the wrong number."
-                )
-                return REFUSED
-            g = store.get_gate(conn, row["run_id"], s.id)
-            if g is None or g["decision"] not in ("affirm", "preauth"):
-                _err(
-                    f"⛔ REFUSED: '{s.id}' has used its budget of {s.budget} attempt(s).\n"
-                    f"    The flow declares on_exhausted: escalate — a human must approve\n"
-                    f"    further attempts:\n"
-                    f"      harness gate --run {row['run_id']} --step {s.id} "
-                    f"--decision affirm --evidence \"<why keep going>\""
-                )
-                return REFUSED
+            store.record_violation(conn, row["run_id"], s.id, "budget_exhausted",
+                                   f"{attempts} attempt(s), budget {s.budget}",
+                                   severity="blocked")
+            _err(
+                f"⛔ REFUSED: '{s.id}' has used its budget of {s.budget} attempt(s).\n"
+                f"    Repeating past the budget is not a matter of trying harder. Change\n"
+                f"    approach, or raise the budget in the spec if {s.budget} was simply the\n"
+                f"    wrong number."
+            )
+            return REFUSED
         prior = store.closed_steps(conn, row["run_id"])
         entered_before = {r["step_id"] for r in conn.execute(
             "SELECT DISTINCT step_id FROM step_log WHERE run_id = ? AND event = 'entered'",
@@ -1336,6 +1427,12 @@ def cmd_obligations(args) -> int:
     try:
         row = _run_or_exit(conn, args.run)
         rows = store.all_obligations(conn, row["run_id"])
+        data = {"run": row["run_id"], "obligations": [
+            {**d, "facts": json.loads(d.pop("facts_json") or "{}"),
+             "open": d["discharged_at"] is None}
+            for d in _rowdicts(rows)]}
+        if args.json:
+            return _emit(args, data, lambda _d: None)
         if not rows:
             print("(no obligations raised)")
             return OK
@@ -1419,6 +1516,8 @@ def cmd_leases(args) -> int:
             " JOIN run ho ON ho.run_id = l.holder_run_id"
             " WHERE l.released_at IS NULL ORDER BY l.scope_kind, l.scope_key, l.id"
         ).fetchall()
+        if args.json:
+            return _emit(args, {"leases": _rowdicts(rows)}, lambda _d: None)
         if not rows:
             print("(no scope is delegated)")
             return OK
@@ -1644,6 +1743,8 @@ def cmd_history(args) -> int:
     try:
         if args.actors:
             rows = store.actor_totals(conn)
+            if args.json:
+                return _emit(args, {"actors": _rowdicts(rows)}, lambda _d: None)
             if not rows:
                 print("(no runs recorded)")
                 return OK
@@ -1654,6 +1755,8 @@ def cmd_history(args) -> int:
             return OK
         rows = store.closed_runs(conn, limit=args.limit, actor=args.actor,
                                  ability=args.ability)
+        if args.json:
+            return _emit(args, {"runs": _rowdicts(rows)}, lambda _d: None)
         if not rows:
             print("(no closed runs match)")
             return OK
@@ -1687,6 +1790,19 @@ def cmd_audit(args) -> int:
             p = json.loads(r["proof_json"] or "{}")
             if not p.get("witnessed"):
                 unwitnessed.append((r, p))
+        v_pre = conn.execute(
+            "SELECT v.run_id, v.step_id, v.code, COUNT(*) n,"
+            " json_extract(r.metadata_json, '$.actor') AS actor"
+            " FROM violation v LEFT JOIN run r ON r.run_id = v.run_id"
+            " GROUP BY v.run_id, v.step_id, v.code ORDER BY n DESC"
+        ).fetchall()
+        if args.json:
+            return _emit(args, {
+                "gates": {"recorded": len(rows), "unwitnessed": len(unwitnessed)},
+                "unwitnessed": [{**{k: r[k] for k in r.keys() if k != "proof_json"},
+                                 "proof": pr} for r, pr in unwitnessed],
+                "violations": _rowdicts(v_pre),
+            }, lambda _d: None)
         print(f"gates recorded: {len(rows)}   unwitnessed: {len(unwitnessed)}")
         for r, p in unwitnessed:
             print(f"  ⚠️  {r['run_id']}  {r['step_id']}  {r['decision']}"
@@ -1813,8 +1929,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
 
     sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
-    sub.add_parser("abilities", help="list installed abilities").set_defaults(fn=cmd_abilities)
-    sub.add_parser("leases", help="show delegated scopes").set_defaults(fn=cmd_leases)
+    ab = sub.add_parser("abilities", help="list installed abilities")
+    ab.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    ab.set_defaults(fn=cmd_abilities)
+    lz = sub.add_parser("leases", help="show delegated scopes")
+    lz.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    lz.set_defaults(fn=cmd_leases)
     br = sub.add_parser("brief", help="print the driving contract for this installation")
     br.add_argument("--portable", action="store_true",
                     help="use a placeholder path instead of this machine's (for a checked-in copy)")
@@ -1827,6 +1947,7 @@ def build_parser() -> argparse.ArgumentParser:
     hi.add_argument("--ability")
     hi.add_argument("--actors", action="store_true",
                     help="per-actor rollup instead of a run list")
+    hi.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     hi.set_defaults(fn=cmd_history)
 
     sub.add_parser("adapter-contract",
@@ -1853,10 +1974,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="show a run, or all open runs")
     s.add_argument("--run")
+    s.add_argument("--json", action="store_true",
+                       help="emit the same answer as JSON — one data structure, two renderings")
     s.set_defaults(fn=cmd_status)
 
     n = sub.add_parser("next", help="show the next step and its directive")
     n.add_argument("--run", required=True)
+    n.add_argument("--json", action="store_true",
+                       help="emit the same answer as JSON — one data structure, two renderings")
     n.set_defaults(fn=cmd_next)
 
     e = sub.add_parser("enter", help="enter a step")
@@ -1906,6 +2031,7 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("obligations", help="list this run's obligations")
     ob.add_argument("--run", required=True)
     ob.add_argument("-v", "--verbose", action="store_true")
+    ob.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     ob.set_defaults(fn=cmd_obligations)
 
     sw = sub.add_parser("show", help="print a step's guide section, or one of its topics")
@@ -1945,7 +2071,9 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--set", action="append", metavar="KEY=VALUE")
     cf.set_defaults(fn=cmd_config)
 
-    sub.add_parser("audit", help="list unwitnessed gates and violations").set_defaults(fn=cmd_audit)
+    ad = sub.add_parser("audit", help="list unwitnessed gates and violations")
+    ad.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    ad.set_defaults(fn=cmd_audit)
 
     cr = sub.add_parser("close-run", help="close a run (exit 3 if steps remain)")
     cr.add_argument("--run", required=True)

@@ -300,3 +300,68 @@ def test_abilities_carry_the_vocabulary():
         assert ids, f"{spec} declares no step ids; the vocabulary went somewhere else"
         total_steps += len(ids)
     assert total_steps >= 8, f"only {total_steps} step ids across all abilities"
+
+
+# Named external tools. NOT checked as plain substrings, and the reason is measurable: `git`
+# occurs inside `legitimately` (8 times in the engine), `legitimate`, and `isdigit`. A substring
+# rule would fire on all of them, and a guard that fires on ordinary prose earns an exemption —
+# which is the disease this file exists to prevent. So the two forms that mean CODE are banned:
+# a quoted literal, and the name joined into an identifier.
+DOMAIN_TOOLS = ["git", "svn", "hg", "npm", "docker", "kubectl", "brew"]
+
+# Where the built-in fact providers live. Scoped deliberately, the same way the fact-name check
+# is scoped to the condition machinery: the rule is about what a BUILT-IN provider may depend on,
+# not about the engine never starting a process — it legitimately starts one to run an ability's
+# provider, and a hook in command mode runs whatever its flow declares.
+BUILTIN_PROVIDER_FILE = ENGINE_DIR / "facts.py"
+
+
+def test_no_builtin_provider_shells_out():
+    """A built-in fact provider may only report what the engine ALREADY holds.
+
+    One used to invoke a specific version-control tool, and it survived every guard here. That
+    is the case worth remembering: the no-fact-names rule EXEMPTS this file, for the sound reason
+    that declaring a schema is a provider's whole job — but a tool name is not a fact name, and
+    the exemption silently covered it.
+
+    It also bypassed the engine's own seam. A provider needing an external tool declares
+    `requires={"cmd": ...}`, which is what makes "I could not look" distinguishable from "nothing
+    found". A built-in cannot state that meaningfully, because the engine would then depend on a
+    tool for one of its own facts — so a built-in that needs one is misplaced by construction.
+
+    Checked structurally rather than by name, so it holds for every tool and not only the one
+    that happened.
+    """
+    text = BUILTIN_PROVIDER_FILE.read_text(encoding="utf-8")
+    assert "@provider(" in text, "the built-in providers moved; re-scope this guard"
+    for banned in ("subprocess", "os.system", "os.popen", "Popen"):
+        assert banned not in text, (
+            f"{BUILTIN_PROVIDER_FILE.name} uses {banned!r}. A built-in provider that needs an "
+            f"external tool belongs to the flow that needs it, declaring requires={{'cmd': ...}} "
+            f"so an absent tool is reported instead of read as an empty answer."
+        )
+
+
+@pytest.mark.parametrize("path", ENGINE_FILES, ids=lambda p: p.name)
+def test_no_named_external_tool_in_engine(path: Path):
+    """The engine may not name a specific external tool, in either code-shaped form.
+
+    Substring matching is measurably wrong here — see the comment on DOMAIN_TOOLS — so this looks
+    for a quoted literal or an underscore-joined identifier, the same discrimination the
+    installed-flow-name check had to make for exactly the same reason.
+    """
+    low = path.read_text(encoding="utf-8").lower()
+    found = []
+    for tool in DOMAIN_TOOLS:
+        for pattern, form in (
+            (rf"""['"]{re.escape(tool)}['"]""", "a quoted literal"),
+            (rf"\b\w+_{re.escape(tool)}\b|\b{re.escape(tool)}_\w+\b", "an identifier"),
+        ):
+            m = re.search(pattern, low)
+            if m:
+                line = low[: m.start()].count(chr(10)) + 1
+                found.append(f"{tool!r} as {form} @ line {line}: {m.group(0)!r}")
+    assert not found, (
+        f"{path.name} names an external tool:\n  " + "\n  ".join(found)
+        + "\n\nA flow that needs a tool declares it; the engine does not know the tool exists."
+    )

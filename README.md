@@ -14,6 +14,7 @@ harness-engine/
 ├── engine/                  【基座】不含任何能力词汇
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
 │   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
+│   ├── registry.py          四个注册表共享的那一件事：名字被占时怎么拒绝
 │   ├── schema.sql           9 表，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
@@ -23,7 +24,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   282 个测试
+└── tests/                   305 个测试
 ```
 
 ## 快速开始
@@ -141,6 +142,77 @@ So a newer reader alone would not be enough — the flow needs machinery that is
 
 **版本号本身分不出这两者**，而 `uses:` 分得出——这也说明 `uses:` 是比版本号更细的那个向前兼容
 机制：**它按名字告诉你缺什么。**
+
+### 基座不认识任何外部工具
+
+一个内置 provider 曾经 shell 出去调具体的版本控制工具，理由写在它自己的注释里：「what did I
+touch」是条件最常问的东西，所以它作为便利 ship 了。
+
+**那是基座里的领域知识，而且它绕过了基座自己的缝。** 引擎有 `requires={"cmd": ...}`，存在的意义
+就是让需要外部工具的 provider 声明它，从而让「我没法看」不再长得像「什么都没找到」——而一个内置
+provider 说不出这句话，因为那会让**引擎自己**依赖一个工具。
+
+**它此前通过了纯净性守卫**，而那是最值得记住的部分：守卫豁免了 `facts.py` 的「不许命名事实」规则
+（理由正当：声明 schema 就是 provider 的全部工作），但**豁免静默地覆盖了更多**——一个工具名不是
+一个事实名。两道新守卫把它关上：
+
+| 守卫 | 形态 |
+|---|---|
+| 内置 provider 不许 shell out | **结构性**：`engine/facts.py` 里不许出现 `subprocess` / `Popen` / `os.system`。对所有工具成立，不只是那个恰好发生的 |
+| 引擎不许命名具体外部工具 | **尖锐形态**：引号字面量或下划线标识符。**不能用子串**——`git` 出现在 `legitimately`（引擎里 8 次）、`legitimate`、`isdigit` 里面，子串规则会因为英文散文而失败，而一条被散文打红的守卫会换来豁免清单 |
+
+内置只剩三个，共同形状是**只报引擎已经持有的东西**：什么都不报、run 自己的身份、run 自己的进度。
+测试把它钉成**精确集合**而不是下界——要防的正是「新加一个伸手到外面的内置」，而下界注意不到多出来
+的那一个。
+
+守卫第一次运行就抓到两处：一处描述符示例用了具体工具名（同段其它三个都用占位符），一处
+`run_progress` 的 docstring 因为这次搬迁**已经过期**。两处都改了，没加豁免。
+
+### 命名冲突会点名双方
+
+四个注册表是**进程全局**的，所以两个互不相识的 flow 各自注册同一个名字会互相打断，而**加载顺序
+是字母序，谁都没选过它**。旧消息只点名后加载的那个，读起来像它有缺陷。
+
+```
+completion predicate 'shared_name' is claimed twice:
+  already: /…/aaa/providers.py
+  also:    /…/bbb/providers.py
+  This is a NAME COLLISION between two independent extensions, not a defect in
+  either of them. … Rename one, or keep the two out of the same process.
+```
+
+这不消除冲突（真要消除得按 flow 给注册命名空间，那会改变 spec 引用它们的写法），**它消除的是错误
+的诊断**——错误的诊断会把人送去错的文件里找。
+
+**并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
+就是一个等着发生的 bug，而它当场发生了：清理代码从注册表移走了一个名字、却留在 owner 映射里，
+于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### 读命令都能用 JSON 作答
+
+```sh
+harness next --run <id> --json      # requirements 是真数据，不是列
+harness status --json               # 含每个共享 scope 能不能被裁决
+harness history --json / --actors --json / audit --json / leases --json
+harness obligations --run <id> --json / abilities --json
+```
+
+退出码本来就是契约，但**细节此前只有人类散文**。不是 shell 的东西——第二个运行时的适配器、一个
+面板、一个监控——只能拿正则去啃格式化文本。而 `next` 的整个卖点是「把这一步要求什么**以数据形式**
+说出来」，它此前说成了列。
+
+实现是**一份数据两种渲染**（`_emit`）：另建一份机器形态等于把同一个查询实现两遍，而其中一个先长出
+新字段的那一刻它们就漂了。
+
+`validate` 刻意没加：CI 要的是它的**退出码**，而那早就是契约；它的细节是给人调试看的，是这批里
+价值最低的一个。
+
+### 一个只有一种取值的键说不了任何事
+
+`on_exhausted` 在「拒绝」与「升级到人工 gate」之间选择。**从来没有任何 flow 选过升级**——已装 flow
+里 8 处声明，每一处都在复述默认值。删掉没人用的那个分支会留下一个单值键，所以**键也一起删了**。
+预算用尽现在无条件拒绝。升级要回来，走和任何东西一样的路：一个取值、它的分支、以及一条选择它的
+flow。
 
 ### 接一个 agent：一段生成的 prompt + 一份契约
 
@@ -496,17 +568,17 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 282 passed
+python3 -m pytest tests/ -q      # 305 passed
 ```
 
 分两类：
 
-- `test_engine_purity.py`（42）—— **结构性不变量**。引擎源码里不许有 step id 形态的
+- `test_engine_purity.py`（59）—— **结构性不变量**。引擎源码里不许有 step id 形态的
   token、不许有能力专有名词、不许有能力词汇当标识符、不许 import 或硬编码路径进 abilities、
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（240）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（246）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

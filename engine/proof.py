@@ -23,6 +23,8 @@ is not a guarantee; a degradation you cannot see is worse than none.
 """
 from __future__ import annotations
 
+from . import registry
+
 import json
 import os
 from pathlib import Path
@@ -32,6 +34,8 @@ WITNESS_ENV = "HARNESS_WITNESS"
 TRANSCRIPT_ENV = "HARNESS_TRANSCRIPT"
 
 _WITNESSES: dict[str, Callable] = {}
+# Who claimed each name, so a collision can name BOTH sides rather than only the loser.
+_OWNERS: dict[str, str] = {}
 
 
 class NoWitness(RuntimeError):
@@ -40,8 +44,7 @@ class NoWitness(RuntimeError):
 
 def witness(name: str) -> Callable:
     def deco(fn: Callable) -> Callable:
-        if name in _WITNESSES:
-            raise RuntimeError(f"witness '{name}' already registered")
+        registry.claim("witness", name, _WITNESSES, _OWNERS, fn)
         _WITNESSES[name] = fn
         return fn
     return deco

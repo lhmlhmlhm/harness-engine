@@ -25,6 +25,8 @@ and nobody notices for a year.
 """
 from __future__ import annotations
 
+from . import registry
+
 import fnmatch
 from typing import Callable
 
@@ -39,6 +41,8 @@ TYPES = (T_STR, T_INT, T_BOOL, T_LIST)
 ANY = TYPES  # shorthand for "accepts any declared type"
 
 _OPERATORS: dict[str, dict] = {}
+# Who claimed each name, so a collision can name BOTH sides rather than only the loser.
+_OWNERS: dict[str, str] = {}
 
 
 class OperatorError(ValueError):
@@ -52,8 +56,7 @@ def operator(name: str, *, accepts: tuple[str, ...], arg: str) -> Callable:
     `arg`     = a human description of the right-hand side, used in error messages.
     """
     def deco(fn: Callable) -> Callable:
-        if name in _OPERATORS:
-            raise RuntimeError(f"operator '{name}' already registered")
+        registry.claim("operator", name, _OPERATORS, _OWNERS, fn)
         _OPERATORS[name] = {"fn": fn, "accepts": tuple(accepts), "arg": arg}
         return fn
     return deco
