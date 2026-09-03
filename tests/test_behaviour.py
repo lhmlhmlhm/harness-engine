@@ -5841,3 +5841,89 @@ def test_the_actor_rollup_is_the_one_place_to_compare_drivers(env):
     for line in audit.stdout.splitlines():
         if "guard_unadjudicated" in line:
             assert "actor=" not in line, "a fact about a scope was attributed to a driver"
+
+
+def test_the_written_brief_lands_beside_the_store_and_carries_a_usable_path(env):
+    """An agent runtime loads a FILE as context — it cannot run a command to fill one.
+
+    So the generated contract has to be materialised, and the checked-in copy cannot be that
+    file: it is `--portable`, so its path is a placeholder. A consumer configuration pointed at
+    the portable copy tells an agent to alias something that does not exist, which is precisely
+    what happened and why this exists.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import store as st
+
+    out = run(["brief", "--write"], env)
+    assert out.returncode == OK, out.stderr
+    expected = Path(env["HARNESS_STATE_DIR"]) / "brief.md"
+    assert str(expected) in out.stdout, out.stdout
+    assert expected.is_file()
+
+    written = expected.read_text(encoding="utf-8")
+    assert written == run(["brief"], env).stdout, "the written copy must be the plain rendering"
+    assert "<path-to-engine>" not in written, "the machine copy must not carry the placeholder"
+    # And the path it names must actually be runnable.
+    m = re.search(r"alias harness='([^']+)'", written)
+    if m:
+        assert Path(m.group(1)).exists(), m.group(1)
+    else:
+        assert "\nInvocation" in written or "harness init" in written
+
+
+def test_writing_and_portable_are_different_audiences(env):
+    """The two flags describe copies for different readers, so combining them is refused.
+
+    A written copy is for THIS machine and must carry a working path; a portable one exists to be
+    committed and must not carry anyone's path. Silently letting one win would produce exactly the
+    unusable file this pair of flags was introduced to separate.
+    """
+    target = Path(env["HARNESS_STATE_DIR"]) / "brief.md"
+    # `init` already wrote one, so absence proves nothing here — the property is that the refusal
+    # leaves it UNTOUCHED. Asserting non-existence would have passed for the wrong reason.
+    before = target.read_text(encoding="utf-8") if target.is_file() else None
+    out = run(["brief", "--write", "--portable"], env)
+    assert out.returncode == USAGE
+    assert "different audiences" in out.stderr, out.stderr
+    after = target.read_text(encoding="utf-8") if target.is_file() else None
+    assert after == before, "a refused write must not have changed the file"
+    if after:
+        assert "<path-to-engine>" not in after, "the placeholder leaked into the machine copy"
+
+
+def test_init_refreshes_the_written_brief(env):
+    """A generated document nobody regenerates is a hand-written one with extra steps.
+
+    `init` is the one command every setup path already runs and is safe to re-run, so refreshing
+    happens there rather than relying on someone remembering. A stale contract misinstructs an
+    agent silently, which is the failure the generation was meant to remove — moved, not fixed.
+    """
+    target = Path(env["HARNESS_STATE_DIR"]) / "brief.md"
+    assert target.is_file(), "the env fixture ran init, which should have written it"
+    target.write_text("stale nonsense\n", encoding="utf-8")
+
+    out = run(["init"], env)
+    assert out.returncode == OK, out.stderr
+    assert str(target) in out.stdout, "init must say where the contract went"
+    assert "stale nonsense" not in target.read_text(encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == run(["brief"], env).stdout
+
+
+def test_the_portable_copy_says_what_it_is(env):
+    """A reference copy that does not announce itself gets used as the real thing.
+
+    Asserted in both directions: the portable rendering declares itself and names how to get a
+    working one; the machine rendering does neither, because there it would be noise.
+    """
+    portable = run(["brief", "--portable"], env).stdout
+    local = run(["brief"], env).stdout
+    assert "portable reference copy" in portable
+    assert "harness brief --write" in portable
+    assert "portable reference copy" not in local
+
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    import engine
+    for text in (portable, local):
+        assert f"from engine {engine.__version__}" in text.splitlines()[0], text.splitlines()[0]

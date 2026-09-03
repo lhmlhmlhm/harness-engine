@@ -23,7 +23,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   266 个测试
+└── tests/                   270 个测试
 ```
 
 ## 快速开始
@@ -98,9 +98,18 @@ macOS 没有原生 XDG 位置，而为了算一个「按平台正确」的路径
 ### 接一个 agent：一段生成的 prompt + 一份契约
 
 ```sh
-harness brief > /wherever/the/agent/reads/DRIVING.md   # 驱动契约，按这套安装生成
-harness adapter-contract                               # 适配器必须满足的用例（JSON）
+harness init                  # 顺带把本机契约写到 store 旁并打印路径
+harness brief --write         # 或单独刷新；agent 的 resources 指这个文件
+harness adapter-contract      # 适配器必须满足的用例（JSON）
 ```
+
+**两份副本，别指错**：`$XDG_STATE_HOME/harness-engine/brief.md` 是给 agent 的（本机真实路径，
+可直接跑）；`integrations/DRIVING.md` 是给人在仓库里看的参考副本（`--portable`，路径是占位符）。
+签入的那份开头会自述身份并指向 `--write`，因为**这条真的错过一次**——一个 agent 配置指着签入
+副本，于是 agent 被告知 alias 一个占位符。`--write` 与 `--portable` 同时给会被拒。
+
+**新鲜度靠 `init` 而不是靠记性**：它每次都重写那份契约。一份没人重新生成的生成物，就是一份多
+几个步骤的手写文件。
 
 **`brief` 是生成的，不是手写的**，因为手写的那份如实漂了：两天之内它写着一个已经搬走的状态库
 位置、一张少一档的退出码表、一条只在一台机器上成立的路径、以及两个都不对的计数。而它旁边的
@@ -440,7 +449,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 266 passed
+python3 -m pytest tests/ -q      # 270 passed
 ```
 
 分两类：
@@ -450,7 +459,7 @@ python3 -m pytest tests/ -q      # 266 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（224）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（228）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

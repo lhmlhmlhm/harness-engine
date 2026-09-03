@@ -77,6 +77,18 @@ def db_path() -> Path:
     return state_dir() / "harness.db"
 
 
+def brief_path() -> Path:
+    """Where the machine-local driving contract is written.
+
+    Beside the store rather than in the package, because it has exactly the store's lifecycle:
+    generated on this machine, regenerable at will, never version-controlled, and meaningless to
+    ship. The copy inside the repository is a portable REFERENCE with a placeholder path — an
+    agent handed that one is told to alias something that does not exist, which is how this file
+    came to be needed.
+    """
+    return state_dir() / "brief.md"
+
+
 def connect(*, read_only: bool = False) -> sqlite3.Connection:
     """Open the store. `init()` must have run first — no lazy table creation.
 

@@ -9,20 +9,36 @@
 ## 1. 驱动契约 —— 生成，不要手写
 
 ```sh
-harness brief > /wherever/your/agent/reads/DRIVING.md
+harness init                      # 顺带把本机契约写到 store 旁边，并打印路径
+harness brief --write             # 或者单独刷新它
+#   ✅ wrote /Users/you/.local/state/harness-engine/brief.md
 ```
 
 它按**这套安装**产出：真实存在的子命令、真实的退出码、以及**已装 flow 实际用到的机制**——
-没有 variants 的安装不会被讲 variants。约 190 行，其中不可派生的只有 6 条判断规则。
+没有 variants 的安装不会被讲 variants。约 200 行，其中不可派生的只有 6 条判断规则。
 
-`integrations/DRIVING.md` 是本仓签入的那一份，用 `--portable` 生成（占位路径，不带任何一台
-机器的绝对路径），并有一条测试断言它与 `harness brief --portable` 逐字节一致。**它不能漂。**
+**有两份副本，指错会给 agent 一条跑不通的路径：**
+
+| | 谁读 | 路径 |
+|---|---|---|
+| `$XDG_STATE_HOME/harness-engine/brief.md` | **agent**（配到 `resources`） | 本机真实路径，可直接跑 |
+| `integrations/DRIVING.md` | 人（在仓库里看） | `<path-to-engine>` **占位符** |
+
+签入那份用 `--portable` 生成，因为一台机器的绝对路径不该进版本控制；它开头会**自述自己是参考
+副本**并给出 `harness brief --write`。`--write` 与 `--portable` 同时给会被拒——两者面对的读者
+不同，静默让一个胜出恰好产出那份不可用的文件。
+
+**这条曾经真的错过**：一个 agent 配置指着签入的那份，于是 agent 被告知 alias 一个占位符。
 
 接进 agent 配置时给**文件**，因为 `resources` 要的是文件而不是命令：
 
 ```jsonc
-"resources": ["file://~/…/harness-engine/integrations/DRIVING.md"]
+"resources": ["file://$HOME/.local/state/harness-engine/brief.md"]
 ```
+
+**新鲜度靠 `init`**，不靠记性：`init` 每次都重写这份契约，而它是每条接线路径本来就会跑、且可
+反复跑的命令。一份没人重新生成的生成物，就是一份多几个步骤的手写文件——而一份过期的契约会
+**静默地给 agent 错的指令**，那正是「改成生成」要消掉的失效，不是把它搬个地方。
 
 ⚠️ **不要**把 `flow.yaml` 或 `prose/` 放进 `resources`。转写后的交付流程是 35 KB spec + 1,338 行
 散文；预载它们会把渐进披露整套设计废掉——那套设计的意义就是 agent **不**预载，而是每步问

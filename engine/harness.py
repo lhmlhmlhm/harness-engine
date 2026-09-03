@@ -81,12 +81,26 @@ def cmd_init(args) -> int:
         tables = sorted(store.core_tables(conn))
     finally:
         conn.close()
+    # Refresh the machine-local contract here, because `init` is the one command every setup
+    # path already runs and is safe to re-run. A generated document nobody regenerates is a
+    # hand-written one with extra steps — and a stale one misinstructs an agent silently, which
+    # is the failure the generation was introduced to remove.
+    try:
+        bp = store.brief_path()
+        bp.parent.mkdir(parents=True, exist_ok=True)
+        bp.write_text(_render_brief(portable=False), encoding="utf-8")
+        wrote_brief: str | None = str(bp)
+    except Exception as exc:  # noqa — a document must not stop the store from being usable
+        _err(f"⚠️  could not refresh the driving contract: {exc}")
+        wrote_brief = None
     print(f"✅ store ready: {path}")
     print(f"   schema {store.SCHEMA_VERSION}"
           + (f" — migrated: {', '.join(str(v) for v in applied)}" if applied else ""))
     print(f"   tables ({len(tables)}): {', '.join(tables)}")
     abilities = flowmod.available_abilities()
     print(f"   abilities ({len(abilities)}): {', '.join(abilities) or '(none)'}")
+    if wrote_brief:
+        print(f"   driving contract: {wrote_brief}")
     return OK
 
 
@@ -1458,13 +1472,11 @@ def _invocation(portable: bool = False) -> str:
     return str(Path(__file__).resolve().parents[1] / "bin" / "harness")
 
 
-def cmd_brief(args) -> int:
-    """Print the driving contract, derived from THIS installation.
+def _render_brief(portable: bool) -> str:
+    """Gather every fact off the engine, then render. Shared by `brief` and `init`.
 
-    Written to stdout rather than a file because the caller decides where it belongs: an agent
-    runtime usually needs it as a file it can load as context, and redirecting is the honest way
-    to say which file. `integrations/DRIVING.md` in this tree is that redirect, and a test fails
-    if it stops matching.
+    One gatherer, because two would drift — and drift in a document about the engine is the
+    defect this whole command exists to remove.
     """
     routable: list[tuple[str, str]] = []
     caps: set[str] = set()
@@ -1485,8 +1497,12 @@ def cmd_brief(args) -> int:
         if len(f.steps) > widest and f.order:
             widest, example_step = len(f.steps), f.order[0]
 
-    sys.stdout.write(briefmod.render(
-        invocation=_invocation(args.portable),
+    from . import __version__
+    return briefmod.render(
+        invocation=_invocation(portable),
+        version=__version__,
+        portable=portable,
+        write_hint="harness brief --write",
         exit_codes={"OK": OK, "USAGE": USAGE, "BAD_SPEC": BAD_SPEC,
                     "REFUSED": REFUSED, "BLOCKED": BLOCKED, "INTERNAL": INTERNAL},
         subcommands=_subcommand_help(),
@@ -1500,7 +1516,29 @@ def cmd_brief(args) -> int:
         ],
         guard_tools=sorted(guard_tools),
         example_step=example_step,
-    ))
+    )
+
+
+def cmd_brief(args) -> int:
+    """Print the driving contract, derived from THIS installation.
+
+    `--write` puts it beside the store instead of on stdout, because an agent runtime loads a
+    FILE as context — it cannot run a command to fill it. So the generated document has to be
+    materialised somewhere machine-local, and the command prints where it went rather than
+    leaving the caller to guess.
+    """
+    text = _render_brief(args.portable)
+    if args.write:
+        if args.portable:
+            _err("⛔ --write and --portable name different audiences: the written copy is for "
+                 "THIS machine and must carry a working path.")
+            return USAGE
+        path = store.brief_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        print(f"✅ wrote {path}")
+        return OK
+    sys.stdout.write(text)
     return OK
 
 
@@ -1780,6 +1818,8 @@ def build_parser() -> argparse.ArgumentParser:
     br = sub.add_parser("brief", help="print the driving contract for this installation")
     br.add_argument("--portable", action="store_true",
                     help="use a placeholder path instead of this machine's (for a checked-in copy)")
+    br.add_argument("--write", action="store_true",
+                    help="write it beside the store instead of to stdout, and print the path")
     br.set_defaults(fn=cmd_brief)
     hi = sub.add_parser("history", help="list runs that have ended")
     hi.add_argument("--limit", type=int, default=20)
