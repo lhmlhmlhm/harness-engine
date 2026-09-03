@@ -5591,3 +5591,253 @@ def test_no_build_output_is_tracked():
         f"{len(offenders)} build artefact(s) are tracked, e.g. {offenders[:3]}\n"
         f"  git rm -r --cached <path>   — and check .gitignore covers it"
     )
+
+
+# ------------------------------------------------- the driving contract is generated
+
+def _brief(env_extra=None, args=("--portable",)):
+    return run(["brief", *args], env_extra or {"HARNESS_STATE_DIR": "/nonexistent-on-purpose"})
+
+
+def test_the_checked_in_driving_contract_is_exactly_what_the_engine_emits():
+    """The document that tells an agent how to drive this engine cannot be allowed to drift.
+
+    It did. Within two days it named a store location that had moved, listed the exit codes one
+    short, quoted a hard-coded path belonging to one machine, and gave a step count that was
+    wrong — while `CAPABILITIES.md` beside it had four guards and stayed correct. The file with no
+    guard was the file that rotted, which is not a coincidence worth restating.
+
+    `--portable` is what gets checked in, so the comparison does not depend on whose checkout ran
+    it and no absolute path enters version control.
+    """
+    out = _brief()
+    assert out.returncode == OK, out.stderr
+    checked_in = (REPO / "integrations" / "DRIVING.md").read_text(encoding="utf-8")
+    assert out.stdout == checked_in, (
+        "integrations/DRIVING.md is not what `harness brief --portable` produces.\n"
+        "  regenerate: harness brief --portable > integrations/DRIVING.md"
+    )
+    assert "<path-to-engine>" in checked_in, "a machine's real path leaked into the checked-in copy"
+
+
+def test_every_exit_code_the_cli_defines_is_described_in_the_brief():
+    """Both directions, because the drift was a code that existed and was never described.
+
+    Keyed by NAME rather than number so that renaming or renumbering cannot quietly satisfy it.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import brief as b, harness as h
+
+    defined = {n for n in ("OK", "USAGE", "BAD_SPEC", "REFUSED", "BLOCKED", "INTERNAL")
+               if hasattr(h, n)}
+    assert len(defined) == 6, defined
+    assert set(b.EXIT_MEANINGS) == defined, (
+        f"described but not defined: {sorted(set(b.EXIT_MEANINGS) - defined)}; "
+        f"defined but not described: {sorted(defined - set(b.EXIT_MEANINGS))}"
+    )
+    # And each one's number reaches the rendered table.
+    out = _brief().stdout
+    for name in defined:
+        assert f"| **{getattr(h, name)}** |" in out, name
+
+
+def test_the_brief_is_tailored_to_what_is_installed(env, tmp_path):
+    """A section about machinery the installed flows do not have is budget spent teaching an
+    agent about something it will never meet — and it buries the sections that DO apply.
+
+    Asserted in both directions from one minimal flow: the mechanism it uses appears, the ones it
+    does not are absent. A one-directional check would pass on a brief that prints everything.
+    """
+    root = tmp_path / "tree"
+    (root / "tiny").mkdir(parents=True)
+    (root / "tiny" / "flow.yaml").write_text(
+        "version: 1\nability: tiny\n"
+        "when: a minimal flow, used to check the brief is tailored rather than fixed\n"
+        "uses: [gates]\nscope_kind: s\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n    gate: affirm\n    directive: Do it.\n",
+        encoding="utf-8")
+    out = _brief({**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == OK, out.stderr
+    assert "## Gates" in out.stdout
+    for absent in ("## Variants", "## Obligations", "## Repeatable steps",
+                   "## Mutually exclusive steps"):
+        assert absent not in out.stdout, f"{absent} rendered for a flow that does not use it"
+    assert "**`tiny`**" in out.stdout, "the routing hint is derived from the installed flow"
+
+    # The full installation must show what the minimal one did not, or the check above is vacuous.
+    full = _brief().stdout
+    assert "## Variants" in full and "## Obligations" in full
+
+
+def test_the_brief_carries_the_rules_that_cannot_be_derived():
+    """The judgment block is the half no amount of reading the CLI produces.
+
+    Held as data inside the engine so the purity guard applies to it: a rule statable only in one
+    consumer's vocabulary would fail that scan, which is what makes a surviving rule one that
+    holds for every consumer.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import brief as b
+
+    assert len(b.JUDGMENT) >= 5
+    out = _brief().stdout
+    for title, rule, why in b.JUDGMENT:
+        assert f"### {title}" in out, title
+        assert rule.split(".")[0] in out, title
+        assert why.split(".")[0] in out, f"the reason for {title!r} is missing"
+
+
+def test_the_command_surface_is_read_off_the_parser():
+    """One list of commands, not two. A hand-kept second list is the drift being removed."""
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    described = h._subcommand_help()
+    assert len(described) > 10, described
+    parser = h.build_parser()
+    import argparse as _a
+    choices: set[str] = set()
+    for action in parser._actions:
+        if isinstance(action, _a._SubParsersAction):
+            choices = set(action.choices)
+    assert choices and set(described) == choices, (
+        f"described but unknown: {sorted(set(described) - choices)}; "
+        f"exists but undescribed: {sorted(choices - set(described))}"
+    )
+
+
+# ------------------------------------------------- the adapter contract, consumed
+
+def _contract(env_extra) -> dict:
+    out = run(["adapter-contract"], env_extra)
+    assert out.returncode == OK, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_the_published_adapter_cases_are_what_the_shipped_adapter_satisfies(env, tmp_path):
+    """The cases are load-bearing, not decorative — the shipped adapter is checked against them.
+
+    A contract published for other runtimes to satisfy, which nothing here satisfies, would be a
+    claim. So the translation table is driven against a STUB engine that exits with each code in
+    turn: that isolates the one thing an adapter is responsible for, the mapping. Feeding real
+    events instead would test the engine's verdicts and leave the mapping half-covered.
+
+    The absent-engine case points at a directory that never held the binary, rather than deleting
+    one mid-test. Same condition, and a test that mutates the filesystem while running is a test
+    whose later assertions depend on its earlier side effects.
+    """
+    contract = _contract(env)
+    assert contract["translation"] and contract["resilience"]
+    adapter = REPO / "integrations" / "kiro-pretooluse.py"
+
+    stub_root = tmp_path / "stub"
+    (stub_root / "bin").mkdir(parents=True)
+    stub = stub_root / "bin" / "harness"
+    empty_root = tmp_path / "no-engine-here"
+    empty_root.mkdir()
+
+    def drive(event='{"tool_name":"shell","tool_input":{"command":"x"}}', root=None):
+        import os
+        e = {**os.environ, "HARNESS_ENGINE": str(root or stub_root)}
+        e.pop("HARNESS_STATE_DIR", None)
+        return subprocess.run([sys.executable, str(adapter)], input=event,
+                              capture_output=True, text=True, env=e, cwd=str(tmp_path))
+
+    for case in contract["translation"]:
+        stub.write_text(f"#!/usr/bin/env python3\nimport sys\nsys.exit({case['engine_exit']})\n",
+                        encoding="utf-8")
+        stub.chmod(0o755)
+        got = drive().returncode
+        want_block = case["expect"] == "block"
+        assert (got != 0) == want_block, (
+            f"engine exit {case['engine_exit']} should {case['expect']}, adapter returned {got} "
+            f"— {case['why']}"
+        )
+
+    assert drive("not json at all").returncode == 0, "unparseable input must allow"
+    assert drive("{}").returncode == 0, "an event with no tool name must allow"
+
+    gone = drive(root=empty_root)
+    assert gone.returncode == 0
+    assert "not found" in gone.stderr or "NOT enforced" in gone.stderr, (
+        "an absent engine must be REPORTED — 'cannot guard' and 'nothing to guard' must not "
+        "look alike"
+    )
+
+
+def test_the_end_to_end_case_is_derived_from_an_installed_flow(env):
+    """It names a real action from a real flow, and admits what it cannot hand over.
+
+    A synthesised payload would be worse than none: a string invented against an arbitrary regex
+    most likely does not match, so the case would pass while proving nothing.
+    """
+    e2e = _contract(env)["end_to_end"]
+    assert e2e and e2e["ability"] in run(["abilities"], env).stdout
+    assert e2e["gate_step"], "an action guarded by no gate step could never refuse anything"
+    assert e2e["matches"] and all("pattern" in m and "tool" in m for m in e2e["matches"])
+    assert all("regex" not in m for m in e2e["matches"]), "a compiled object is not a contract"
+    assert "yours to construct" in e2e["note"]
+
+
+# ------------------------------------------------- reading what already happened
+
+def test_closed_runs_are_listable_and_the_actor_filter_precedes_the_limit(env):
+    """Closing a run never deleted anything; until now nothing listed it.
+
+    The ordering of filter and limit is the part worth pinning: taking the newest N and THEN
+    dropping other actors returns the newest N minus everyone else's, which is not the newest N of
+    that actor's. Set up so a filter-after-limit implementation returns nothing at all.
+    """
+    for i, who in enumerate(["a-agent", "b-agent", "b-agent", "b-agent"]):
+        e = {**env, "HARNESS_ACTOR": who}
+        assert rc(["open", "delivery", "--scope", f"/repo/h{i}", "--run", f"H{i}"], e) == OK
+        assert rc(["close-run", "--run", f"H{i}", "--result", "done", "--force-steps",
+                   "--force-obligations"], e) == OK
+
+    listed = run(["history"], env)
+    assert listed.returncode == OK, listed.stderr
+    for i in range(4):
+        assert f"H{i}" in listed.stdout
+    assert "actor=a-agent" in listed.stdout and "actor=b-agent" in listed.stdout
+
+    # H0 is the OLDEST and the only a-agent run: a limit applied before the filter leaves it out.
+    only = run(["history", "--actor", "a-agent", "--limit", "1"], env)
+    assert only.returncode == OK
+    assert "H0" in only.stdout, only.stdout
+    for other in ("H1", "H2", "H3"):
+        assert other not in only.stdout
+
+    assert rc(["history", "--ability", "delivery"], env) == OK
+    assert "(no closed runs match)" in run(["history", "--ability", "plan"], env).stdout
+
+
+def test_the_actor_rollup_is_the_one_place_to_compare_drivers(env):
+    """Recording the actor and never reporting it would have made it a field nothing reads.
+
+    The undeclared bucket is asserted too: an installation where nobody sets it must still be
+    countable rather than silently producing an empty report.
+    """
+    assert rc(["open", "delivery", "--scope", "/repo/x", "--run", "X1"],
+              {**env, "HARNESS_ACTOR": "one"}) == OK
+    assert rc(["open", "delivery", "--scope", "/repo/y", "--run", "Y1"], env) == OK  # no actor
+
+    out = run(["history", "--actors"], env)
+    assert out.returncode == OK, out.stderr
+    assert "one" in out.stdout and "(undeclared)" in out.stdout, out.stdout
+
+    # A scope-level violation belongs to no run, so it must not be charged to any driver.
+    assert rc(["open", "delivery", "--scope", "/repo/x", "--run", "X2",
+               "--allow-concurrent"], {**env, "HARNESS_ACTOR": "one"}) == OK
+    assert rc(["guard", "--action", "commit", "--scope-kind", "repo",
+               "--scope", "/repo/x"], env) == OK
+    rows = _rows(env, "SELECT COUNT(*) c FROM violation WHERE run_id IS NULL")
+    assert rows[0]["c"] >= 1, "the unadjudicated guard should have recorded a run-less violation"
+    audit = run(["audit"], env)
+    assert "guard_unadjudicated" in audit.stdout
+    for line in audit.stdout.splitlines():
+        if "guard_unadjudicated" in line:
+            assert "actor=" not in line, "a fact about a scope was attributed to a driver"

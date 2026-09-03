@@ -770,3 +770,69 @@ def claim_scope_and_open(conn: sqlite3.Connection, *, require_free_scope: bool,
             raise
     finally:
         conn.isolation_level = prev
+
+
+def closed_runs(conn: sqlite3.Connection, *, limit: int = 20,
+                actor: str | None = None, ability: str | None = None) -> list[sqlite3.Row]:
+    """Runs that have ENDED, newest first, with the counts that make one worth looking at.
+
+    WHY THIS EXISTS AT ALL. Closing a run has never deleted anything — the step log, the gates,
+    the evidence and the violations all stay. But nothing listed them: `status` shows only what
+    is open and `audit` aggregates across everything without saying which run or who drove it. So
+    the ledger was complete and unreadable, which for a record is the same as absent.
+
+    `actor` is filtered here rather than in the caller because a LIMIT applied before the filter
+    returns the wrong page — the twenty newest runs, minus everyone else's, is not the twenty
+    newest of that actor's.
+    """
+    sql = [
+        "SELECT r.*,",
+        " json_extract(r.metadata_json, '$.actor') AS actor,",
+        " (SELECT COUNT(*) FROM step_log s WHERE s.run_id = r.run_id AND s.event = 'closed')"
+        "   AS closed_steps,",
+        " (SELECT COUNT(*) FROM violation v WHERE v.run_id = r.run_id) AS violations,",
+        " (SELECT COUNT(*) FROM gate g WHERE g.run_id = r.run_id) AS gates,",
+        " (SELECT COUNT(*) FROM obligation o WHERE o.run_id = r.run_id"
+        "   AND o.discharged_at IS NULL) AS owed",
+        " FROM run r WHERE r.status = 'closed'",
+    ]
+    params: list = []
+    if ability:
+        sql.append(" AND r.ability = ?")
+        params.append(ability)
+    if actor:
+        sql.append(" AND json_extract(r.metadata_json, '$.actor') = ?")
+        params.append(actor)
+    sql.append(" ORDER BY r.closed_at DESC, r.run_id DESC LIMIT ?")
+    params.append(int(limit))
+    return conn.execute("".join(sql), params).fetchall()
+
+
+def actor_totals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Per-driver rollup over every run, open or closed.
+
+    The reason `HARNESS_ACTOR` is recorded is so a human comparing two drivers can see the
+    difference. Recording it without ever reporting it would have made it the kind of declared
+    field nothing reads.
+    """
+    # Two CTEs rather than one clever SELECT: an alias defined in a select list is not visible
+    # to a correlated subquery beside it, and folding the violation count in with a plain JOIN
+    # would multiply the run rows and inflate every other column.
+    #
+    # A violation with no run — the scope-level kind — joins to nobody and is therefore absent
+    # here. That is correct: it belongs to a scope, not to a driver, which is the whole reason it
+    # is recorded without a run in the first place.
+    return conn.execute(
+        "WITH tagged AS ("
+        "  SELECT run_id, status,"
+        "         COALESCE(json_extract(metadata_json, '$.actor'), '(undeclared)') AS actor"
+        "  FROM run"
+        "), vio AS ("
+        "  SELECT t.actor AS actor, COUNT(*) AS n"
+        "  FROM violation v JOIN tagged t ON t.run_id = v.run_id GROUP BY t.actor"
+        ")"
+        " SELECT t.actor AS actor, COUNT(*) AS runs,"
+        "        SUM(CASE WHEN t.status = 'open' THEN 1 ELSE 0 END) AS open_runs,"
+        "        COALESCE((SELECT n FROM vio WHERE vio.actor = t.actor), 0) AS violations"
+        " FROM tagged t GROUP BY t.actor ORDER BY runs DESC, actor"
+    ).fetchall()

@@ -27,9 +27,14 @@ import uuid
 from pathlib import Path
 
 from . import flow as flowmod
+from . import brief as briefmod
 from . import conditions, facts, hooks as hookmod, predicates, proof, prose, store
 
 OK, USAGE, BAD_SPEC, REFUSED, BLOCKED, INTERNAL = 0, 1, 2, 3, 4, 5
+
+# Named rather than inlined: `brief` reports it, and a literal in two places is a
+# second source that drifts.
+ACTOR_ENV = "HARNESS_ACTOR"
 
 
 def _err(msg: str) -> None:
@@ -227,7 +232,7 @@ def _caller_note() -> dict:
     rather than being passed off as the session.
     """
     note: dict = {"cli_pid": os.getpid(), "cli_ppid": os.getppid()}
-    actor = os.environ.get("HARNESS_ACTOR", "").strip()
+    actor = os.environ.get(ACTOR_ENV, "").strip()
     if actor:
         note["actor"] = actor
     return note
@@ -1417,6 +1422,221 @@ def cmd_leases(args) -> int:
         conn.close()
 
 
+def _subcommand_help() -> dict[str, str]:
+    """Read the command surface off the parser rather than listing it again.
+
+    Reaching into argparse internals is the price of having ONE list of commands. The
+    alternative is a hand-kept second list, which is the exact failure `brief` exists to remove —
+    so the private attribute is the lesser evil, and a test fails if this returns nothing.
+    """
+    parser = build_parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return {ca.dest: (ca.help or "") for ca in action._choices_actions}
+    return {}
+
+
+PORTABLE_PATH = "<path-to-engine>/bin/harness"
+
+
+def _invocation(portable: bool = False) -> str:
+    """How the reader should spell the command.
+
+    An installed copy has it on PATH; a source checkout does not, and telling an agent to type
+    `harness` when nothing answers to that name is worse than a long path.
+
+    `portable` exists because the copy CHECKED INTO this tree must not carry one machine's
+    absolute path — that is machine-specific content in version control, and it would also make
+    the drift test pass or fail depending on whose checkout ran it. A consumer regenerates
+    without the flag to get a path that actually works for them.
+    """
+    if portable:
+        return PORTABLE_PATH
+    import shutil
+    if shutil.which("harness"):
+        return "harness"
+    return str(Path(__file__).resolve().parents[1] / "bin" / "harness")
+
+
+def cmd_brief(args) -> int:
+    """Print the driving contract, derived from THIS installation.
+
+    Written to stdout rather than a file because the caller decides where it belongs: an agent
+    runtime usually needs it as a file it can load as context, and redirecting is the honest way
+    to say which file. `integrations/DRIVING.md` in this tree is that redirect, and a test fails
+    if it stops matching.
+    """
+    routable: list[tuple[str, str]] = []
+    caps: set[str] = set()
+    guard_tools: set[str] = set()
+    example_step: str | None = None
+    widest = -1
+    for name in flowmod.available_abilities():
+        try:
+            f = flowmod.load(name)
+        except flowmod.FlowError:
+            continue  # a broken spec must not stop the rest of the brief
+        caps |= set(flowmod.capabilities_used(f))
+        for rules in f.guard_matches.values():
+            guard_tools |= {r["tool"] for r in rules}
+        if f.role != flowmod.ROLE_PRODUCTION:
+            continue
+        routable.append((name, f.when.strip().splitlines()[0] if f.when else ""))
+        if len(f.steps) > widest and f.order:
+            widest, example_step = len(f.steps), f.order[0]
+
+    sys.stdout.write(briefmod.render(
+        invocation=_invocation(args.portable),
+        exit_codes={"OK": OK, "USAGE": USAGE, "BAD_SPEC": BAD_SPEC,
+                    "REFUSED": REFUSED, "BLOCKED": BLOCKED, "INTERNAL": INTERNAL},
+        subcommands=_subcommand_help(),
+        routable=sorted(routable),
+        capabilities=caps,
+        env=[
+            (flowmod.ABILITIES_ENV,
+             "where flows are searched for; os.pathsep-separated, REPLACES the default"),
+            (store.STATE_ENV, "where the store lives"),
+            (ACTOR_ENV, "who is driving — recorded for diagnosis, never used for isolation"),
+        ],
+        guard_tools=sorted(guard_tools),
+        example_step=example_step,
+    ))
+    return OK
+
+
+def cmd_adapter_contract(args) -> int:
+    """Publish what a runtime adapter must satisfy, as data any language can consume.
+
+    WHY DATA AND NOT A GENERATED ADAPTER. An adapter translates between this engine and one
+    runtime's dialect, and those dialects are not in one language — one is a python hook reading
+    stdin, another is a plugin in a typed runtime. Generating the code is not possible; agreeing
+    on the CASES is, and it is the part that actually goes wrong.
+
+    THE SPLIT IS DELIBERATE. `translation` and `resilience` are fully specifiable: they are about
+    what the adapter does given an engine exit code or a broken input, and an author can check
+    every one of them against a stub. `end_to_end` cannot be handed over complete — it needs a
+    payload that matches a pattern this installation declares, and synthesising a string from an
+    arbitrary regex is not something to pretend at. So the pattern is published and the
+    construction is named as the author's job, rather than shipping a case that looks complete
+    and silently is not.
+
+    The cases here are load-bearing, not decorative: this engine's own adapter test iterates
+    them. A case nobody runs is a claim, and this file is full of arguments against those.
+    """
+    translation = [
+        {"engine_exit": BLOCKED, "expect": "block",
+         "why": "the only verdict that becomes a block. Everything else allows."},
+        {"engine_exit": OK, "expect": "allow", "why": "nothing to stop"},
+        {"engine_exit": REFUSED, "expect": "allow",
+         "why": "a refusal belongs to whoever ran the command, not to a tool call being made"},
+        {"engine_exit": BAD_SPEC, "expect": "allow",
+         "why": "a broken spec must not stop unrelated work in every session"},
+        {"engine_exit": INTERNAL, "expect": "allow",
+         "why": "a defect in the engine must never brick the runtime hosting it"},
+    ]
+    resilience = [
+        {"condition": "stdin is not JSON", "expect": "allow",
+         "engine_called": False,
+         "why": "a runtime that changes its event shape must not lose every tool call"},
+        {"condition": "event has no tool name", "expect": "allow", "engine_called": False,
+         "why": "nothing to look up"},
+        {"condition": "the engine binary is absent", "expect": "allow", "engine_called": False,
+         "why": "SAY SO on stderr as well — 'cannot guard' and 'nothing to guard' must not "
+                "look alike"},
+        {"condition": "the engine call times out or cannot start", "expect": "allow",
+         "engine_called": True, "why": "same rule: uncertainty allows"},
+        {"condition": "the adapter itself raises", "expect": "allow", "engine_called": None,
+         "why": "the fail-open rule outranks tidiness; catch and allow"},
+    ]
+
+    end_to_end = None
+    for name in flowmod.available_abilities():
+        try:
+            f = flowmod.load(name)
+        except flowmod.FlowError:
+            continue
+        for action, rules in sorted(f.guard_matches.items()):
+            if not rules:
+                continue
+            end_to_end = {
+                "ability": name,
+                "action": action,
+                "gate_step": f.guards.get(action),
+                # The compiled regex is dropped: it is what the engine APPLIES, while `pattern`
+                # already carries the source an adapter author has to read. Publishing a repr of
+                # a compiled object would be unusable and also not serialisable.
+                "matches": [{k: v for k, v in r.items() if k != "regex"} for r in rules],
+                "setup": [
+                    f"harness open {name} --scope <a path this flow's scope_match covers> "
+                    f"--run <id>",
+                ],
+                "then": "feed your adapter an event naming the tool above, carrying a payload "
+                        "whose named field matches the pattern. Expect a block. Record the "
+                        "gate, feed the same event again, expect an allow.",
+                "note": "the payload is yours to construct: a matching string cannot be derived "
+                        "from a regex, and a case with an invented payload that happens not to "
+                        "match would pass while proving nothing.",
+            }
+            break
+        if end_to_end:
+            break
+
+    print(json.dumps({
+        "io": {
+            "stdin": "one JSON object; at least {tool_name: str, tool_input: object}",
+            "engine_call": ["guard-tool", "--tool", "<tool_name>",
+                            "--input-json", "<tool_input as JSON>", "--cwd", "<working dir>"],
+            "adapter_exit": "whatever the host runtime reads as allow / block",
+            "env": {flowmod.ABILITIES_ENV: "must match the value the runs were opened with",
+                    store.STATE_ENV: "MUST match the value the runs were opened with"},
+        },
+        "iron_rule": "Only a positive, unambiguous BLOCKED from the engine becomes a block. "
+                     "Every other outcome allows. This runs before every matching tool call in "
+                     "every session, so a bug here must not stop normal work.",
+        "translation": translation,
+        "resilience": resilience,
+        "end_to_end": end_to_end,
+    }, indent=2, ensure_ascii=False))
+    return OK
+
+
+def cmd_history(args) -> int:
+    """List runs that have ended. Read-only."""
+    conn = store.connect(read_only=True)
+    try:
+        if args.actors:
+            rows = store.actor_totals(conn)
+            if not rows:
+                print("(no runs recorded)")
+                return OK
+            print(f"{'actor':<24} {'runs':>5} {'open':>5} {'violations':>11}")
+            for r in rows:
+                print(f"{r['actor']:<24} {r['runs']:>5} {r['open_runs']:>5} "
+                      f"{r['violations']:>11}")
+            return OK
+        rows = store.closed_runs(conn, limit=args.limit, actor=args.actor,
+                                 ability=args.ability)
+        if not rows:
+            print("(no closed runs match)")
+            return OK
+        for r in rows:
+            marks = []
+            if r["violations"]:
+                marks.append(f"⚠️ {r['violations']} violation(s)")
+            if r["owed"]:
+                marks.append(f"⚠️ {r['owed']} owed obligation(s)")
+            if r["actor"]:
+                marks.append(f"actor={r['actor']}")
+            print(f"{r['run_id']}  {r['ability']:<14} {r['scope_kind']}={r['scope_key']}")
+            print(f"    {r['result'] or '(no result)':<14} "
+                  f"steps={r['closed_steps']} gates={r['gates']}  "
+                  f"{r['opened_at']} → {r['closed_at']}"
+                  + ("  " + " · ".join(marks) if marks else ""))
+        return OK
+    finally:
+        conn.close()
+
+
 def cmd_audit(args) -> int:
     conn = store.connect(read_only=True)
     try:
@@ -1434,14 +1654,17 @@ def cmd_audit(args) -> int:
             print(f"  ⚠️  {r['run_id']}  {r['step_id']}  {r['decision']}"
                   f"  witness={p.get('witness')}  {r['recorded_at']}")
         v = conn.execute(
-            "SELECT run_id, step_id, code, COUNT(*) n FROM violation"
-            " GROUP BY run_id, step_id, code ORDER BY n DESC"
+            "SELECT v.run_id, v.step_id, v.code, COUNT(*) n,"
+            " json_extract(r.metadata_json, '$.actor') AS actor"
+            " FROM violation v LEFT JOIN run r ON r.run_id = v.run_id"
+            " GROUP BY v.run_id, v.step_id, v.code ORDER BY n DESC"
         ).fetchall()
         if v:
             print(f"violations: {sum(r['n'] for r in v)}")
             for r in v:
                 print(f"  {r['code']:<24} {r['run_id'] or '-'}  "
-                      f"{r['step_id'] or '-'}  ×{r['n']}")
+                      f"{r['step_id'] or '-'}  ×{r['n']}"
+                      + (f"  actor={r['actor']}" if r["actor"] else ""))
         return OK
     finally:
         conn.close()
@@ -1554,6 +1777,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
     sub.add_parser("abilities", help="list installed abilities").set_defaults(fn=cmd_abilities)
     sub.add_parser("leases", help="show delegated scopes").set_defaults(fn=cmd_leases)
+    br = sub.add_parser("brief", help="print the driving contract for this installation")
+    br.add_argument("--portable", action="store_true",
+                    help="use a placeholder path instead of this machine's (for a checked-in copy)")
+    br.set_defaults(fn=cmd_brief)
+    hi = sub.add_parser("history", help="list runs that have ended")
+    hi.add_argument("--limit", type=int, default=20)
+    hi.add_argument("--actor", help="only runs driven by this actor")
+    hi.add_argument("--ability")
+    hi.add_argument("--actors", action="store_true",
+                    help="per-actor rollup instead of a run list")
+    hi.set_defaults(fn=cmd_history)
+
+    sub.add_parser("adapter-contract",
+                   help="print what a runtime adapter must satisfy (JSON)"
+                   ).set_defaults(fn=cmd_adapter_contract)
 
     v = sub.add_parser("validate", help="validate flow spec(s); exit 2 if invalid")
     v.add_argument("ability", nargs="?")

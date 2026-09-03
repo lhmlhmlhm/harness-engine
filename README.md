@@ -13,6 +13,7 @@ harness-engine/
 ├── bin/harness              入口（8 行，行为全在 engine/）
 ├── engine/                  【基座】不含任何能力词汇
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
+│   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
 │   ├── schema.sql           9 表，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
@@ -22,7 +23,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   253 个测试
+└── tests/                   266 个测试
 ```
 
 ## 快速开始
@@ -93,6 +94,68 @@ macOS 没有原生 XDG 位置，而为了算一个「按平台正确」的路径
 
 第三条出路（在新位置全新开一个）**必须可达**，因为旧库存在时连 `init` 也会被拒——所以那条消息把
 它写了出来，并有一条测试断言那句话是真的。
+
+### 接一个 agent：一段生成的 prompt + 一份契约
+
+```sh
+harness brief > /wherever/the/agent/reads/DRIVING.md   # 驱动契约，按这套安装生成
+harness adapter-contract                               # 适配器必须满足的用例（JSON）
+```
+
+**`brief` 是生成的，不是手写的**，因为手写的那份如实漂了：两天之内它写着一个已经搬走的状态库
+位置、一张少一档的退出码表、一条只在一台机器上成立的路径、以及两个都不对的计数。而它旁边的
+`CAPABILITIES.md` 有 4 条测试守着、始终正确——**唯一没有守卫的那份就是烂掉的那份**。
+
+凡是引擎自己知道的，现在都派生：真实存在的子命令、真实的退出码、三个环境变量、可路由的 flow
+及其 `when:`、以及 **hook 的 `matcher` 该覆盖哪些工具**（此前要人手写一段 heredoc 去算）。
+
+**并且它按安装裁剪**：小节只在已装 flow 真的用到那个机制时才渲染。本树 17 节；一个只有 gates
+的单 flow 安装 8 节。这不是为了短——**agent 读到的每一段用不上的机械，都是花掉的预算，也让
+真正适用的那几段更难找到**。
+
+不可派生的只有 6 条判断规则（记录不等于做完 · 背书要两轮 · 引用人的原话 · 不要预载全部散文 ·
+挡住你的 spec 不是要改的 spec · 没有东西强迫你开 run）。它们作为**数据**住在 `engine/brief.py`
+里，于是**纯净性守卫会扫到它们**——一条只能用某个消费方的词汇讲出来的规则会被那道扫描打红，
+所以能活下来的规则就是对每个消费方都成立的规则。
+
+签入的 `integrations/DRIVING.md` 由 `--portable` 生成（占位路径，不带任何一台机器的绝对路径），
+并有一条测试断言它与命令输出**逐字节一致**。它不能漂。
+
+#### 换一个 agent 运行时：发布用例，不生成代码
+
+适配器天生一个方言一份、语言各异（一个是读 stdin 的 python hook，另一个是某个类型化运行时的
+插件），**代码生成不了；但它必须满足的用例可以发布**。`adapter-contract` 给出三段：
+
+| | 内容 |
+|---|---|
+| `translation` | 引擎退出码 → allow/block，5 条。**只有 BLOCKED 变成拦** |
+| `resilience` | 输入非 JSON / 无工具名 / 引擎缺失 / 调用超时 / 适配器自身崩溃 —— 5 条全部放行，其中「引擎缺失」还必须**在 stderr 说出来** |
+| `end_to_end` | 从已装 flow 派生的真实 action / gate 步骤 / 工具 / 正则 |
+
+`end_to_end` 如实标着「载荷要你自己构造」：**一个匹配任意正则的字符串没法从正则反推**，而一个
+碰巧不匹配的假载荷会让用例通过却什么都没证明。承认交不出的那一半，比交一个看起来完整的空壳好。
+
+这些用例**不是摆设**——本引擎自己的适配器测试就在迭代它们，用一个按码退出的桩引擎把「翻译」
+这一件事单独隔出来验。
+
+### 已经发生过什么：`history`
+
+关掉一条 run 从来不删任何东西，但此前**没有任何命令列出它们**——账本完整而不可读，对一份记录
+来说等于不存在。
+
+```sh
+harness history                      # 结束的 run：结果 / 步数 / gate 数 / violation / 欠的义务 / actor
+harness history --actor <name>       # 某个 driver 的
+harness history --actors             # 跨 agent 的一个地方：各自多少 run、多少 violation
+```
+
+`--actor` 的过滤**在 SQL 里**而不是取回后再筛：先取最新 N 条再丢掉别人的，得到的是「最新 N 条里
+属于他的」，而不是「他的最新 N 条」。有一条测试专门把数据摆成「过滤在 limit 之后就什么都返回
+不了」的形状。
+
+`audit` 的 violation 行也带上了 actor——**记了却没有任何地方报，就是声明了没人读**。而 scope 级
+的那种（`guard_unadjudicated`，不属于任何 run）**不会被归给任何 driver**，这也有一条测试钉住：
+它属于一个 scope，那正是它一开始就不带 run 记录的原因。
 
 ### ability 装在哪：`HARNESS_ABILITIES_PATH`
 
@@ -377,17 +440,17 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 253 passed
+python3 -m pytest tests/ -q      # 266 passed
 ```
 
 分两类：
 
-- `test_engine_purity.py`（39）—— **结构性不变量**。引擎源码里不许有 step id 形态的
+- `test_engine_purity.py`（42）—— **结构性不变量**。引擎源码里不许有 step id 形态的
   token、不许有能力专有名词、不许有能力词汇当标识符、不许 import 或硬编码路径进 abilities、
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（214）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（224）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
