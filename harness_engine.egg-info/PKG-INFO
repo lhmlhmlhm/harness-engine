@@ -1,3 +1,45 @@
+Metadata-Version: 2.4
+Name: harness-engine
+Version: 0.1.0
+Summary: A flow engine that knows nothing about any domain it drives.
+Author-email: haoming lang <langhaom@amazon.com>
+License: MIT License
+        
+        Copyright (c) 2026 haoming lang
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Project-URL: Homepage, https://github.com/haomingl/harness-engine
+Keywords: workflow,state-machine,agent,enforcement
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Software Development :: Build Tools
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: PyYAML>=6
+Dynamic: license-file
+
 # harness-engine
 
 一个通用的 **agent 流程注册/强制** 引擎。你用 YAML 声明一条流程，换回来一组**会拒绝**的命令，
@@ -8,12 +50,9 @@
 
 ```
 harness-engine/
-├── pyproject.toml           打包（唯一外部依赖：PyYAML）
-├── LICENSE                  MIT
 ├── bin/harness              入口（8 行，行为全在 engine/）
 ├── engine/                  【基座】不含任何能力词汇
-│   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
-│   ├── schema.sql           9 表，引擎自己拥有
+│   ├── schema.sql           5 表 1 视图，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
 │   ├── predicates.py        完成谓词注册表（= 扩展点）
@@ -22,7 +61,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   253 个测试
+└── tests/                   246 个测试
 ```
 
 ## 快速开始
@@ -34,65 +73,6 @@ harness-engine/
 ./bin/harness next --run <id>                         # 下一步 + 它的 directive
 ./bin/harness close-step --run <id> --step C01         # 关一步（不满足则 exit 3）
 ```
-
-### 安装
-
-```sh
-pip install harness-engine        # 装出一个 `harness` 命令
-export HARNESS_ABILITIES_PATH=/path/to/your/flows
-harness init
-```
-
-**装出来的东西里没有任何 flow，这是刻意的。** `abilities/` 不进包：树里那两条是测试夹具
-（`role: fixture`），而消费方的 flow 是消费方的——把任何一边塞进包里，就是往一个「核心主张是自己
-不含领域」的基座里放进一个领域。所以全新安装会如实说「一个都没装」，并等你指出自己的树在哪。
-
-**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 253 个测试在 3.10.16 上跑过并全绿，
-所以下限写 3.10。它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
-声明一个未经测试的下限，和引擎在别处拒绝的「不可证伪声称」是同一件事。
-
-三个环境变量，全部在**调用时**解析：
-
-| | |
-|---|---|
-| `HARNESS_ABILITIES_PATH` | flow 的根，`os.pathsep` 分隔，**替换**默认而非并集 |
-| `HARNESS_STATE_DIR` | 状态库的位置 |
-| `HARNESS_ACTOR` | 记进 run 的调用方标识，**仅供诊断，绝不参与隔离** |
-
-#### 状态库的默认位置在引擎之外
-
-```
-$XDG_STATE_HOME/harness-engine/harness.db
-（未设时）~/.local/state/harness-engine/harness.db
-```
-
-**曾经的默认是 `<engine>/../state`，那对开发引擎的人合适，对其他所有人都是错的**：装进
-site-packages 之后那个目录常常不可写，而在它可写的地方，它把用户的 run 台账放进了一个**下次升级
-就会被替换**的包目录里。一个把消费方数据存在自己安装目录里的基座，不是一个可安装的基座。
-
-`XDG_STATE_HOME` 正是规范给这类数据的答案：跨运行持久、不是配置、也不是可被随意删除的缓存。
-macOS 没有原生 XDG 位置，而为了算一个「按平台正确」的路径去引入一个依赖，对一个**唯一外部依赖是
-一个 YAML 解析器**的基座是错的交换——所以到处用同一条规则，不同意的人有环境变量。
-
-**而默认位置搬家时，旧位置上已有的库会被大声拒绝，不会被静默孤立**：
-
-```
-⛔ a store exists at the OLD default location and would now be ignored:
-  old: <engine>/state
-  new: ~/.local/state/harness-engine
-  Pick one, explicitly:
-    keep using it    ->  export HARNESS_STATE_DIR=<old>
-    move it across   ->  mkdir -p <new> && mv <old>/harness.db* <new>/
-    start fresh here ->  HARNESS_STATE_DIR=<new> harness init
-```
-
-两个替代方案都更糟：读旧的，这次搬家就是个空操作；读新的，则**每次查询都会像那些被记录的 run
-从未发生过一样作答**。它只在**没人说过库在哪**（没有覆盖）且**确实有东西可丢**（旧位置有库、新位置
-没有）时触发——这两条同时成立只描述一种情形：一个早于这次搬家的源码检出，而那也正是唯一能处理它的
-听众。打包安装的消费方没有那个目录，因此永远看不到它。
-
-第三条出路（在新位置全新开一个）**必须可达**，因为旧库存在时连 `init` 也会被拒——所以那条消息把
-它写了出来，并有一条测试断言那句话是真的。
 
 ### ability 装在哪：`HARNESS_ABILITIES_PATH`
 
@@ -377,7 +357,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 253 passed
+python3 -m pytest tests/ -q      # 246 passed
 ```
 
 分两类：
@@ -387,7 +367,7 @@ python3 -m pytest tests/ -q      # 253 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（214）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（207）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-engine"
+description = "A flow engine that knows nothing about any domain it drives."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "haoming lang", email = "langhaom@amazon.com" }]
+keywords = ["workflow", "state-machine", "agent", "enforcement"]
+
+# VERIFIED, NOT GUESSED. The whole suite was run on 3.10.16 and passed 246/246, which is why
+# the floor says 3.10 and not something safer-sounding. Nothing below it has been exercised —
+# lowering this means running the suite there first, not editing this line. Declaring an
+# untested floor would be the same unfalsifiable claim the engine refuses everywhere else.
+requires-python = ">=3.10"
+
+# The engine's ENTIRE external surface. Everything else it imports is stdlib, and a test walks
+# every import in `engine/` and fails if one of them is not listed here — packaging that leaves
+# out a real dependency is the classic defect nobody notices until a fresh machine.
+dependencies = ["PyYAML>=6"]
+
+dynamic = ["version"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+harness = "engine.harness:main"
+
+[project.urls]
+Homepage = "https://github.com/haomingl/harness-engine"
+
+[tool.setuptools]
+# ONLY the engine. `abilities/` is deliberately excluded: the two flows shipped in the tree are
+# test scaffolding (`role: fixture`), and a consumer's flows are its own — bundling either would
+# put a domain inside a base whose central claim is that it has none. A fresh install therefore
+# has zero flows installed and says so; point HARNESS_ABILITIES_PATH at your own tree.
+packages = ["engine"]
+
+[tool.setuptools.package-data]
+# schema.sql is read at RUNTIME by init(), not compiled in. Leaving it out of the wheel produces
+# an install that imports fine and dies on first use, which is why a test asserts this entry.
+engine = ["schema.sql"]
+
+[tool.setuptools.dynamic]
+version = { attr = "engine.__version__" }

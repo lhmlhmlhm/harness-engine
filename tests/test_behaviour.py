@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -5360,3 +5361,211 @@ def test_a_defect_in_the_argument_parser_cannot_escape_as_a_bare_one(monkeypatch
 
     monkeypatch.setattr(h, "build_parser", boom)
     assert h.main(["status"]) == INTERNAL
+
+
+# ------------------------------------------------- installable: metadata and dependencies
+
+PYPROJECT = REPO / "pyproject.toml"
+
+
+def _pyproject_text() -> str:
+    return PYPROJECT.read_text(encoding="utf-8")
+
+
+def _declared_dependencies() -> list[str]:
+    """Read the dependency array out of pyproject by text, on purpose.
+
+    NOT tomllib: that is 3.11+, and the verified floor is 3.10. A guard that skips on the floor
+    version is a hole exactly where it matters most — the oldest interpreter anyone is told they
+    may use is the one most likely to be missing something. The file is ours and the pattern is
+    anchored, so the failure mode is a loud non-match rather than a quiet mis-parse.
+    """
+    m = re.search(r"^dependencies\s*=\s*\[(.*?)\]", _pyproject_text(), re.S | re.M)
+    assert m, "pyproject no longer has an anchored `dependencies = [...]` array"
+    return re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
+
+
+def _engine_imports() -> set[str]:
+    tops: set[str] = set()
+    for path in (REPO / "engine").glob("*.py"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+            if m:
+                tops.add(m.group(1))
+    return tops - {"__future__", "engine"}
+
+
+def test_every_non_stdlib_import_in_the_engine_is_a_declared_dependency():
+    """The packaging defect nobody notices until a fresh machine.
+
+    An import that works here because it happens to be installed, and is not in the dependency
+    list, produces a wheel that imports fine on the author's machine and fails on everyone
+    else's. Asserted by walking the imports rather than by reading the list, so adding an import
+    is what triggers it — the direction that actually happens.
+
+    An import that maps to no installed distribution fails too: it is either undeclared or not
+    installed, and both are worth stopping on.
+    """
+    import sys as _s
+    from importlib.metadata import packages_distributions
+
+    declared = {re.split(r"[<>=!~\[]", d, 1)[0].strip().lower().replace("_", "-")
+                for d in _declared_dependencies()}
+    assert declared, "no dependencies declared at all — the array parse is probably wrong"
+
+    mapping = packages_distributions()
+    outside = sorted(m for m in _engine_imports() if m not in _s.stdlib_module_names)
+    assert outside, "no non-stdlib import found; this test would be vacuous"
+    for mod in outside:
+        dists = mapping.get(mod)
+        assert dists, f"import {mod!r} maps to no installed distribution"
+        assert any(d.lower().replace("_", "-") in declared for d in dists), (
+            f"engine imports {mod!r} (from {dists}) and pyproject does not declare it; "
+            f"declared: {sorted(declared)}"
+        )
+
+
+def test_the_version_has_exactly_one_source():
+    """A hardcoded version in pyproject is a second place to forget."""
+    text = _pyproject_text()
+    assert 'dynamic = ["version"]' in text, text[:200]
+    assert 'attr = "engine.__version__"' in text
+    # The dynamic table legitimately starts with `version =`; what must not exist is a LITERAL.
+    assert not re.search(r'^version\s*=\s*["\']', text, re.M), \
+        "pyproject pins a literal version as well as reading it from the package"
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    import engine
+    assert re.fullmatch(r"\d+\.\d+\.\d+", engine.__version__), engine.__version__
+
+
+def test_the_schema_is_shipped_as_package_data():
+    """init() reads schema.sql at runtime, so omitting it produces an install that imports
+    fine and dies the first time anyone uses it — a failure no import-level check would see."""
+    assert (REPO / "engine" / "schema.sql").is_file()
+    assert re.search(r'^engine\s*=\s*\[[^\]]*"schema\.sql"', _pyproject_text(), re.M), \
+        "schema.sql is not declared in [tool.setuptools.package-data]"
+
+
+def test_the_console_script_names_something_that_exists():
+    """A rename here breaks every installed copy while the source tree keeps working,
+    because the tree runs bin/harness and an install runs the entry point."""
+    m = re.search(r'^harness\s*=\s*"([^:"]+):([^"]+)"', _pyproject_text(), re.M)
+    assert m, "no `harness = \"module:function\"` entry point"
+    module, func = m.groups()
+    import importlib
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    assert callable(getattr(importlib.import_module(module), func))
+
+
+# The clause that makes each licence that licence. A file can be long, well-formatted and not
+# actually grant anything, so length proves nothing — this is what has to be present.
+LICENCE_GRANTS = {
+    "MIT": "Permission is hereby granted, free of charge",
+    "Apache": "Licensed under the Apache License, Version 2.0",
+    "BSD": "Redistribution and use in source and binary forms",
+}
+
+
+def test_the_license_file_is_the_license_the_project_claims():
+    """Two places state the licence, so they are cross-checked against each other.
+
+    A length assertion was the first version of this and it was empty: gutting the grant clause
+    left a file well over any threshold, and the test stayed green. What matters is that the
+    classifier and the file agree, and that the file contains the clause that DOES the granting
+    — a licence naming itself MIT while granting nothing is the failure worth catching.
+    """
+    text = (REPO / "LICENSE").read_text(encoding="utf-8")
+    pyproject = _pyproject_text()
+    assert 'license = { file = "LICENSE" }' in pyproject
+
+    m = re.search(r'"License :: OSI Approved :: (\S+)[^"]*"', pyproject)
+    assert m, "no OSI licence classifier to check the file against"
+    claimed = m.group(1)
+    assert claimed in LICENCE_GRANTS, (
+        f"classifier claims {claimed!r}; add its grant clause to LICENCE_GRANTS so the file "
+        f"can be checked rather than assumed"
+    )
+    assert LICENCE_GRANTS[claimed] in text, (
+        f"pyproject classifies this as {claimed} and LICENSE does not contain its grant clause"
+    )
+    assert claimed.lower() in text.lower().split("\n")[0], \
+        f"LICENSE's first line does not name {claimed}"
+    assert re.search(r"Copyright \(c\) \d{4}", text), "no copyright line with a year"
+
+
+# ------------------------------------------------- where the store lives by default
+
+def test_the_default_store_is_outside_the_engines_own_directory(monkeypatch, tmp_path):
+    """A base that keeps a consumer's data inside its own installation is not installable.
+
+    site-packages is frequently unwritable, and where it is writable the next upgrade replaces
+    the directory — taking the run ledger with it.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import store as st
+
+    monkeypatch.delenv("HARNESS_STATE_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    got = st.state_dir()
+    assert got == tmp_path / "home" / ".local" / "state" / "harness-engine", got
+    assert REPO not in got.parents and got != REPO
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    assert st.state_dir() == tmp_path / "xdg" / "harness-engine"
+
+    monkeypatch.setenv("HARNESS_STATE_DIR", "~/somewhere")
+    assert st.state_dir() == Path.home() / "somewhere", "the override must expand ~"
+
+
+def test_a_store_left_at_the_old_default_is_refused_not_orphaned(monkeypatch, tmp_path):
+    """Moving the default silently would answer every query as if the runs never happened.
+
+    Both alternatives to refusing are worse: reading the old location makes the move a no-op,
+    and reading the new one loses a recorded history without saying so. So it stops and names
+    both paths plus the two ways out.
+
+    Only fires when NOBODY said where the store is and there is something to lose — a packaged
+    install has no such directory, so a consumer never sees it.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import store as st
+
+    assert st.LEGACY_STATE_DIR == st.REPO_ROOT / "state", "the old location moved; re-point this"
+
+    legacy, now = tmp_path / "old", tmp_path / "new"
+    legacy.mkdir()
+    (legacy / "harness.db").write_bytes(b"")
+    monkeypatch.setattr(st, "LEGACY_STATE_DIR", legacy)
+    monkeypatch.delenv("HARNESS_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(now))
+
+    with pytest.raises(st.StoreStranded) as caught:
+        st.connect()
+    msg = str(caught.value)
+    assert str(legacy) in msg and str(now / "harness-engine") in msg, msg
+    assert "HARNESS_STATE_DIR=" in msg, "the message must give a runnable way out"
+    with pytest.raises(st.StoreStranded):
+        st.init()
+
+    # Saying where you want it is always an answer. (init first — the placeholder written
+    # above is an empty file, and an empty file is a store that has not been initialised.)
+    monkeypatch.setenv("HARNESS_STATE_DIR", str(legacy))
+    st.init()
+    st.connect().close()
+
+    # A fresh store at the new location is the third way out, and it has to be reachable:
+    # while the old one exists, `init` on the default is refused too, so the ONLY route is to
+    # name the destination once. The message says so; this asserts the message is true.
+    assert "start fresh here" in msg, msg
+    monkeypatch.setenv("HARNESS_STATE_DIR", str(now / "harness-engine"))
+    st.init()
+
+    # And once both exist the ambiguity is gone, so the default stops refusing.
+    monkeypatch.delenv("HARNESS_STATE_DIR")
+    assert st.db_path().parent == now / "harness-engine"
+    st.connect().close()
