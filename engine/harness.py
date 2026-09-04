@@ -78,10 +78,37 @@ def _load_flow_or_exit(ability: str) -> flowmod.Flow:
         raise SystemExit(BAD_SPEC)
 
 
-def _run_or_exit(conn, run_id: str):
+def _run_or_exit(conn, run_id: str, *, closed_ok: bool = False):
+    """Fetch a run, and refuse a WRITE to one that has already ended.
+
+    THE ENGINE HAD NO NOTION OF "THIS RUN IS FINISHED, STOP WRITING TO IT." Every write command
+    accepted a closed run: evidence appended rows to a finished ledger, gate recorded on it,
+    close-step re-closed steps, and close-run REWROTE the result — `done` became `abort` with a
+    success message, no violation, and a fresh end timestamp. `history` then showed the rewrite
+    as if it had always been the outcome. A record that can be edited afterwards, silently, is
+    not a record.
+
+    THE DEFAULT IS "MUST BE OPEN", AND THE DIRECTION IS THE POINT. Opt-in would mean the next
+    write command that forgets to ask silently appends to a finished run — the exact hole being
+    closed. This way round, a READ command that forgets refuses on a closed run, which its own
+    test catches on the first run. Loud where it is wrong beats silent where it is wrong.
+
+    Retrying an interrupted close is NOT blocked: `close-run` releases leases and then closes, so
+    a process dying between the two leaves the run OPEN, and the retry passes this check.
+    """
     row = store.get_run(conn, run_id)
     if row is None:
         _err(f"⛔ no run {run_id!r}. list them with: harness status")
+        raise SystemExit(USAGE)
+    if not closed_ok and row["status"] != "open":
+        _err(f"⛔ run {run_id!r} has ended: {row['status']}"
+             + (f" → {row['result']}" if row["result"] else "")
+             + (f" at {row['closed_at']}" if row["closed_at"] else "") + ".\n"
+             f"    NOTHING WAS CHANGED. A finished run does not accept writes — appending to it,\n"
+             f"    or closing it again with a different result, would rewrite what happened with\n"
+             f"    no trace that it had been rewritten.\n"
+             f"    Read it with:  harness status --run {run_id}\n"
+             f"    Its rows can be removed, and that removal is recorded: harness purge-run")
         raise SystemExit(USAGE)
     return row
 
@@ -237,7 +264,15 @@ def cmd_abilities(args) -> int:
                 "optional_steps": sum(1 for st in f.steps.values() if st.optional),
                 "gated_steps": sum(1 for st in f.steps.values()
                                    if st.gate != flowmod.GATE_NONE),
-                "guards": sorted(f.guards), "variants": list(f.variants),
+                "guards": sorted(f.guards),
+                # WHICH guards a runtime hook can actually fire. An action with no match rules is
+                # legal and deliberate — it declares a guard only an explicit caller can consult —
+                # but it is invisible to the interception path, which is the one that does not
+                # need the driver's cooperation. Reported so that difference is not something you
+                # have to read the spec to find.
+                "guard_reach": {a: ("hook" if f.guard_matches.get(a) else "ask_only")
+                                for a in sorted(f.guards)},
+                "variants": list(f.variants),
                 "requires": list(f.requires),
                 "facts_providers": list(f.facts_providers),
                 "facts": sorted(f.facts_schema),
@@ -271,8 +306,10 @@ def cmd_abilities(args) -> int:
         opt = sum(1 for s in f.steps.values() if s.optional)
         print(f"     scope={f.scope_kind}  phases={len(f.phases)}  stages={stages}"
               f"  steps={len(f.steps)} ({len(f.required_steps())} required, {opt} optional)")
+        ask_only = [a for a in sorted(f.guards) if not f.guard_matches.get(a)]
         print(f"     gated={gated}  machine-checked={checked}  guards={len(f.guards)}"
-              f"  exclusive-groups={len(f.exclusive_groups)}")
+              + (f" ({len(ask_only)} ask-only: {', '.join(ask_only)})" if ask_only else "")
+              + f"  exclusive-groups={len(f.exclusive_groups)}")
         conditional = sum(1 for h in f.hooks if h.when is not None)
         obliged = sum(1 for h in f.hooks if h.obligation)
         if f.when:
@@ -609,7 +646,7 @@ def cmd_status(args) -> int:
     conn = store.connect(read_only=True)
     try:
         if args.run:
-            row = _run_or_exit(conn, args.run)
+            row = _run_or_exit(conn, args.run, closed_ok=True)
             f = _flow_for_run(conn, row)
             done = store.closed_steps(conn, row["run_id"])
             owed_ids = [x for x in f.required_steps(row["variant"]) if x not in done]
@@ -727,7 +764,7 @@ def cmd_status(args) -> int:
 def cmd_next(args) -> int:
     conn = store.connect(read_only=True)
     try:
-        row = _run_or_exit(conn, args.run)
+        row = _run_or_exit(conn, args.run, closed_ok=True)
         f = _flow_for_run(conn, row)
         done = store.closed_steps(conn, row["run_id"])
         pending = [sid for sid in f.order
@@ -1215,7 +1252,7 @@ def cmd_show(args) -> int:
     """
     conn = store.connect(read_only=True)
     try:
-        row = _run_or_exit(conn, args.run)
+        row = _run_or_exit(conn, args.run, closed_ok=True)
         f = _flow_for_run(conn, row)
         s = f.step(args.step)
     finally:
@@ -1274,7 +1311,7 @@ def cmd_assert_goal(args) -> int:
     """
     conn = store.connect()
     try:
-        row = _run_or_exit(conn, args.run)
+        row = _run_or_exit(conn, args.run, closed_ok=True)
         f = _flow_for_run(conn, row)
         if args.phase not in f.phases:
             _err(f"⛔ ability '{row['ability']}' declares no phase '{args.phase}'.\n"
@@ -1673,7 +1710,7 @@ def cmd_discharge(args) -> int:
 def cmd_obligations(args) -> int:
     conn = store.connect(read_only=True)
     try:
-        row = _run_or_exit(conn, args.run)
+        row = _run_or_exit(conn, args.run, closed_ok=True)
         rows = store.all_obligations(conn, row["run_id"])
         data = {"run": row["run_id"], "obligations": [
             {**d, "facts": json.loads(d.pop("facts_json") or "{}"),
@@ -1718,7 +1755,7 @@ def cmd_evidence(args) -> int:
 def cmd_config(args) -> int:
     conn = store.connect()
     try:
-        row = _run_or_exit(conn, args.run)
+        row = _run_or_exit(conn, args.run, closed_ok=not args.set)
         f = _flow_for_run(conn, row)
         meta = json.loads(row["metadata_json"] or "{}")
         cfg = meta.setdefault("config", {})
@@ -1924,6 +1961,7 @@ def _render_brief(portable: bool) -> str:
     caps: set[str] = set()
     guard_tools: set[str] = set()
     example_step: str | None = None
+    ask_only_guards: list = []
     widest = -1
     for name in flowmod.available_abilities():
         try:
@@ -1933,6 +1971,14 @@ def _render_brief(portable: bool) -> str:
         caps |= set(flowmod.capabilities_used(f))
         for rules in f.guard_matches.values():
             guard_tools |= {r["tool"] for r in rules}
+        # Collected at the SAME level as the tool list above, and deliberately not below the
+        # routable filter: the interception path iterates every open run whatever its role, so a
+        # fixture's guarded actions are as real to a hook as a production flow's. Listing one
+        # kind of declaration and hiding the other would make the tool list read as the complete
+        # guarded surface, which is exactly what it is not.
+        for action in sorted(f.guards):
+            if not f.guard_matches.get(action):
+                ask_only_guards.append((name, action))
         if f.role != flowmod.ROLE_PRODUCTION:
             continue
         routable.append((name, f.when.strip().splitlines()[0] if f.when else ""))
@@ -1959,6 +2005,7 @@ def _render_brief(portable: bool) -> str:
         guard_tools=sorted(guard_tools),
         example_step=example_step,
         required=() if portable else policy.read(),
+        ask_only_guards=tuple(ask_only_guards),
     )
 
 

@@ -197,3 +197,13 @@ TaskeiCreateTask
 TaskeiUpdateTask
 shell
 ```
+
+Not every guarded action is in that list. These are declared with no way for a
+hook to recognise them in a tool call, so they are only ever checked when a caller
+ASKS — `harness guard` — which means they depend on the driver choosing to ask:
+
+```sh
+delivery  close_task
+delivery  commit
+delivery  publish
+```

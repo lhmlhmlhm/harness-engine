@@ -7270,3 +7270,172 @@ def test_unwitnessed_gates_are_counted_against_the_gates_not_the_runs(env, tmp_p
     assert "WITHOUT a witness" in text
     assert "not the runs that reached it" in text, \
         "the relationship between the two sections must be stated, or one finding is counted twice"
+
+
+# ------------------------------------------------- a finished run does not accept writes
+
+_LEDGER_TABLES = ("run", "step_log", "gate", "evidence", "violation", "obligation",
+                  "phase_summary", "scope_lease")
+
+
+def _ledger_fingerprint(env) -> str:
+    """A digest over every ledger table, so "nothing was changed" is checkable as one value."""
+    import hashlib
+    import sqlite3
+    h = hashlib.sha256()
+    conn = sqlite3.connect(str(Path(env["HARNESS_STATE_DIR"]) / "harness.db"))
+    try:
+        for t in _LEDGER_TABLES:
+            for row in conn.execute(f"SELECT * FROM {t}"):
+                h.update(repr(row).encode())
+    finally:
+        conn.close()
+    return h.hexdigest()
+
+
+def _closed_run(env) -> str:
+    """A run taken all the way to closed, with a real record behind it."""
+    assert rc(["open", "authoring", "--scope", "doc/x", "--run", "fin"], env) == OK
+    assert rc(["close-step", "--run", "fin", "--step", "A1"], env) == OK
+    assert rc(["close-run", "--run", "fin", "--result", "done",
+               "--force-steps", "--force-obligations"], env) == OK
+    return "fin"
+
+
+@pytest.mark.parametrize("argv", [
+    ["enter", "--step", "B1"],
+    ["evidence", "--step", "B1", "--kind", "section", "--value", "late"],
+    ["close-step", "--step", "A1"],
+    ["gate", "--step", "D2", "--decision", "affirm", "--evidence", "late"],
+    ["summarize", "--phase", "gather", "--note", "late"],
+    ["skip", "--step", "A1", "--reason", "late"],
+    ["discharge", "--hook", "h", "--evidence", "late"],
+    ["config", "--set", "k=v"],
+    ["close-run", "--result", "abort"],
+], ids=lambda a: a[0] + ("-set" if "--set" in a else ""))
+def test_a_finished_run_does_not_accept_writes(env, argv):
+    """The engine had no notion of "this run is over". Every write command took a closed one.
+
+    Measured before fixing, on a run that had already been closed: `evidence` appended rows to a
+    finished ledger, `gate` recorded on it, `close-step` re-closed steps, `summarize` re-summarised
+    — and `close-run` REWROTE the result. `done` became `abort` with a success message, no
+    violation, and a fresh end timestamp, after which `history` showed the rewrite as if it had
+    always been the outcome. A record that can be edited afterwards, silently, is not a record.
+
+    Asserted per command AND as a whole-ledger digest, because "it refused" and "it changed
+    nothing" are two claims and only the second is the one that matters.
+    """
+    run_id = _closed_run(env)
+    before = _ledger_fingerprint(env)
+
+    out = run([argv[0], "--run", run_id, *argv[1:]], env)
+    assert out.returncode == USAGE, out.stdout + out.stderr
+    assert "has ended" in out.stderr, out.stderr
+    assert "NOTHING WAS CHANGED" in out.stderr
+    # It must point at the two things that ARE possible, so the refusal is not a dead end.
+    assert "harness status --run" in out.stderr
+    assert "purge-run" in out.stderr
+
+    assert _ledger_fingerprint(env) == before, \
+        f"{argv[0]} was refused and still changed the ledger"
+
+
+def test_the_recorded_result_of_a_finished_run_is_not_rewritable(env):
+    """The sharpest form of it: the outcome itself, replaced, with a success message.
+
+    Kept as its own test rather than folded into the table above, because the table asserts "the
+    ledger is unchanged" while this asserts WHICH fact was at stake — a reader of `history` was
+    being shown `abort` for a run that finished `done`.
+    """
+    run_id = _closed_run(env)
+    out = run(["close-run", "--run", run_id, "--result", "abort"], env)
+    assert out.returncode == USAGE
+    assert "✅" not in out.stdout, "it reported success for something it did not do"
+
+    hist = json.loads(run(["history", "--json"], env).stdout)
+    rows = [r for r in hist["runs"] if r["run_id"] == run_id]
+    assert len(rows) == 1 and rows[0]["result"] == "done", rows
+
+
+def test_reading_a_finished_run_still_works(env):
+    """The check defaults to "must be open", so every READ command has to opt out explicitly.
+
+    That direction is deliberate: a new WRITE command that forgets would silently append to a
+    finished run, while a new READ command that forgets refuses here and fails its own test at
+    once. This pins the readers so the opt-outs cannot be dropped by accident.
+    """
+    run_id = _closed_run(env)
+    for argv in (["status"], ["next"], ["obligations"], ["show", "--step", "A1"],
+                 ["assert-goal", "--phase", "gather"], ["config"]):
+        out = run([argv[0], "--run", run_id, *argv[1:]], env)
+        assert out.returncode == OK, (argv, out.stderr)
+        assert "has ended" not in out.stderr, argv
+
+
+# ------------------------------------------------- a guard a hook cannot see must say so
+
+def test_no_shipped_production_flow_relies_on_an_ask_only_guard(env):
+    """NOT forbidden — measured. And measuring it is the point.
+
+    `action: STEP` is the original guard form and stays legal: it declares a guard only an
+    explicit caller can consult, which is the ONLY possible mechanism for an action no tool call
+    has a signature for (something a human does in a UI the driver never touches).
+
+    But for a production flow it means a guard that fires only when the driver volunteers to ask
+    — protection that depends on the protected party's cooperation. None of the shipped production
+    flows currently relies on that, and this pins it so the first one that does is a decision
+    somebody makes rather than a drift nobody sees.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+
+    ask_only = []
+    for name in fl.available_abilities():
+        f = fl.load(name)
+        for action in sorted(f.guards):
+            if not f.guard_matches.get(action):
+                ask_only.append((name, f.role, action))
+
+    in_production = [(n, a) for n, role, a in ask_only if role == fl.ROLE_PRODUCTION]
+    assert not in_production, (
+        f"a production flow declares a guard a runtime hook can never fire: {in_production}. "
+        f"Either give it `matches`, or say here why asking is the only possible mechanism.")
+    # The fixture ones are expected: they are what keeps the short form exercised at all.
+    assert ask_only, "nothing exercises the ask-only form; it would be an untested spec shape"
+
+
+def test_a_guard_a_hook_cannot_fire_is_reported_not_hidden(env, tmp_path):
+    """The tool list is not the guarded surface, and read as one it overstates the cover.
+
+    `brief` lists the TOOLS a hook must match. A guarded action with no match rules contributes
+    none, so it was invisible in the contract — and a reader would conclude the hook covers
+    everything guarded. `abilities` had the same gap.
+    """
+    d = json.loads(run(["abilities", "--json"], env).stdout)
+    reach = {a["ability"]: a.get("guard_reach") or {} for a in d["abilities"]}
+    assert reach["delivery"] == {"close_task": "ask_only", "commit": "ask_only",
+                                 "publish": "ask_only"}, reach["delivery"]
+    assert set(reach["shipcheck-asis"].values()) == {"hook"}, reach["shipcheck-asis"]
+
+    body = run(["brief"], env).stdout
+    assert "Not every guarded action is in that list" in body
+    assert "delivery  commit" in body
+    assert "depend on the driver choosing to ask" in body
+
+    # And the TEXT form of `abilities` marks it, which only shows for a non-fixture — so this
+    # builds one, because the shipped flows deliberately have none.
+    root = tmp_path / "outside"
+    p = root / "askonly"
+    p.mkdir(parents=True)
+    (p / "flow.yaml").write_text(
+        "version: 2\nability: askonly\ntitle: T\n"
+        "when: reach for this one when a guarded action has no tool-call signature at all\n"
+        "uses: [guards, gates]\nscope_kind: s\n"
+        "guards:\n  publish: W01\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n    title: The gate\n    gate: affirm\n"
+        "    completion: {type: gate_recorded}\n    directive: Ask.\n", encoding="utf-8")
+    out = run(["abilities"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == OK, out.stderr
+    assert "1 ask-only: publish" in out.stdout, out.stdout

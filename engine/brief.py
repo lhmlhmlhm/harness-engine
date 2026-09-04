@@ -205,6 +205,7 @@ def render(
     guard_tools: list[str],
     example_step: str | None,
     required: tuple = (),
+    ask_only_guards: tuple = (),
 ) -> str:
     """Assemble the brief. Every argument is a fact the caller read off the engine."""
     out: list[str] = []
@@ -338,5 +339,14 @@ def render(
         a("")
         a(_fence(sorted(guard_tools)))
         a("")
+        if ask_only_guards:
+            # The list above is TOOLS. A guarded action with no match rules contributes none, so
+            # without this the list reads as the whole guarded surface and it is not.
+            a("Not every guarded action is in that list. These are declared with no way for a")
+            a("hook to recognise them in a tool call, so they are only ever checked when a caller")
+            a("ASKS — `harness guard` — which means they depend on the driver choosing to ask:")
+            a("")
+            a(_fence([f"{ability}  {action}" for ability, action in sorted(ask_only_guards)]))
+            a("")
 
     return "\n".join(out).rstrip() + "\n"

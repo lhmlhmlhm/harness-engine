@@ -26,7 +26,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   346 个测试
+└── tests/                   359 个测试
 ```
 
 ## 快速开始
@@ -230,6 +230,58 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### 已结束的 run 不接受写入
+
+跑一遍完整流程时发现的：引擎**没有「这个 run 已经结束，别再往里写」这个概念**。对一个已关闭的
+run 发写命令，全部成功：
+
+```
+enter        -> 0  ▶ entered A1
+evidence     -> 0  ✅ evidence recorded          ← 往一个已结束的账本里追加行
+close-step   -> 0  ✅ closed A1
+gate         -> 0  ✅ gate D2 = affirm
+summarize    -> 0  ✅ summarized phase 'gather'
+close-run    -> 0  ✅ closed run w1 → abort      ← 把 result 从 done 改成了 abort
+```
+
+最尖锐的是最后一条：`done` 变成 `abort`，**带一条成功消息、没有 violation、结束时间戳刷新**，之后
+`history` 显示 `abort` 就像它一直如此。**一份事后能被静默编辑的记录不是记录。**
+
+修法是**一处检查，在共享入口**（`_run_or_exit`），而**默认是「必须 open」，读命令显式豁免**：
+
+| 方向 | 一个新命令忘了处理时 |
+|---|---|
+| opt-in（写命令要主动要求检查） | **静默**往已结束的 run 里写 —— 正是要堵的洞 |
+| **默认要求 open**（读命令主动豁免） | 新的读命令在已关闭 run 上被拒 → **它自己的测试立刻红** |
+
+**吵在错的地方胜过静在错的地方**，所以选后者。
+
+**不会挡住正当重试**：`close-run` 先释放 lease 再关闭，进程若崩在两者之间，run **仍是 open**，重试
+照样通过这道检查。
+
+拒绝用 exit 1（USAGE，与 `open` 遇到重复 run id 的先例一致），并指出两条真正可行的路：`status` 读它，
+或 `purge-run` 删它的行（而删除是有记录的）。测试除了断言「被拒绝」，还对**整个账本取指纹**断言
+「一字未变」——「它拒绝了」和「它什么都没改」是两个声明，只有第二个才是要紧的那个。
+
+### 有些 guard 是 hook 永远看不见的，而这件事此前不可见
+
+`guards` 有两种形式，短形式 `action: STEP` 是**刻意保留**的：它声明一个**只有主动询问才能查到**的
+guard，而那是某些动作唯一可能的机制（人在一个 driver 根本不碰的 UI 里点的发布）。所以它**不该被
+载入期拒绝**——拒绝会误伤一个正当情形。
+
+但它此前在两个该显示它的地方都不可见：
+
+- `harness brief` 那节列的是**工具**（从 `matches` 推导），零匹配规则的动作贡献不了工具 → 读者会
+  把工具清单当成全部受守面
+- `harness abilities` 只报 guard 的**数量**
+
+现在两处都报：`abilities --json` 加 `guard_reach`（`hook` / `ask_only`），文本形态标注
+`(1 ask-only: publish)`，契约里加一句「Not every guarded action is in that list」并列出它们。
+
+**穷尽核实过：5 个生产 flow 的 11 个 guard 动作全部可经 hook 触发；3 个仅可主动询问的都在 fixture
+`delivery` 里。** 有测试钉住这个状态——不是禁止，是让第一个依赖它的生产 flow 成为**某人做的决定**，
+而不是一次没人看见的漂移。
 
 ### 账本终于能被问「这里最常出什么问题」
 
@@ -791,7 +843,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 346 passed
+python3 -m pytest tests/ -q      # 359 passed
 ```
 
 分两类：
@@ -801,7 +853,7 @@ python3 -m pytest tests/ -q      # 346 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（274）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（287）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
