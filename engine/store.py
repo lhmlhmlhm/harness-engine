@@ -848,3 +848,67 @@ def actor_totals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         "        COALESCE((SELECT n FROM vio WHERE vio.actor = t.actor), 0) AS violations"
         " FROM tagged t GROUP BY t.actor ORDER BY runs DESC, actor"
     ).fetchall()
+
+
+def recurring_violations(conn) -> list[dict]:
+    """Violations grouped ACROSS runs, each with the population it happened out of.
+
+    `audit` groups by (run_id, step_id, code), which answers "what went wrong in THIS run" and
+    cannot answer "what keeps going wrong here" — the records for the second were already being
+    kept and simply never asked for.
+
+    A COUNT WITHOUT A DENOMINATOR IS A NUMBER THAT INVITES THE WRONG CONCLUSION. "12 times" reads
+    as a lot next to 200 runs and as total failure next to 12, so every row carries the population
+    it is out of: for a step, how many runs ever touched that step; for a violation with no step,
+    how many runs of that flow exist at all. The two are different questions and neither can
+    stand in for the other.
+
+    A run whose rows were purged is not in the population — the ledger is what is left, not what
+    ever happened, and `purge_log` is where the removals are recorded.
+    """
+    # Plain dicts, not the sqlite3.Row this module returns everywhere else: its sibling below
+    # must build them in python, and two aggregates of one subject returning two different shapes
+    # is how a caller ends up handling only one of them.
+    return [dict(r) for r in conn.execute(
+        "WITH touched AS ("
+        "  SELECT r.ability AS ability, s.step_id AS step_id,"
+        "         COUNT(DISTINCT s.run_id) AS runs"
+        "  FROM step_log s LEFT JOIN run r ON r.run_id = s.run_id"
+        "  GROUP BY r.ability, s.step_id"
+        "), per_ability AS ("
+        "  SELECT ability, COUNT(*) AS runs FROM run GROUP BY ability"
+        ")"
+        " SELECT COALESCE(r.ability, '(unattributed)') AS ability, v.step_id, v.code,"
+        "        COUNT(DISTINCT v.run_id) AS runs, COUNT(*) AS total,"
+        "        COALESCE(t.runs, p.runs) AS population"
+        " FROM violation v"
+        " LEFT JOIN run r ON r.run_id = v.run_id"
+        " LEFT JOIN touched t ON t.ability = r.ability AND t.step_id = v.step_id"
+        " LEFT JOIN per_ability p ON p.ability = r.ability"
+        " GROUP BY r.ability, v.step_id, v.code"
+        " ORDER BY runs DESC, total DESC, r.ability, v.step_id"
+    ).fetchall()]
+
+
+def recurring_unwitnessed_gates(conn) -> list[dict]:
+    """Gates grouped ACROSS runs by how often they were recorded with no witness.
+
+    Counted in python rather than in SQL for one reason: `cmd_audit` already decides what
+    "witnessed" means by reading the proof, and two places deciding that with different rules —
+    one of them SQL's JSON truthiness — is how the two answers drift apart.
+    """
+    rows = conn.execute(
+        "SELECT COALESCE(r.ability, '(unattributed)') AS ability, g.step_id, g.proof_json"
+        " FROM gate g LEFT JOIN run r ON r.run_id = g.run_id"
+    ).fetchall()
+    tally: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = (row["ability"], row["step_id"])
+        seen = tally.setdefault(key, {"ability": row["ability"], "step_id": row["step_id"],
+                                      "unwitnessed": 0, "gates": 0})
+        seen["gates"] += 1
+        if not json.loads(row["proof_json"] or "{}").get("witnessed"):
+            seen["unwitnessed"] += 1
+    out = [v for v in tally.values() if v["unwitnessed"]]
+    out.sort(key=lambda v: (-v["unwitnessed"], -v["gates"], v["ability"], v["step_id"]))
+    return out

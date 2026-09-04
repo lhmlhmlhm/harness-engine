@@ -26,7 +26,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   341 个测试
+└── tests/                   346 个测试
 ```
 
 ## 快速开始
@@ -230,6 +230,53 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### 账本终于能被问「这里最常出什么问题」
+
+`audit` 按 `(run_id, step_id, code)` 聚合——它回答「**这一个** run 里出了什么」，回答不了「这里**一直**
+在出什么」。而后者需要的记录**早就都在**，只是从来没人问过它。
+
+```sh
+harness audit --recurring          # 跨 run 聚合；--json 同样支持
+```
+
+```
+over 4 run(s) recorded here
+
+Violations, across runs:
+  ability          step     code                        runs    of  share  rows
+  aaa              W01      budget_exhausted               2     3    67%     2
+
+Gates recorded WITHOUT a witness, across runs:
+  (the same events are above as violations — these are counted against the GATES
+   recorded at the step, not the runs that reached it, which is the sharper
+   denominator for a gate: a step can be reached often and gated rarely.)
+  ability          step     unwitnessed  gates  share
+  gg               W01                2      3    67%
+```
+
+**没有分母的计数是一个会引出错误结论的数字。** 「12 次」放在 200 个 run 旁边读作「偶尔」，放在 12 个
+run 旁边读作「每次都失败」。所以每一行都带着它出自的总体，而且**两个小节用的是不同的分母**，因为它们
+问的不是同一件事：
+
+| 小节 | 分母 | 为什么是这个 |
+|---|---|---|
+| 违规 | **碰过这一步的 run**（不是该 flow 的全部 run） | 一个从未到达的步骤不构成「本来可以出问题却没出」 |
+| 无证人的 gate | **在这一步实际记录过的 gate 数** | 一个步骤可以被频繁到达而很少被 gate；用「到达过的 run」会低估 |
+
+两个小节会包含**同一批事件**（无证人 gate 既记 violation 又在 gate 表留痕），所以文本形态明写了这层
+关系——否则读者会把一个发现数两遍。有变异钉住这句说明。
+
+**排序以绝对次数领先，不以比例。** 只按比例排会把一条 1/1 顶到一条持续的 2/3 之上，而前者是噪音、后者
+才是发现。比例仍然印出来，所以小样本是**可见的**，不是被一个百分数藏起来。
+
+**`step_id` 一定连 ability 一起分组**：步骤 id 是每个 flow 自己的，只按 step 聚合会把两个作者各自的
+`W01` 并成一条计数翻倍的「发现」，而那个步骤在两个 flow 里都不是它描述的样子。
+
+**分母为零时印「—」而不是 0%。** 没有可除的东西不等于「一个都没有」——印 0% 会陈述一件账本没有说过的
+事，而这是一个 rollup 唯一能悄悄编造事实的地方。
+
+**被 purge 过的 run 不在总体里**，输出会报出 purge 事件数：账本是**剩下的**，不是**曾经发生的**。
 
 ### 哪里的流程是强制的：防遗漏，不防颠覆
 
@@ -744,7 +791,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 341 passed
+python3 -m pytest tests/ -q      # 346 passed
 ```
 
 分两类：
@@ -754,7 +801,7 @@ python3 -m pytest tests/ -q      # 341 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（269）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（274）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

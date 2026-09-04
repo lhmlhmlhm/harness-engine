@@ -7094,3 +7094,179 @@ def test_the_contract_stops_saying_nothing_forces_a_run_once_something_does(env,
     # And the checked-in copy still matches what --portable emits, with a policy in place.
     checked_in = (REPO / "integrations" / "DRIVING.md").read_text(encoding="utf-8")
     assert portable == checked_in
+
+
+# ------------------------------------------------- what keeps going wrong here
+
+def _budget_ability(root: Path, name: str) -> None:
+    """An external flow whose step can produce a violation on demand (a used-up budget)."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "flow.yaml").write_text(
+        f"version: 2\nability: {name}\ntitle: T\n"
+        f"when: reach for this one when producing a violation on purpose, repeatedly\n"
+        f"uses: [repeatable]\nscope_kind: s\n"
+        f"phases:\n  - id: p1\n    title: P1\n"
+        f"steps:\n  - id: W01\n    phase: p1\n    repeatable: true\n    budget: 1\n"
+        f"    directive: Do it.\n", encoding="utf-8")
+
+
+def _burn(env, root: Path, ability: str, run_id: str, *, twice: bool) -> None:
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    assert rc(["open", ability, "--scope", run_id, "--run", run_id], e) == OK
+    assert rc(["enter", "--run", run_id, "--step", "W01"], e) == OK
+    if twice:
+        assert rc(["enter", "--run", run_id, "--step", "W01"], e) == REFUSED
+
+
+def test_the_ledger_can_finally_be_asked_what_keeps_going_wrong(env, tmp_path):
+    """`audit` grouped by (run, step, code) and so could only answer "in THIS run".
+
+    Every record needed for "what keeps going wrong HERE" was already being kept — nothing ever
+    asked for it. This groups across runs, which is a different question and not a nicer format
+    for the same one: the per-run view stays exactly as it was.
+    """
+    root = tmp_path / "outside"
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    _budget_ability(root, "aaa")
+    for i in (1, 2, 3):
+        _burn(env, root, "aaa", f"r{i}", twice=(i != 3))
+    # A FOURTH run that never touches the step, so the two candidate denominators stop being
+    # equal: 4 runs of this flow, 3 of them reached the step. Without this the test cannot tell
+    # which one the rollup used, and the docstring's claim about it would be unchecked.
+    assert rc(["open", "aaa", "--scope", "r4", "--run", "r4"], e) == OK
+
+    out = run(["audit", "--recurring"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == OK, out.stderr
+    d = json.loads(run(["audit", "--recurring", "--json"],
+                       {**env, "HARNESS_ABILITIES_PATH": str(root)}).stdout)
+
+    rows = [v for v in d["recurring_violations"] if v["code"] == "budget_exhausted"]
+    assert len(rows) == 1, f"grouped per run instead of across runs: {rows}"
+    assert rows[0]["runs"] == 2, rows[0]
+    # THE DENOMINATOR. Two of three runs hit it, and the third is what makes the number mean
+    # something — a count with no population reads as total failure or as nothing at all.
+    assert rows[0]["population"] == 3, \
+        "the population must be the runs that REACHED the step, not every run of the flow"
+    assert rows[0]["share"] == "67%", rows[0]
+    assert d["population"]["runs_recorded"] == 4
+
+    # The per-run view is untouched: same subject, different question.
+    plain = run(["audit"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert plain.returncode == OK
+    assert "across runs" not in plain.stdout
+
+
+def test_the_same_step_id_in_two_flows_is_two_findings(env, tmp_path):
+    """Step ids are per-flow, so merging them would invent a pattern that is not there.
+
+    Two authors both call their first step W01; a rollup keyed on the step alone would report one
+    finding with double the count, in a step that exists in neither flow as described.
+    """
+    root = tmp_path / "outside"
+    _budget_ability(root, "aaa")
+    _budget_ability(root, "bbb")
+    _burn(env, root, "aaa", "ra", twice=True)
+    _burn(env, root, "bbb", "rb", twice=True)
+
+    d = json.loads(run(["audit", "--recurring", "--json"],
+                       {**env, "HARNESS_ABILITIES_PATH": str(root)}).stdout)
+    rows = [v for v in d["recurring_violations"] if v["code"] == "budget_exhausted"]
+    assert len(rows) == 2, rows
+    assert {r["ability"] for r in rows} == {"aaa", "bbb"}
+    assert all(r["step_id"] == "W01" for r in rows)
+    assert all(r["runs"] == 1 for r in rows)
+
+
+def test_the_rollup_leads_with_the_absolute_count_not_the_share(env, tmp_path):
+    """A single 1-of-1 above a persistent 2-of-3 would put noise at the top.
+
+    Sorting by share alone does exactly that, and the share is still printed so a small sample
+    stays visible rather than being hidden behind a percentage.
+    """
+    root = tmp_path / "outside"
+    _budget_ability(root, "aaa")
+    _budget_ability(root, "bbb")
+    for i in (1, 2, 3):
+        _burn(env, root, "aaa", f"ra{i}", twice=(i != 3))       # 2 of 3 → 67%
+    _burn(env, root, "bbb", "rb", twice=True)                    # 1 of 1 → 100%
+
+    d = json.loads(run(["audit", "--recurring", "--json"],
+                       {**env, "HARNESS_ABILITIES_PATH": str(root)}).stdout)
+    rows = [v for v in d["recurring_violations"] if v["code"] == "budget_exhausted"]
+    assert [r["ability"] for r in rows] == ["aaa", "bbb"], rows
+    assert rows[0]["share"] == "67%" and rows[1]["share"] == "100%"
+
+
+def test_an_empty_population_is_a_dash_and_not_zero_percent():
+    """Nothing to divide by is not "none of them" — printing 0% would state what the ledger does
+    not say, and this is the one place a rollup can quietly invent a fact."""
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    assert h._share(3, 0) == "—"
+    assert h._share(3, None) == "—"
+    assert h._share(0, 0) == "—", "0 of 0 is still nothing to divide by"
+    assert h._share(2, 3) == "67%"
+    assert h._share(1, 1) == "100%"
+
+
+_GATED_FLOW = """version: 2
+ability: gg
+title: T
+when: reach for this one when counting how often a gate went unwitnessed
+uses: [gates]
+scope_kind: s
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    title: The gate
+    gate: affirm
+    completion: {type: gate_recorded}
+    directive: Ask.
+"""
+
+
+def test_unwitnessed_gates_are_counted_against_the_gates_not_the_runs(env, tmp_path):
+    """The second half of the rollup, and it needs its OWN denominator.
+
+    A step can be reached often and gated rarely, so "of the runs that reached it" would understate
+    how often a gate went unwitnessed. Counted against the GATES actually recorded there, the
+    number answers the question a gate raises: when this one was recorded, how often was there
+    nobody to vouch for it.
+
+    The same events also appear as violations above — different denominator, same events — and the
+    text form says so, because a reader counting both would double one finding.
+    """
+    root = tmp_path / "outside"
+    d = root / "gg"
+    d.mkdir(parents=True)
+    (d / "flow.yaml").write_text(_GATED_FLOW, encoding="utf-8")
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+
+    for i in (1, 2, 3):
+        assert rc(["open", "gg", "--scope", f"s{i}", "--run", f"g{i}"], e) == OK
+    # Two recorded with no witness, one with a real one.
+    for i in (1, 2):
+        assert rc(["gate", "--run", f"g{i}", "--step", "W01", "--decision", "affirm",
+                   "--evidence", "said go"], e, witness="manual") == OK
+    t = transcript_with(tmp_path, 2)
+    assert rc(["gate", "--run", "g3", "--step", "W01", "--decision", "affirm",
+               "--evidence", "said go"], e, transcript=t, witness="transcript") == OK
+
+    out = json.loads(run(["audit", "--recurring", "--json"], e).stdout)
+    rows = out["recurring_unwitnessed_gates"]
+    assert len(rows) == 1, rows
+    assert rows[0]["ability"] == "gg" and rows[0]["step_id"] == "W01"
+    assert rows[0]["unwitnessed"] == 2, rows[0]
+    assert rows[0]["gates"] == 3, "the denominator must be gates recorded, not runs"
+    assert rows[0]["share"] == "67%", rows[0]
+
+    text = run(["audit", "--recurring"], e).stdout
+    assert "WITHOUT a witness" in text
+    assert "not the runs that reached it" in text, \
+        "the relationship between the two sections must be stated, or one finding is counted twice"

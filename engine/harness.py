@@ -2123,7 +2123,72 @@ def cmd_history(args) -> int:
         conn.close()
 
 
+def _share(n: int, population) -> str:
+    """`n/population` as a percentage, or a dash when there is nothing to divide by.
+
+    A population of zero is not zero percent: it means the records that would have formed the
+    denominator are not there. Printing 0% would state something the ledger does not say.
+    """
+    if not population:
+        return "—"
+    return f"{round(100 * n / population)}%"
+
+
+def cmd_audit_recurring(args) -> int:
+    """The same subject as `audit`, grouped ACROSS runs instead of within one.
+
+    `audit` answers "what went wrong in this run". This answers "what keeps going wrong here",
+    which the ledger could always support and nothing ever asked it. Every row is printed with
+    the population it came out of, and the ordering leads with the ABSOLUTE count: sorting by
+    share alone puts a single 1-of-1 above a persistent 12-of-20, and the first is noise while
+    the second is the finding.
+    """
+    conn = store.connect(read_only=True)
+    try:
+        viol = store.recurring_violations(conn)
+        gates = store.recurring_unwitnessed_gates(conn)
+        runs = conn.execute("SELECT COUNT(*) n FROM run").fetchone()["n"]
+        purged = conn.execute("SELECT COUNT(*) n FROM purge_log").fetchone()["n"]
+        if args.json:
+            return _emit(args, {
+                "population": {"runs_recorded": runs, "purge_events": purged},
+                "recurring_violations": [
+                    {**v, "share": _share(v["runs"], v["population"])} for v in viol],
+                "recurring_unwitnessed_gates": [
+                    {**g, "share": _share(g["unwitnessed"], g["gates"])} for g in gates],
+            }, lambda _d: None)
+        print(f"over {runs} run(s) recorded here"
+              + (f"; {purged} purge event(s) — purged runs are NOT in this population"
+                 if purged else ""))
+        if not viol and not gates:
+            print("\n(nothing recurs: no violations, and no gate recorded without a witness)")
+            return OK
+        if viol:
+            print("\nViolations, across runs:")
+            print(f"  {'ability':<16} {'step':<8} {'code':<26} {'runs':>5} {'of':>5} "
+                  f"{'share':>6} {'rows':>5}")
+            for v in viol:
+                print(f"  {v['ability']:<16} {(v['step_id'] or '(run)'):<8} {v['code']:<26} "
+                      f"{v['runs']:>5} {(v['population'] or 0):>5} "
+                      f"{_share(v['runs'], v['population']):>6} {v['total']:>5}")
+        if gates:
+            print("\nGates recorded WITHOUT a witness, across runs:")
+            print("  (the same events are above as violations — these are counted against the "
+                  "GATES\n   recorded at the step, not the runs that reached it, which is the "
+                  "sharper\n   denominator for a gate: a step can be reached often and gated "
+                  "rarely.)")
+            print(f"  {'ability':<16} {'step':<8} {'unwitnessed':>11} {'gates':>6} {'share':>6}")
+            for g in gates:
+                print(f"  {g['ability']:<16} {g['step_id']:<8} {g['unwitnessed']:>11} "
+                      f"{g['gates']:>6} {_share(g['unwitnessed'], g['gates']):>6}")
+        return OK
+    finally:
+        conn.close()
+
+
 def cmd_audit(args) -> int:
+    if args.recurring:
+        return cmd_audit_recurring(args)
     conn = store.connect(read_only=True)
     try:
         rows = conn.execute(
@@ -2430,6 +2495,8 @@ def build_parser() -> argparse.ArgumentParser:
     cf.set_defaults(fn=cmd_config)
 
     ad = sub.add_parser("audit", help="list unwitnessed gates and violations")
+    ad.add_argument("--recurring", action="store_true",
+                    help="group ACROSS runs: what keeps going wrong here, with populations")
     ad.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     ad.set_defaults(fn=cmd_audit)
 
