@@ -6910,3 +6910,187 @@ def test_the_usage_lines_teach_flags_the_parser_actually_has(env):
         assert usage in out, f"the brief dropped its own usage line for {usage.split()[0]!r}"
     for cmd in b.DIAGNOSIS:
         assert re.search(rf"\b{re.escape(cmd)}\b", out), cmd
+
+
+# ------------------------------------------------- where a flow is mandatory
+
+def _req(env, root: Path, *args: str):
+    return run(["require", *args], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+
+
+def test_an_empty_policy_changes_nothing_at_all(env, tmp_path):
+    """The first thing to pin, because it bounds the blast radius of everything else.
+
+    With no entries this must behave byte-identically to the engine before the file existed:
+    allow, and say nothing. A bug in the second question can then only be reached by someone who
+    has written a requirement down.
+    """
+    root, work = _guarded_ext(tmp_path)
+    out = _guard_call(env, root, work)
+    assert out.returncode == OK
+    assert out.stderr == "", out.stderr
+
+    listing = run(["require"], env)
+    assert listing.returncode == OK
+    assert "nothing is declared mandatory" in listing.stdout
+    assert "exactly as it did before this file existed" in listing.stdout
+
+
+def test_a_declared_requirement_refuses_a_guarded_action_with_no_run(env, tmp_path):
+    """The hole this closes: the guard enforced gates INSIDE a run and could not require one.
+
+    With nothing open there is no scope to compare an action against, so the guard allowed —
+    which the engine already admitted in its own judgment rules, because prose asking a driver to
+    open a run does not bind it. A declaration supplies the missing scope.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    assert _req(env, root, "--add", "priv", "--scope-key", str(work)).returncode == OK
+
+    out = _guard_call(env, root, work)
+    assert out.returncode == BLOCKED, out.stderr
+    assert "declared MANDATORY" in out.stderr
+    assert "no run of it is open here" in out.stderr
+    assert f"harness open priv --scope {work}" in out.stderr
+    assert "G01" in out.stderr, "the refusal must name the gate that goes unrecorded"
+    assert "do not reword" in out.stderr.lower()
+    # With no recorded waiver yet, the only honest exception is removing the entry — and the
+    # refusal says so rather than leaving the driver to invent one.
+    assert "harness require --remove priv" in out.stderr
+
+
+def test_a_requirement_makes_a_FLOW_mandatory_not_everything(env, tmp_path):
+    """Two ways this could have become a wall, both asserted as allowed.
+
+    A declaration that blocked every tool call in a scope, or blocked its action everywhere on
+    the machine, would be unusable — and the second is exactly why the scope had to come from
+    somewhere before this could exist at all.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    assert _req(env, root, "--add", "priv", "--scope-key", str(work)).returncode == OK
+
+    # Same scope, a call the flow does not guard.
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    unguarded = run(["guard-tool", "--tool", "shell",
+                     "--input-json", '{"command":"ls -la"}', "--cwd", str(work)], e)
+    assert unguarded.returncode == OK, unguarded.stderr
+
+    # The guarded call, outside the declared scope.
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    assert _guard_call(env, root, elsewhere).returncode == OK
+
+
+def test_an_open_run_answers_before_the_declaration_does(env, tmp_path):
+    """Order matters: the second question must not shadow the first.
+
+    With a run open the refusal has to be the gate's — that one names a step to satisfy and a
+    command that records it. Answering "open a run" while one is open would send the driver in a
+    circle.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    assert _req(env, root, "--add", "priv", "--scope-key", str(work)).returncode == OK
+    assert rc(["open", "priv", "--scope", str(work), "--run", "q1"],
+              {**env, "HARNESS_ABILITIES_PATH": str(root)}) == OK
+
+    out = _guard_call(env, root, work)
+    assert out.returncode == BLOCKED
+    assert "requires gate 'G01'" in out.stderr, out.stderr
+    assert "declared MANDATORY" not in out.stderr
+    assert "harness gate --run q1" in out.stderr
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_mandatory_flow_that_cannot_be_read_allows_loudly_unless_strict(
+        env, tmp_path, strict):
+    """The one fork in this design, and both sides ship — the declarer picks.
+
+    Default allows, because one unreadable spec must not stop all work in a scope; that is the
+    iron rule this hook is written under. `strict` refuses instead, for a scope where stopping
+    beats proceeding unchecked. Either way it is LOUD: the silent version of this is the failure
+    that was fixed one commit ago.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    add = ["--add", "priv", "--scope-key", str(work)] + (["--strict"] if strict else [])
+    assert _req(env, root, *add).returncode == OK
+
+    # Unreadable from the hook's point of view: the ability is not on its search path.
+    out = _guard_call(env, None, work)
+    if strict:
+        assert out.returncode == BLOCKED, out.stderr
+        assert "MANDATORY (strict)" in out.stderr
+        assert "refuse rather than proceed unchecked" in out.stderr
+    else:
+        assert out.returncode == OK, out.stderr
+        assert "cannot be read" in out.stderr
+        assert "Mark the entry `strict` to refuse instead" in out.stderr
+
+
+def test_a_requirement_derives_the_scope_kind_from_the_flow(env, tmp_path):
+    """Storing the kind would be a second copy of something the flow already declares.
+
+    An entry whose kind disagreed with the flow's would match nothing, forever, in silence — the
+    inert-but-declared shape this engine exists to refuse. So it is derived, and reported when
+    the entry is written so whoever writes it can see how the key will be compared.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    out = _req(env, root, "--add", "priv", "--scope-key", str(work))
+    assert out.returncode == OK
+    assert "repo=" in out.stdout, out.stdout
+    assert "matched as 'path_prefix'" in out.stdout
+
+    listed = json.loads(_req(env, root, "--json").stdout)
+    assert listed["required"][0]["scope_kind"] == "repo"
+    assert listed["required"][0]["scope_match"] == "path_prefix"
+    assert listed["required"][0]["readable"] is True
+    assert "scope_kind" not in policy_lines(env), \
+        "the kind must not be written into the record"
+
+    # A requirement naming nothing installed cannot be recorded.
+    bad = _req(env, root, "--add", "no-such-ability", "--scope-key", str(work))
+    assert bad.returncode == BAD_SPEC, bad.stdout + bad.stderr
+
+
+def policy_lines(env) -> str:
+    return (Path(env["HARNESS_STATE_DIR"]) / "required-flows").read_text(encoding="utf-8")
+
+
+def test_the_contract_stops_saying_nothing_forces_a_run_once_something_does(env, tmp_path):
+    """A generated document that contradicts the engine is the drift this one exists to remove.
+
+    The judgment rule said flatly that the guard allows every action while no run is open. Once a
+    scope can be declared to require one, that sentence is FALSE there — so the rule now carries
+    the exception, and the installation's actual list is rendered as its own section.
+
+    The portable copy must NOT carry it. That file is checked into git and guarded byte-identical
+    against `brief --portable`, so a section that varied per machine would fail the guard for
+    everyone except whoever last regenerated it.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+
+    # Before: no requirement, no section.
+    plain = run(["brief"], env).stdout
+    assert "MANDATORY here" not in plain
+    # The rule itself must name the exception whether or not this machine uses it — the sentence
+    # is about the mechanism, not about the local list.
+    assert "declared" in plain and "REQUIRE a flow" in plain, plain[-1500:]
+
+    assert _req(env, root, "--add", "priv", "--scope-key", str(work)).returncode == OK
+    local = run(["brief"], env).stdout
+    assert "## Where a flow is MANDATORY here" in local
+    assert str(work) in local and "priv" in local
+    assert "Declared by whoever owns this machine, not by you." in local
+
+    portable = run(["brief", "--portable"], env).stdout
+    assert "MANDATORY here" not in portable, \
+        "the portable copy carried one machine's policy; the byte-identical guard would break"
+    assert str(work) not in portable
+
+    # And the checked-in copy still matches what --portable emits, with a policy in place.
+    checked_in = (REPO / "integrations" / "DRIVING.md").read_text(encoding="utf-8")
+    assert portable == checked_in

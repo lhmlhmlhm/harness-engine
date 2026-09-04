@@ -166,7 +166,7 @@ If a criterion cannot be met, say so. Never relax the criterion, and never rewri
 
 When a task will change files or make an external effect, open a run FIRST.
 
-*Why:* The runtime guard allows every action while no run is open — it runs before every tool call and must never brick a machine. So skipping this is not blocked, and afterwards nothing distinguishes a flow that was followed from one that was never started.
+*Why:* The runtime guard allows every action while no run is open — it runs before every tool call and must never brick a machine. The one exception is a scope someone has declared to REQUIRE a flow: there it refuses and names the run to open. Everywhere else skipping this is not blocked, and afterwards nothing distinguishes a flow that was followed from one that was never started.
 
 ## Never
 

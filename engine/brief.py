@@ -118,8 +118,10 @@ JUDGMENT: tuple[tuple[str, str, str], ...] = (
         "Nothing forces you to open a run",
         "When a task will change files or make an external effect, open a run FIRST.",
         "The runtime guard allows every action while no run is open — it runs before every tool "
-        "call and must never brick a machine. So skipping this is not blocked, and afterwards "
-        "nothing distinguishes a flow that was followed from one that was never started.",
+        "call and must never brick a machine. The one exception is a scope someone has declared "
+        "to REQUIRE a flow: there it refuses and names the run to open. Everywhere else "
+        "skipping this is not blocked, and afterwards nothing distinguishes a flow that was "
+        "followed from one that was never started.",
     ),
 )
 
@@ -202,6 +204,7 @@ def render(
     env: list[tuple[str, str]],
     guard_tools: list[str],
     example_step: str | None,
+    required: tuple = (),
 ) -> str:
     """Assemble the brief. Every argument is a fact the caller read off the engine."""
     out: list[str] = []
@@ -247,6 +250,19 @@ def render(
     a("The refusal codes are products, not errors: their stderr names the exact remedy. Follow")
     a("it rather than inventing one.")
     a("")
+
+    # LOCAL ONLY. The portable copy must not carry one machine's policy: it is checked into git
+    # and guarded byte-identical, so a list that varied per machine would fail that guard for
+    # everyone but its author.
+    if required and not portable:
+        a("## Where a flow is MANDATORY here")
+        a("")
+        a("For these scopes the guard does NOT allow an action while no run is open — it refuses")
+        a("and names the run to open. Declared by whoever owns this machine, not by you.")
+        a("")
+        a(_fence([f"{e['ability']}  {e['scope_key']}"
+                  + ("   (strict)" if e.get("strict") else "") for e in required]))
+        a("")
 
     a("## The loop")
     a("")

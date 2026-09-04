@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import flow as flowmod
+from . import policy
 from . import trust
 from . import brief as briefmod
 from . import conditions, facts, hooks as hookmod, predicates, proof, prose, store
@@ -1495,7 +1496,7 @@ def cmd_guard_tool(args) -> int:
                  "                               providers.py re-asks, and until it is\n"
                  "                               answered that run's guards cannot be read)")
         if not hits:
-            return OK
+            return _required_flow_missing(conn, args, payload)
         owners = {h[0]["run_id"] for h in hits}
         if len(owners) > 1:
             _err(f"⚠️  guard-tool NOT enforced: {len(owners)} open runs claim this call "
@@ -1518,6 +1519,131 @@ def cmd_guard_tool(args) -> int:
         return BLOCKED
     finally:
         conn.close()
+
+
+def _required_flow_missing(conn, args, payload: dict) -> int:
+    """THE SECOND QUESTION, asked only when no open run claimed this call.
+
+    The first question is "does an open run guard this?" — it enforces the gates INSIDE a run and
+    cannot enforce that a run exists, because with nothing open there is no scope to compare the
+    action against. This asks the declared policy for that missing scope: is this a guarded action
+    of a flow someone said is mandatory HERE?
+
+    WHY THERE IS NO "BUT A RUN EXISTS" CHECK HERE. If a run of the named ability covered this call
+    and the flow loads, the first question already hit — so it either allowed on a recorded gate
+    or refused. Reaching this point with such a run is not possible in one process, and a check
+    for it would be a guard that cannot fire. (Both questions load the same spec from the same
+    disk in the same process, so one cannot succeed where the other failed.)
+
+    An empty policy leaves behaviour byte-identical to behaviour before this existed — the loop
+    below simply does not run. NO EARLY RETURN FOR IT: one was written and removed, because with
+    nothing declared the loop is empty and the function already falls through to OK, so the
+    branch could not change any outcome. A guard that cannot fire is what this engine spends its
+    refusals on elsewhere.
+    """
+    for entry in policy.read():
+        try:
+            f = flowmod.load(entry["ability"])
+        except flowmod.FlowError as exc:
+            first = str(exc).splitlines()[0]
+            if entry["strict"]:
+                _err(f"⛔ BLOCKED: '{entry['ability']}' is declared MANDATORY (strict) for "
+                     f"scope '{entry['scope_key']}', and its flow cannot be read:\n"
+                     f"    {first}\n"
+                     f"    Strict means refuse rather than proceed unchecked. Fix the flow, or "
+                     f"drop the entry:\n"
+                     f"      harness require --remove {entry['ability']} "
+                     f"--scope-key {entry['scope_key']}")
+                return BLOCKED
+            _err(f"⚠️  '{entry['ability']}' is declared mandatory for scope "
+                 f"'{entry['scope_key']}' but its flow cannot be read, so whether this call "
+                 f"needs a run\n    could not be decided: {first}\n"
+                 f"    Allowing — one unreadable spec must not stop all work in a scope. Mark "
+                 f"the entry `strict` to refuse instead.")
+            continue
+        if not f.scope_covers(entry["scope_key"], args.cwd, payload):
+            continue
+        for action, rules in f.guard_matches.items():
+            for rule in rules:
+                if rule["tool"] != args.tool:
+                    continue
+                hay = (str(payload.get(rule["field"], "")) if rule["field"]
+                       else json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                if not rule["regex"].search(hay):
+                    continue
+                step_id = f.guards[action]
+                _err(
+                    f"⛔ BLOCKED: this looks like action '{action}' (matched "
+                    f"{rule['pattern']!r}), and '{entry['ability']}' is declared MANDATORY for "
+                    f"scope '{entry['scope_key']}' on this machine — but no run of it is open "
+                    f"here.\n"
+                    f"    A run is what makes any of this enforceable: without one, gate "
+                    f"'{step_id}' and every other criterion is unrecorded and unchecked.\n"
+                    f"    Open one first:\n"
+                    f"      harness open {entry['ability']} --scope "
+                    f"{entry['scope_key']} --run <id>\n"
+                    f"    Do NOT reword the command to get past this. If this action genuinely "
+                    f"does not belong to that flow, the requirement is what is wrong — say so "
+                    f"to whoever owns this machine, and it comes out with:\n"
+                    f"      harness require --remove {entry['ability']} "
+                    f"--scope-key {entry['scope_key']}"
+                )
+                return BLOCKED
+    return OK
+
+
+def cmd_require(args) -> int:
+    """Show, add or remove a declared requirement. Never for a model — see NOT_A_TOOL."""
+    if args.add or args.remove:
+        ability = args.add or args.remove
+        if not args.scope_key:
+            _err("--scope-key is required: a requirement without a scope would either mean "
+                 "nowhere or everywhere, and neither is a policy.")
+            return USAGE
+        try:
+            f = _load_flow_or_exit(ability)
+        except SystemExit:
+            raise
+        if args.add:
+            # The kind is NOT stored — it is the flow's, and a second copy could age. Reported
+            # here so whoever writes the entry can see what the key will be compared as.
+            changed = policy.add(ability, args.scope_key, strict=bool(args.strict))
+            print(f"{'recorded' if changed else 'already recorded'}: {ability} is "
+                  f"{'STRICTLY ' if args.strict else ''}mandatory for "
+                  f"{f.scope_kind}={args.scope_key}")
+            print(f"  matched as '{f.scope_match}' (the flow's own declaration)")
+            print(f"  in {policy.path()}")
+            return OK
+        if policy.remove(ability, args.scope_key):
+            print(f"removed: {ability} is no longer mandatory for {args.scope_key}")
+            return OK
+        _err(f"no requirement recorded for {ability} at {args.scope_key}")
+        return USAGE
+
+    rows = []
+    for entry in policy.read():
+        try:
+            f = _load_flow_or_exit(entry["ability"])
+            kind, match, readable = f.scope_kind, f.scope_match, True
+        except SystemExit:
+            kind, match, readable = None, None, False
+        rows.append({**entry, "scope_kind": kind, "scope_match": match, "readable": readable})
+    if args.json:
+        return _emit(args, {"record": str(policy.path()), "required": rows}, lambda _d: None)
+    if not rows:
+        print(f"(nothing is declared mandatory; {policy.path()})")
+        print("With no entries the guard enforces the gates inside an open run and allows")
+        print("everything when nothing is open — exactly as it did before this file existed.")
+        return OK
+    print(f"record {policy.path()}")
+    for r in rows:
+        mark = "⛔" if r["strict"] else "•"
+        print(f"{mark} {r['ability']:<16} {r['scope_kind'] or '?'}={r['scope_key']}"
+              + ("  (strict)" if r["strict"] else "")
+              + ("" if r["readable"] else "  ⚠️  its flow cannot be read from here"))
+    print("\nThere is no recorded way to skip one of these yet: a one-off exception means "
+          "removing\nthe entry, which is a change to this file rather than a logged decision.")
+    return OK
 
 
 def cmd_discharge(args) -> int:
@@ -1689,6 +1815,9 @@ NOT_A_TOOL: dict[str, str] = {
         "and a fresh empty store in the wrong place looks exactly like a clean slate.",
     "purge-run":
         "deletes a closed run's rows. Test residue cleanup, not driving.",
+    "require":
+        "declares where a flow is MANDATORY. The subject of a rule may not be the one who "
+        "writes it — a driver able to declare its own obligations has none.",
 }
 
 
@@ -1829,6 +1958,7 @@ def _render_brief(portable: bool) -> str:
         ],
         guard_tools=sorted(guard_tools),
         example_step=example_step,
+        required=() if portable else policy.read(),
     )
 
 
@@ -2147,6 +2277,14 @@ def build_parser() -> argparse.ArgumentParser:
     ab = sub.add_parser("abilities", help="list installed abilities")
     ab.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     ab.set_defaults(fn=cmd_abilities)
+    rq = sub.add_parser("require", help="show/declare where a flow is mandatory on this machine")
+    rq.add_argument("--add", metavar="ABILITY", help="declare this ability mandatory")
+    rq.add_argument("--remove", metavar="ABILITY", help="drop a declared requirement")
+    rq.add_argument("--scope-key", help="the scope the requirement applies to")
+    rq.add_argument("--strict", action="store_true",
+                    help="refuse rather than allow when the flow cannot be read")
+    rq.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    rq.set_defaults(fn=cmd_require)
     tr = sub.add_parser("trust", help="review/approve extension files this install imports")
     tr.add_argument("ability", nargs="?", help="approve this ability's providers.py")
     tr.add_argument("--forget", metavar="ABILITY", help="drop a recorded approval")
