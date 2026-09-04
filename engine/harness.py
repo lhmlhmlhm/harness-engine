@@ -1671,6 +1671,98 @@ def _subcommand_help() -> dict[str, str]:
     return {}
 
 
+# Commands a MODEL must not be handed as a callable tool, each with the reason. Data, so the
+# reason ships with the refusal instead of living in someone's head — and so an adapter in
+# any language gets the same list without re-deciding it.
+NOT_A_TOOL: dict[str, str] = {
+    "guard-tool":
+        "invoked by a RUNTIME before a tool call it may block, never by the model. A model will "
+        "not call a tool whose purpose is to stop it, so exposing this as one would replace the "
+        "only mechanism that does not need the agent's cooperation with one that does.",
+    "trust":
+        "approves extension CODE to run with this engine's privileges. That is a decision for "
+        "whoever owns the machine; a model able to approve its own code makes the content "
+        "pinning decorative.",
+    "init":
+        "creates or migrates the store. A driver should find the store already there — letting "
+        "the model create one hides a mis-pointed state directory behind an automatic repair, "
+        "and a fresh empty store in the wrong place looks exactly like a clean slate.",
+    "purge-run":
+        "deletes a closed run's rows. Test residue cleanup, not driving.",
+}
+
+
+def _arg_shape(action) -> dict:
+    """One argparse action as a language-neutral parameter description.
+
+    Same trade as `_subcommand_help`: private attributes are the price of deriving the surface
+    from the parser instead of restating it. A restated surface is the drift this removes.
+    """
+    flag = action.option_strings[0] if action.option_strings else None
+    if isinstance(action, argparse._StoreTrueAction):
+        kind = "boolean"
+    elif action.nargs in ("*", "+"):
+        kind = "array"
+    else:
+        kind = "string"
+    required = bool(action.required) if action.option_strings else action.nargs != "?"
+    return {"name": action.dest, "flag": flag, "kind": kind,
+            "required": required, "help": action.help or "",
+            "choices": sorted(str(c) for c in action.choices) if action.choices else None}
+
+
+def _tool_surface() -> dict:
+    """The command surface as DATA, derived from the parser, for adapters that expose tools.
+
+    WHY THIS IS PUBLISHED RATHER THAN WRITTEN DOWN BY EACH ADAPTER
+
+    An adapter that hand-writes its tool schemas has made a second copy of the command surface,
+    and the first thing that copy does is age. This project already lost that bet twice: a
+    hand-written driving document drifted from the engine, so it became generated; then the
+    generated copy on one machine aged past the engine, one line at a time. A schema an adapter
+    derives from here cannot describe a flag the parser does not have.
+
+    The exclusions matter as much as the inclusions — see NOT_A_TOOL.
+    """
+    parser = build_parser()
+    subs = None
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            subs = action
+    if subs is None:                       # pragma: no cover - the parser always has one
+        return {"tools": [], "not_a_tool": NOT_A_TOOL}
+    helps = _subcommand_help()
+    tools = []
+    for name, sub in sorted(subs.choices.items()):
+        if name in NOT_A_TOOL:
+            continue
+        args = [_arg_shape(a) for a in sub._actions
+                if not isinstance(a, argparse._HelpAction) and a.dest != "fn"]
+        tools.append({
+            "command": name,
+            # One naming rule, stated once here, so the adapter does not invent a second.
+            "tool": "harness_" + name.replace("-", "_"),
+            "help": helps.get(name, ""),
+            "structured": any(a["flag"] == "--json" for a in args),
+            "args": args,
+        })
+    return {
+        "tools": tools,
+        "not_a_tool": NOT_A_TOOL,
+        # So an adapter needs no second copy of the one table that IS the contract.
+        "exit_codes": {str(v): k for k, v in
+                       (("OK", OK), ("USAGE", USAGE), ("BAD_SPEC", BAD_SPEC),
+                        ("REFUSED", REFUSED), ("BLOCKED", BLOCKED), ("INTERNAL", INTERNAL))},
+        "result_shape": {
+            "note": "An exit code is the PRODUCT, not a failure. A tool result must carry the "
+                    "code as data and must not be flagged as an error for 3 or 4 — a runtime "
+                    "that reports a refusal as a tool malfunction invites the model to retry "
+                    "the call instead of reading what is missing.",
+            "fields": ["exit", "meaning", "stdout", "stderr"],
+        },
+    }
+
+
 PORTABLE_PATH = "<path-to-engine>/bin/harness"
 
 
@@ -1854,6 +1946,7 @@ def cmd_adapter_contract(args) -> int:
                      "every session, so a bug here must not stop normal work.",
         "translation": translation,
         "resilience": resilience,
+        "surface": _tool_surface(),
         "end_to_end": end_to_end,
     }, indent=2, ensure_ascii=False))
     return OK

@@ -104,6 +104,16 @@ open run、静默全放行。适配器会显式检查并报警而不是静默放
 
 三个环境变量的完整清单由 `harness brief` 的 Environment 一节给出。
 
+## 两个面，而不是一个
+
+| 面 | 谁发起 | 形态 | 性质 |
+|---|---|---|---|
+| **驱动面** | agent 主动问 | `integrations/mcp-server.py`（tool calls），或直接调 CLI | 依赖 agent 配合 |
+| **拦截面** | runtime 代问 | `integrations/kiro-pretooluse.py` → `harness guard-tool` | **agent 不配合也照样发生** |
+
+把两者合成一个「全是 tool」的设计会把拦截面弄丢：模型不会去调一个目的是阻止自己的工具。所以
+`guard-tool` 在 `adapter-contract` 的 `surface.not_a_tool` 里，连理由一起。
+
 ## 强制到什么程度：一个必须知道的边界
 
 hook 强制的是「**已开 run 内**的门」。它**不能**强制「run 被开过」——`guard-tool` 在找不到

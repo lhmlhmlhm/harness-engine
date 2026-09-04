@@ -6768,3 +6768,75 @@ def test_a_run_whose_flow_cannot_be_read_says_so_instead_of_going_quiet(
     # All three fixes are offered, because the report cannot always tell which one applies.
     for hint in ("HARNESS_ABILITIES_PATH", "harness validate", "harness trust"):
         assert hint in out.stderr, hint
+
+
+# ------------------------------------------------- the tool surface, derived not restated
+
+def test_every_command_is_either_a_tool_or_excluded_with_a_reason(env):
+    """A third copy of the command surface is the drift this removes, so there is no third copy.
+
+    The first copy was a hand-written driving document; it aged and became generated. The second
+    was the generated file on one machine; it aged past the engine one line at a time. An adapter
+    that hand-writes tool schemas is the third, and it would age the same way — so the schema is
+    read off the parser, here, where the parser is.
+
+    Pinned as a PARTITION: every subcommand is a tool or is named in `NOT_A_TOOL`. A new command
+    therefore cannot appear without someone deciding which it is, and that decision carries its
+    reason as data rather than living in whoever reviewed it.
+    """
+    import argparse as _a
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    parser = h.build_parser()
+    choices: set[str] = set()
+    for action in parser._actions:
+        if isinstance(action, _a._SubParsersAction):
+            choices = set(action.choices)
+    assert choices
+
+    surface = h._tool_surface()
+    as_tools = {t["command"] for t in surface["tools"]}
+    excluded = set(surface["not_a_tool"])
+    assert as_tools | excluded == choices, (
+        f"unclassified: {sorted(choices - as_tools - excluded)}; "
+        f"claimed but unknown: {sorted((as_tools | excluded) - choices)}")
+    assert not (as_tools & excluded)
+
+    for cmd, why in surface["not_a_tool"].items():
+        assert len(why) > 40, f"{cmd} is excluded without a usable reason"
+
+    # The one exclusion the whole design turns on. A model will not call a tool whose purpose is
+    # to stop it, so exposing this would trade the only mechanism that does not need the agent's
+    # cooperation for one that does.
+    assert "guard-tool" in excluded
+    assert "never by the model" in surface["not_a_tool"]["guard-tool"]
+    assert "does not need the agent's cooperation" in surface["not_a_tool"]["guard-tool"]
+    # And the one that would make today's content pinning decorative.
+    assert "trust" in excluded
+
+
+def test_the_tool_surface_reports_flags_it_did_not_invent(env):
+    """The schema must come from the parser, not from a list that agrees with it today."""
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    surface = h._tool_surface()
+    nxt = [t for t in surface["tools"] if t["command"] == "next"][0]
+    args = {a["name"]: a for a in nxt["args"]}
+    assert args["run"]["required"] and args["run"]["flag"] == "--run"
+    assert args["json"]["kind"] == "boolean" and not args["json"]["required"]
+    assert nxt["structured"] is True
+    assert nxt["tool"] == "harness_next", "the naming rule lives here, once"
+
+    # A command with no structured form must say so rather than be assumed to have one.
+    val = [t for t in surface["tools"] if t["command"] == "validate"][0]
+    assert val["structured"] is False, "validate has no --json; the surface must not imply one"
+
+    # An exit code is the contract, so the table ships with the surface — an adapter that kept
+    # its own copy would be the same drift one layer out.
+    assert surface["exit_codes"]["3"] == "REFUSED"
+    assert surface["exit_codes"]["4"] == "BLOCKED"
+    assert "not a failure" in surface["result_shape"]["note"]
