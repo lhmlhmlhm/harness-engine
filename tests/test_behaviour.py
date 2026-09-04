@@ -6840,3 +6840,73 @@ def test_the_tool_surface_reports_flags_it_did_not_invent(env):
     assert surface["exit_codes"]["3"] == "REFUSED"
     assert surface["exit_codes"]["4"] == "BLOCKED"
     assert "not a failure" in surface["result_shape"]["note"]
+
+
+def _parser_params() -> dict[str, dict]:
+    """command -> {flags, required_flags, required_positionals}, straight off the parser."""
+    import argparse as _a
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    out: dict[str, dict] = {}
+    for action in h.build_parser()._actions:
+        if not isinstance(action, _a._SubParsersAction):
+            continue
+        for name, sub in action.choices.items():
+            shapes = [h._arg_shape(x) for x in sub._actions
+                      if not isinstance(x, _a._HelpAction) and x.dest != "fn"]
+            out[name] = {
+                "flags": {x["flag"] for x in shapes if x["flag"]},
+                "required_flags": {x["flag"] for x in shapes if x["flag"] and x["required"]},
+                "required_positionals": {x["name"] for x in shapes
+                                         if not x["flag"] and x["required"]},
+            }
+    return out
+
+
+def test_the_usage_lines_teach_flags_the_parser_actually_has(env):
+    """The last copy of the command surface that nothing was checking.
+
+    `brief` derives the command NAMES from the parser and has a test for that. The flags in its
+    usage lines are hand-written, and they were unguarded — rename `--value` and the brief would
+    keep teaching `--value` while the engine rejected it, which is the drift this whole document
+    exists to remove, one layer further in.
+
+    NOT fixed by rendering the lines from the parser. Which OPTIONAL parameter deserves teaching
+    is judgment — `--run` on `open` and `--value` on `evidence` are both optional there, and a
+    rendered line would drop both and teach worse. So the selection stays written and this checks
+    the checkable half: every flag named exists, and no required parameter is omitted.
+    """
+    import re
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import brief as b
+
+    params = _parser_params()
+    assert b.LOOP and b.DIAGNOSIS
+
+    for usage, why in b.LOOP:
+        cmd = usage.split()[0]
+        assert cmd in params, f"the brief teaches '{cmd}', which is not a command"
+        written = set(re.findall(r"--[a-z-]+", usage))
+        unknown = written - params[cmd]["flags"]
+        assert not unknown, f"'{cmd}' is taught with flags it does not have: {sorted(unknown)}"
+        missing = params[cmd]["required_flags"] - written
+        assert not missing, f"'{cmd}' requires {sorted(missing)}, which the line omits"
+        for pos in params[cmd]["required_positionals"]:
+            assert f"<{pos}>" in usage or pos in usage, \
+                f"'{cmd}' takes a required '{pos}' the line does not show"
+        assert why, cmd
+
+    for cmd in b.DIAGNOSIS:
+        assert cmd in params, f"the brief names '{cmd}' under diagnosis; it is not a command"
+
+    # And the rendered document must actually CARRY every taught line. The renderer filters by
+    # `cmd in subcommands`, so a renamed command would drop its line in silence rather than fail
+    # — the filter is a runtime courtesy, and this is what keeps it from ever being needed.
+    out = run(["brief"], env).stdout
+    for usage, _why in b.LOOP:
+        assert usage in out, f"the brief dropped its own usage line for {usage.split()[0]!r}"
+    for cmd in b.DIAGNOSIS:
+        assert re.search(rf"\b{re.escape(cmd)}\b", out), cmd

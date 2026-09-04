@@ -52,6 +52,29 @@ EXIT_MEANINGS: dict[str, tuple[str, str]] = {
                  "report it with the traceback; this is a defect in the engine, not your input"),
 }
 
+# THE LOOP, and the one thing in it that is NOT derivable: which OPTIONAL parameter is worth
+# teaching. The command names and the required parameters can be read off the parser, and a test
+# does exactly that — but `--run` on `open` and `--value` on `evidence` are optional there, and a
+# line rendered from the parser alone would omit both and teach worse. So the selection stays
+# judgment, and the guard checks the part that is checkable: every flag named here EXISTS, and no
+# required parameter is left out.
+LOOP: tuple[tuple[str, str], ...] = (
+    ("init", "once; safe to repeat"),
+    ("abilities", "what is installed here"),
+    ("open <ability> --scope <key> --run <id>", "start a run"),
+    ("next --run <id>", "the next step, and what it requires"),
+    ("evidence --run <id> --step <s> --kind <k> --value <v>", "record what the step asks for"),
+    ("close-step --run <id> --step <s>", "refused if the criterion is unmet"),
+    ("close-run --run <id> --result <r>", "refused while anything is owed"),
+)
+
+# Read-only commands worth naming up front. Their help text comes from the parser, so only the
+# selection is written here.
+DIAGNOSIS: tuple[str, ...] = (
+    "status", "obligations", "assert-goal", "show", "validate", "audit", "leases", "history",
+)
+
+
 # The non-derivable half. Each entry is (title, what to do, why it is not obvious).
 #
 # Phrased in ENGINE vocabulary throughout, because the purity guard scans this file. That
@@ -227,22 +250,12 @@ def render(
 
     a("## The loop")
     a("")
-    steps = [
-        ("init", "once; safe to repeat"),
-        ("abilities", "what is installed here"),
-        ("open <ability> --scope <key> --run <id>", "start a run"),
-        ("next --run <id>", "the next step, and what it requires"),
-        ("evidence --run <id> --step <s> --kind <k> --value <v>", "record what the step asks for"),
-        ("close-step --run <id> --step <s>", "refused if the criterion is unmet"),
-        ("close-run --run <id> --result <r>", "refused while anything is owed"),
-    ]
-    a(_fence([f"{short} {cmd:<52} # {why}" for cmd, why in steps
+    a(_fence([f"{short} {cmd:<52} # {why}" for cmd, why in LOOP
               if cmd.split()[0] in subcommands]))
     a("")
     a("Diagnosis, all read-only:")
     a("")
-    diag = [c for c in ("status", "obligations", "assert-goal", "show", "validate", "audit",
-                        "leases", "history") if c in subcommands]
+    diag = [c for c in DIAGNOSIS if c in subcommands]
     a(_fence([f"{short} {c:<14} # {subcommands[c]}" for c in diag]))
     a("")
 
