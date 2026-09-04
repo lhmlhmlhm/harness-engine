@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import difflib
 
-from . import facts, operators
+from . import facts, operators, registry
 
 COMBINATORS = ("all_of", "any_of", "not")
 
@@ -39,7 +39,9 @@ class ConditionError(ValueError):
     pass
 
 
-def validate(cond, schema: dict, where: str) -> None:
+def validate(cond, schema: dict, where: str, *,
+             asking: str | None = None,
+             requires: tuple[str, ...] = ()) -> None:
     """Check a condition tree against a fact schema. Raises ConditionError."""
     if cond is None:
         return
@@ -59,12 +61,13 @@ def validate(cond, schema: dict, where: str) -> None:
         key = combos[0]
         body = cond[key]
         if key == "not":
-            validate(body, schema, f"{where} → not")
+            validate(body, schema, f"{where} → not", asking=asking, requires=requires)
             return
         if not isinstance(body, list) or not body:
             raise ConditionError(f"{where}: '{key}' must be a non-empty list of conditions")
         for i, sub in enumerate(body):
-            validate(sub, schema, f"{where} → {key}[{i}]")
+            validate(sub, schema, f"{where} → {key}[{i}]",
+                     asking=asking, requires=requires)
         return
 
     if "fact" not in cond:
@@ -86,20 +89,30 @@ def validate(cond, schema: dict, where: str) -> None:
         raise ConditionError(
             f"{where}: a leaf condition needs exactly one operator alongside 'fact'; "
             f"got {', '.join(sorted(ops)) or '(none)'}\n"
-            f"  registered operators: {', '.join(operators.registered())}"
+            f"  registered operators: {', '.join(operators.visible(asking))}"
         )
-    op = ops[0]
-    if not operators.is_registered(op):
-        hint = difflib.get_close_matches(op, operators.registered(), n=1)
-        suffix = f"  did you mean '{hint[0]}'?" if hint else ""
-        raise ConditionError(
-            f"{where}: unknown operator '{op}'.{suffix}\n"
-            f"  registered: {', '.join(operators.registered())}"
-        )
+    # An operator is a registry KEY written as a condition key, so resolving it means
+    # REWRITING the condition — after this the tree carries keys, and evaluate() needs no
+    # notion of who owns what.
+    op = resolve_operator(cond, ops[0], where, asking=asking, requires=requires)
     try:
         operators.check_type(op, schema[name], where)
     except operators.OperatorError as exc:
         raise ConditionError(str(exc)) from None
+
+
+def resolve_operator(cond: dict, op: str, where: str, *,
+                     asking: str | None, requires: tuple[str, ...]) -> str:
+    """Resolve one leaf's operator to a registry key and rewrite the condition in place."""
+    try:
+        key = operators.resolve(op, asking=asking, requires=requires)
+    except registry.ResolveError as exc:
+        hint = difflib.get_close_matches(op, operators.visible(asking), n=1)
+        suffix = f"  did you mean '{hint[0]}'?\n" if hint else ""
+        raise ConditionError(f"{where}: {exc}\n{suffix}") from None
+    if key != op:
+        cond[key] = cond.pop(op)
+    return key
 
 
 def facts_referenced(cond) -> set[str]:

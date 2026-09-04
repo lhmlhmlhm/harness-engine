@@ -10,7 +10,7 @@
 # scope 是**被归纳的那个时间区间**（通常一个迭代），因为这才是「这批工作」的边界；
 # 用仓库或用户名做 scope 会让两次不同区间的归纳互相覆盖。
 
-version: 1
+version: 2
 ability: cr-to-task
 title: 评审活动归纳成任务
 scope_kind: sprint

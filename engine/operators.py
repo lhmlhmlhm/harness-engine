@@ -56,10 +56,19 @@ def operator(name: str, *, accepts: tuple[str, ...], arg: str) -> Callable:
     `arg`     = a human description of the right-hand side, used in error messages.
     """
     def deco(fn: Callable) -> Callable:
-        registry.claim("operator", name, _OPERATORS, _OWNERS, fn)
-        _OPERATORS[name] = {"fn": fn, "accepts": tuple(accepts), "arg": arg}
+        key = registry.claim("operator", name, _OPERATORS, _OWNERS, fn)
+        _OPERATORS[key] = {"fn": fn, "accepts": tuple(accepts), "arg": arg}
         return fn
     return deco
+
+
+def resolve(ref: str, *, asking: str | None, requires: tuple[str, ...] = ()) -> str:
+    """A condition's operator key -> a registry key. Raises registry.ResolveError."""
+    return registry.resolve("operator", ref, _OPERATORS, asking=asking, requires=requires)
+
+
+def visible(owner: str | None) -> list[str]:
+    return registry.visible(_OPERATORS, owner)
 
 
 def is_registered(name: str) -> bool:

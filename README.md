@@ -14,7 +14,7 @@ harness-engine/
 ├── engine/                  【基座】不含任何能力词汇
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
 │   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
-│   ├── registry.py          四个注册表共享的那一件事：名字被占时怎么拒绝
+│   ├── registry.py          四个注册表共享的那件事：名字归谁、引用怎么解析
 │   ├── schema.sql           9 表，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
@@ -24,7 +24,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   305 个测试
+└── tests/                   308 个测试
 ```
 
 ## 快速开始
@@ -168,24 +168,65 @@ provider 说不出这句话，因为那会让**引擎自己**依赖一个工具�
 守卫第一次运行就抓到两处：一处描述符示例用了具体工具名（同段其它三个都用占位符），一处
 `run_progress` 的 docstring 因为这次搬迁**已经过期**。两处都改了，没加豁免。
 
-### 命名冲突会点名双方
+### 注册按 ability 命名空间（spec 格式 2.0）
 
-四个注册表是**进程全局**的，所以两个互不相识的 flow 各自注册同一个名字会互相打断，而**加载顺序
-是字母序，谁都没选过它**。旧消息只点名后加载的那个，读起来像它有缺陷。
+四个注册表曾经是**一个平坦的进程全局命名空间**。两个互不相识的 flow 各自注册 `open_findings`
+——各自领域里最自然的那个词——会互相打断，而**加载顺序是字母序，谁都没选过它**：哪一个能用是由拼写
+决定的。上一轮把消息改成点名双方，那让诊断变诚实了，但**冲突本身还在**：基座容不下两个独立挑了同
+一个明显词的 flow。
+
+现在注册归**做出它的那个文件所属的 ability** 所有，键是 `<ability>.<name>`；引擎自己的注册不属于
+任何人，保持裸名。
+
+| 情形 | 结果 |
+|---|---|
+| 两个无关 ability 各注册 `open_findings` | **共存**（`alpha.open_findings` / `beta.open_findings`）。那个消除不掉的冲突消除了，因为它从来不是一个名字，而是两个 |
+| 一个 ability 把一个名字注册两次 | 仍然拒绝，**而这一个是真缺陷**：一个作者、一个命名空间、两次声明。消息明说是「你自己的」，否则「改掉你的」会被读成旧建议「改掉别人的」 |
+| ability 注册引擎已有的名字（如 `all_of`） | **保留字，拒绝**。遮蔽会让同一个词在它自己的 flow 里是它的版本、在别人的 flow 里是引擎的版本，**而两份 spec 里都看不出来** |
+
+**spec 怎么引用**——裸名 = 我的，或引擎的（这两者不相交，所以无歧义）：
+
+```yaml
+facts: {provider: open_findings}          # 我的，或引擎的
+```
+
+借别人的**必须说出来**，而且那个 ability 必须被声明：
+
+```yaml
+requires: [alpha]
+facts: {providers: [alpha.open_findings]}
+```
+
+限定形态不是装饰。旧平坦命名空间下，一份从没提过 `alpha` 的 spec 里裸写 `open_findings` 也能解析
+——**它能用是因为别的东西恰好先加载了，那是一个靠运气成立的依赖**。写出拥有者让依赖在**使用现场**
+可见，引擎于是能拿它跟 `requires:` 对账，而不是靠指望。
+
+**解析刻意不是搜索。** 一个回落到「谁有这个名字就用谁」的 resolver 会把命名空间刚消除的那场加载顺序
+抽奖原样请回来。四条拒绝各自点出该做什么：裸名借用（说出是谁的）、限定但未声明（`requires:` 加上）、
+自我限定（写成裸名——否则一个 ability 看起来依赖它自己）、`dep` 里没这个名字（列出它有什么）。
+
+**「它属于谁」这条提示只有在拥有者恰好也载入时才给得出**，而那是消息精度依赖加载顺序。所以解析不到
+时还有一条**恒为真**的指路：裸名永远到不了别人那里，写 `<ability>.<name>` 并声明。测试把两者分开钉住
+——单独校验一份 flow 时只有恒真那条，全量校验时必须点名。
+
+**这是一次 MAJOR 变更**，因为裸名借用曾经合法而现在不合法。所以 1.x 的 spec 被拒——而 MAJOR 拒绝是
+一个手里拿着 1.x spec 的作者唯一会看的地方，于是它**说清改了什么、以及哪一半不用动**：
 
 ```
-completion predicate 'shared_name' is claimed twice:
-  already: /…/aaa/providers.py
-  also:    /…/bbb/providers.py
-  This is a NAME COLLISION between two independent extensions, not a defect in
-  either of them. … Rename one, or keep the two out of the same process.
+spec format 1.0 cannot be read; this engine reads 2.0.
+  WHAT CHANGED IN 2.0: registrations are namespaced per ability, so a reference to
+  ANOTHER ability's predicate/provider/operator must be written with its owner and
+  declared — `providers: [<owner>.<name>]` plus `requires: [<owner>]`. Your own names
+  and the engine's stay bare and need no change.
 ```
 
-这不消除冲突（真要消除得按 flow 给注册命名空间，那会改变 spec 引用它们的写法），**它消除的是错误
-的诊断**——错误的诊断会把人送去错的文件里找。
+对称地钉住了它**不该**声称知道的：一个本引擎从未定义过的版本，只拒绝、**不编造迁移说明**。
+
+实测代价：已装的 7 个 flow 里**只有一处跨 ability 引用**（`plan` 用 `push` 注册的 provider，且它本来
+就 `requires: [push]`），所以迁移是 7 行 `version:` 加那一行加限定。
 
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
-就是一个等着发生的 bug，而它当场发生了：清理代码从注册表移走了一个名字、却留在 owner 映射里，
+就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
 
 ### 读命令都能用 JSON 作答
@@ -568,7 +609,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 305 passed
+python3 -m pytest tests/ -q      # 308 passed
 ```
 
 分两类：
@@ -578,7 +619,7 @@ python3 -m pytest tests/ -q      # 305 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（246）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（249）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

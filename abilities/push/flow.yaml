@@ -14,7 +14,7 @@
 # 跨变体依赖校验）。这里用已有原语表达：把「两个组装步至少关闭一个」写进
 # 创建步的完成判据（`all_of` 的 `any_of` 组），而不是写成 deps 边。
 
-version: 1
+version: 2
 ability: push
 title: 方案推送（真实 push 转写，双变体）
 scope_kind: workspace

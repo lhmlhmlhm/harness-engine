@@ -27,7 +27,7 @@
 # table still holds zero rows while its one consumer hardcodes its own name into the
 # store. Two unlike abilities are the cheapest available guard against repeating that.
 
-version: 1
+version: 2
 ability: authoring
 role: fixture
 title: 文档收敛流程

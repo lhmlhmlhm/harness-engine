@@ -116,12 +116,26 @@ def _installed() -> dict[str, Path]:
 # major would silently misinterpret it, and a claim that cannot be falsified is exactly what
 # this engine refuses everywhere else. When a major 2 actually exists, supporting it is a
 # reader plus a fixture per version — mechanical, and guarded.
-SPEC_MAJOR = 1
+SPEC_MAJOR = 2
 SPEC_MINOR = 0
 
 
 def spec_format() -> str:
     return f"{SPEC_MAJOR}.{SPEC_MINOR}"
+
+
+# What changed between two MAJORs, keyed (from, to). Only filled for gaps this engine can
+# describe — which is the ones it introduced. A refusal that can name the change turns a wall
+# into a migration; one that cannot should stay silent rather than guess.
+_MIGRATIONS = {
+    (1, 2): (
+        "  WHAT CHANGED IN 2.0: registrations are namespaced per ability, so a reference to\n"
+        "  ANOTHER ability's predicate/provider/operator must be written with its owner and\n"
+        "  declared — `providers: [<owner>.<name>]` plus `requires: [<owner>]`. Your own names\n"
+        "  and the engine's stay bare and need no change. In 1.x a bare name reached any\n"
+        "  ability loaded in the same process, which is why the format had to break.\n"
+    ),
+}
 
 
 def _parse_spec_version(value, path: Path) -> tuple[int, int]:
@@ -208,6 +222,7 @@ GATE_PREAUTH_PREFIX = "preauth:"
 
 
 from . import conditions as conditionsmod
+from . import registry
 from .conditions import ConditionError as ConditionErrorAlias
 
 
@@ -644,6 +659,10 @@ def load_extensions(ability: str) -> None:
     if spec is None or spec.loader is None:
         raise FlowError(f"{mod_path}: cannot be loaded as a python module")
     module = importlib.util.module_from_spec(spec)
+    # Everything this file registers is owned by this ability. Ambient rather than an argument
+    # on every decorator, because registration happens AT IMPORT — the window is exactly this
+    # call, and an author repeating their own ability name in each decorator could get it wrong.
+    registry.loading(ability)
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -652,6 +671,8 @@ def load_extensions(ability: str) -> None:
             f"  An ability's registry extensions must import cleanly, or its spec's "
             f"references to them would resolve unpredictably."
         ) from None
+    finally:
+        registry.loading(None)
 
 
 def load(ability: str) -> Flow:
@@ -683,6 +704,26 @@ def _require(raw: dict, key: str, path: Path, kind=None):
     return val
 
 
+def _resolve_completion(spec: dict, where: str, ability: str,
+                        requires: tuple[str, ...], predicates) -> str:
+    """Resolve a completion spec's `type` to a registry key, IN PLACE, and recurse.
+
+    Rewriting rather than returning a parallel structure: the spec dict is what `check()` is
+    handed at runtime, so if the resolved key lived anywhere else the runtime would need to
+    know who owns what — and every place that had to know would be a place it could be wrong.
+
+    Recursion into `checks` is not optional. A composite's branches are completion specs like
+    any other, and a borrowed predicate nested one level down would otherwise resolve against
+    nobody's namespace.
+    """
+    kind = predicates.resolve(str(spec.get("type")), asking=ability, requires=requires)
+    spec["type"] = kind
+    for i, sub in enumerate(spec.get("checks") or []):
+        if isinstance(sub, dict) and "type" in sub:
+            _resolve_completion(sub, f"{where} checks[{i}]", ability, requires, predicates)
+    return kind
+
+
 def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     # THE VERSION IS READ FIRST, before any key is judged.
     #
@@ -697,6 +738,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             f"{spec_format()}.\n"
             f"  A different MAJOR means the structure changed, and this engine does not know\n"
             f"  what moved — reading it anyway would misinterpret it silently.\n"
+            + (_MIGRATIONS.get((major, SPEC_MAJOR), ""))
             + _capability_gap(raw)
         )
     # A newer MINOR is readable: the structure is unchanged and only keys were added. Carried
@@ -955,16 +997,33 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
 
     order = _topo_order(steps, path)
 
+    # `requires` is read BEFORE any reference is resolved, because it is what makes a borrowed
+    # registration both loaded and legal. Read after the references, the engine would have to
+    # either resolve against everything in the process — the load-order lottery namespacing
+    # exists to end — or resolve twice.
+    req_raw = raw.get("requires") or []
+    if not isinstance(req_raw, list):
+        raise FlowError(f"{path}: 'requires' must be a list of ability names")
+    requires = tuple(str(x) for x in req_raw)
+    for dep_ability in requires:
+        if dep_ability == ability:
+            raise FlowError(f"{path}: ability '{ability}' requires itself")
+        if not spec_path(dep_ability).is_file():
+            raise FlowError(
+                f"{path}: requires ability '{dep_ability}', which is not installed.\n"
+                f"  available: {', '.join(available_abilities())}"
+            )
+        load_extensions(dep_ability)
+
     # Completion predicates must be registered. Imported here to keep the module
     # import graph one-directional (predicates never import flow).
     from . import predicates
     for s in steps.values():
-        kind = str(s.completion.get("type"))
-        if not predicates.is_registered(kind):
-            raise FlowError(
-                f"{path}: step '{s.id}' wants completion type '{kind}', which the engine "
-                f"does not implement. registered: {', '.join(predicates.registered())}"
-            )
+        try:
+            kind = _resolve_completion(s.completion, f"{path}: step '{s.id}'",
+                                       ability, requires, predicates)
+        except registry.ResolveError as exc:
+            raise FlowError(f"{path}: step '{s.id}': {exc}") from None
         try:
             predicates.validate_spec(kind, s.completion, f"{path}: step '{s.id}'")
         except ValueError as exc:
@@ -972,12 +1031,11 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             # ValueError escape would report the ability's mistake as the engine crashing.
             raise FlowError(str(exc)) from None
     for pid, g in phase_goals.items():
-        kind = str(g.get("type"))
-        if not predicates.is_registered(kind):
-            raise FlowError(
-                f"{path}: phase '{pid}' goal wants type '{kind}', which the engine does not "
-                f"implement. registered: {', '.join(predicates.registered())}"
-            )
+        try:
+            kind = _resolve_completion(g, f"{path}: phase '{pid}' goal",
+                                       ability, requires, predicates)
+        except registry.ResolveError as exc:
+            raise FlowError(f"{path}: phase '{pid}' goal: {exc}") from None
         try:
             predicates.validate_spec(kind, g, f"{path}: phase '{pid}' goal")
         except ValueError as exc:
@@ -1128,20 +1186,6 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     # import would make a spec's references resolve or not depending on which ability happened
     # to load first. So it is declared — visible, checked, and it states what to bring along
     # when the ability moves.
-    req_raw = raw.get("requires") or []
-    if not isinstance(req_raw, list):
-        raise FlowError(f"{path}: 'requires' must be a list of ability names")
-    requires = tuple(str(x) for x in req_raw)
-    for dep_ability in requires:
-        if dep_ability == ability:
-            raise FlowError(f"{path}: ability '{ability}' requires itself")
-        if not spec_path(dep_ability).is_file():
-            raise FlowError(
-                f"{path}: requires ability '{dep_ability}', which is not installed.\n"
-                f"  available: {', '.join(available_abilities())}"
-            )
-        load_extensions(dep_ability)
-
     facts_raw = raw.get("facts") or {}
     if not isinstance(facts_raw, dict):
         raise FlowError(f"{path}: 'facts' must be a mapping")
@@ -1163,13 +1207,17 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         raise FlowError(f"{path}: facts.providers lists a provider twice: {facts_providers}")
     facts_schema: dict = {}
     owner: dict = {}
-    for pn in facts_providers:
-        if not factsmod.is_registered(pn):
+    resolved_providers = []
+    for ref in facts_providers:
+        try:
+            resolved_providers.append(factsmod.resolve(ref, asking=ability, requires=requires))
+        except registry.ResolveError as exc:
             raise FlowError(
-                f"{path}: facts provider '{pn}' is not registered.\n"
-                f"  available: {', '.join(factsmod.registered())}\n"
+                f"{path}: facts provider '{ref}': {exc}\n"
                 f"  A provider is python in the engine's registry, not code in this file."
-            )
+            ) from None
+    facts_providers = tuple(resolved_providers)
+    for pn in facts_providers:
         for k, t in factsmod.schema_of(pn).items():
             if k in owner:
                 raise FlowError(
@@ -1216,7 +1264,8 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             )
         try:
             conditionsmod.validate(spec.get("disproved_when"), facts_schema,
-                                   f"{path}: {where} disproved_when")
+                                   f"{path}: {where} disproved_when",
+                                   asking=ability, requires=requires)
         except ConditionErrorAlias as exc:
             raise FlowError(str(exc)) from None
         # NO SEPARATE "references at least one fact" CHECK. It was written and then removed:
@@ -1235,7 +1284,8 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     hooks_raw = raw.get("hooks") or []
     try:
         hook_list = hooksmod.parse(hooks_raw, steps, tuple(phases), facts_schema,
-                                   reject, path)
+                                   reject, path,
+                                   asking=ability, requires=requires)
     except (hooksmod.HookError, ConditionErrorAlias) as exc:
         raise FlowError(str(exc)) from None
 

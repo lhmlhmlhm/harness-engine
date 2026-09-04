@@ -110,7 +110,7 @@ def test_bad_spec_exits_bad_spec_and_never_touches_the_store(env, tmp_path, monk
     broken.mkdir(exist_ok=True)
     (broken / "flow.yaml").write_text(
         # depends on a step that does not exist
-        "version: 1\nability: __broken_test__\nrole: fixture\nscope_kind: x\n"
+        "version: 2\nability: __broken_test__\nrole: fixture\nscope_kind: x\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    deps: [NOPE]\n",
         encoding="utf-8",
@@ -135,7 +135,7 @@ def test_unknown_step_key_is_fatal(env):
     d = REPO / "abilities" / "__key_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __key_test__\nrole: fixture\nscope_kind: x\n"
+        "version: 2\nability: __key_test__\nrole: fixture\nscope_kind: x\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    gaet: affirm\n    stage: oops\n",
         encoding="utf-8",
@@ -153,7 +153,7 @@ def test_unknown_root_key_is_fatal(env):
     d = REPO / "abilities" / "__root_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __root_test__\nrole: fixture\nscope_kind: x\nstages: []\n"
+        "version: 2\nability: __root_test__\nrole: fixture\nscope_kind: x\nstages: []\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n",
         encoding="utf-8",
@@ -802,7 +802,7 @@ def _spec(env, name: str, body: str) -> Path:
     d.mkdir(exist_ok=True)
     role = "" if "role:" in body else "role: fixture\n"
     (d / "flow.yaml").write_text(
-        f"version: 1\nability: {name}\n{role}scope_kind: s\n{body.strip()}\n",
+        f"version: 2\nability: {name}\n{role}scope_kind: s\n{body.strip()}\n",
         encoding="utf-8",
     )
     return d
@@ -1135,7 +1135,7 @@ steps:
     try:
         r = run(["validate", "__f3__"], env)
         assert r.returncode == BAD_SPEC
-        assert "unknown operator" in r.stderr
+        assert "operator 'matchs_any' is not registered" in r.stderr
         assert "matches_any" in r.stderr
     finally:
         _rm(d)
@@ -1479,8 +1479,8 @@ def test_ability_supplied_fact_provider_is_loaded(env):
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
     _fl.load_extensions("shipcheck-asis")
-    assert "blast_radius" in _f.registered()
-    schema = _f.schema_of("blast_radius")
+    assert "shipcheck-asis.blast_radius" in _f.registered()
+    schema = _f.schema_of("shipcheck-asis.blast_radius")
     # The distinction this schema exists to preserve: "the analysis found nothing" and
     # "the analysis did not run" must be different facts, or they collapse downstream.
     assert "analysis_ran" in schema
@@ -1566,7 +1566,7 @@ def test_guard_pointing_at_ungated_step_is_rejected(env):
     d = REPO / "abilities" / "__inert_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __inert_test__\nrole: fixture\nscope_kind: x\n"
+        "version: 2\nability: __inert_test__\nrole: fixture\nscope_kind: x\n"
         "guards:\n  act: S1\n"
         "phases:\n  - id: p\n"
         "steps:\n  - id: S1\n    phase: p\n    gate: none\n",
@@ -1950,7 +1950,7 @@ steps:
     try:
         r = run(["validate", "compotypo"], env)
         assert r.returncode == BAD_SPEC
-        assert "evidnce" in r.stderr and "does not implement" in r.stderr
+        assert "evidnce" in r.stderr and "is not registered" in r.stderr
     finally:
         _rm(d)
 
@@ -2495,40 +2495,83 @@ steps: [{id: A, phase: p1}]
         _rm(d)
 
 
-def test_a_provider_from_another_ability_needs_the_declaration(env):
-    """Without `requires`, naming a borrowed provider must FAIL rather than work by luck.
+def test_borrowing_another_ability_must_name_the_owner_and_declare_it(env):
+    """Both halves, because either alone lets a dependency work by accident.
 
-    The registry is process-global, so a borrowed name would resolve whenever the owning
-    ability happened to have been loaded first — passing in one order and failing in another.
-    A dependency that works by load order is worse than one that is refused.
+    Under one flat namespace a borrowed name resolved whenever the owning ability happened to
+    have been loaded first — passing in one order and failing in another. Namespacing makes the
+    bare name mean mine-or-the-engine, so a borrow has to be WRITTEN as one, and `requires:` is
+    what makes it legal and loaded. Asserted three ways: bare is refused and says who owns it,
+    qualified-without-requires is refused and says what to add, and the pair works.
     """
-    import importlib
-    from engine import facts as factsmod, flow as flowmod
-    d = _spec(env, "borrower", """
+    bare = _spec(env, "zzz_bare", """
 facts:
   providers: [plan_taxonomy]
 phases: [{id: p1}]
 steps: [{id: A, phase: p1}]
 """)
     try:
-        # Simulate a cold process: drop the borrowed registration and the load marker.
-        # Drop EVERY provider the owning ability registers, or re-importing it at the end
-        # raises on the ones still present — and that failure would look like this test's
-        # subject rather than its cleanup.
-        borrowed = [n for n in list(factsmod._PROVIDERS)
-                    if n in ("plan_taxonomy", "workspace_taxonomy")]
-        for n in borrowed:
-            factsmod._PROVIDERS.pop(n, None)
-        flowmod._EXTENSIONS_LOADED.discard("push")
-        r = run(["validate", "borrower"], env)
-        assert r.returncode == BAD_SPEC, r.stdout + r.stderr
-        assert "not registered" in r.stderr
+        # Alone in the process, the owner is not loaded, so the refusal CANNOT name it. It must
+        # still say what to do — a message whose only guidance depends on who else happens to be
+        # loaded would be useless exactly when a flow is validated on its own.
+        alone = run(["validate", "zzz_bare"], env)
+        assert alone.returncode == BAD_SPEC
+        assert "a bare name will never reach it" in alone.stderr, alone.stderr
+        assert "<ability>.plan_taxonomy" in alone.stderr and "requires:" in alone.stderr
+
+        # With everything loaded it can be precise, and then it must be.
+        together = run(["validate"], env)
+        assert together.returncode == BAD_SPEC
+        assert "it belongs to 'push'" in together.stderr, together.stderr
+        assert "requires: [push]" in together.stderr
+        assert "push.plan_taxonomy" in together.stderr
+        # NOT "unregistered" — the name exists, and saying otherwise sends the author hunting
+        # for a typo in something spelled correctly.
+        assert "plan_taxonomy' is not registered" not in together.stderr
     finally:
-        _rm(d)
-        for n in ("plan_taxonomy", "workspace_taxonomy"):
-            factsmod._PROVIDERS.pop(n, None)
-        flowmod._EXTENSIONS_LOADED.discard("push")
-        flowmod.load("push")   # re-register for the rest of the session
+        _rm(bare)
+
+    undeclared = _spec(env, "zzz_undeclared", """
+facts:
+  providers: [push.plan_taxonomy]
+phases: [{id: p1}]
+steps: [{id: A, phase: p1}]
+""")
+    try:
+        out = run(["validate", "zzz_undeclared"], env)
+        assert out.returncode == BAD_SPEC
+        assert "does not declare" in out.stderr, out.stderr
+        assert "Add it: requires: [push]" in out.stderr
+    finally:
+        _rm(undeclared)
+
+    ok = _spec(env, "zzz_borrower", """
+requires: [push]
+facts:
+  providers: [push.plan_taxonomy]
+phases: [{id: p1}]
+steps: [{id: A, phase: p1}]
+""")
+    try:
+        assert rc(["validate", "zzz_borrower"], env) == OK
+    finally:
+        _rm(ok)
+
+    # And the qualified form is ONLY for borrowing: an ability qualifying its own name would
+    # read as a dependency on itself, and the two forms would stop meaning different things.
+    selfq = _spec(env, "zzz_selfq", """
+facts:
+  provider: zzz_selfq.mine
+phases: [{id: p1}]
+steps: [{id: A, phase: p1}]
+""")
+    try:
+        out = run(["validate", "zzz_selfq"], env)
+        assert out.returncode == BAD_SPEC
+        assert "names this ability's own registration" in out.stderr, out.stderr
+        assert "Write it bare: 'mine'" in out.stderr
+    finally:
+        _rm(selfq)
 
 
 def test_the_two_new_abilities_have_full_prose_and_no_product_names(env):
@@ -2953,7 +2996,7 @@ def _cap_probe(requires: str, cond: str = "{fact: n, count_gte: 1}") -> pathlib.
         "    return {'n': 0}\n",
         encoding="utf-8")
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __cap_test__\nrole: fixture\nscope_kind: x\n"
+        "version: 2\nability: __cap_test__\nrole: fixture\nscope_kind: x\n"
         "facts:\n  providers: [cap_facts]\n"
         "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
         "steps:\n"
@@ -3039,7 +3082,7 @@ def test_an_absent_capability_stops_only_the_steps_that_read_it(env):
             "def _b(ctx):\n    return {'b': 7}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __cap2_test__\nrole: fixture\nscope_kind: x\n"
+            "version: 2\nability: __cap2_test__\nrole: fixture\nscope_kind: x\n"
             "facts:\n  providers: [here_facts, gone_facts]\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
             "steps:\n"
@@ -3086,7 +3129,7 @@ def test_an_unavailable_fact_may_not_silently_pin_a_run_shape(env):
             "def _v(ctx):\n    return {'mode': 'beta'}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __capv_test__\nrole: fixture\nscope_kind: x\n"
+            "version: 2\nability: __capv_test__\nrole: fixture\nscope_kind: x\n"
             "facts:\n  providers: [vfacts]\n"
             "variants:\n  values: [alpha, beta]\n  default: alpha\n  fact: mode\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
@@ -3152,7 +3195,8 @@ def test_the_real_ability_declares_the_capabilities_its_tools_need(env):
     from engine import facts as _f, flow as _fl
     _fl.load_extensions("shipcheck-asis")
     declared = {pn: _f.capabilities(pn)
-                for pn in ("blast_radius", "decision_gate", "review_comments")}
+                for pn in ("shipcheck-asis.blast_radius", "shipcheck-asis.decision_gate",
+                           "shipcheck-asis.review_comments")}
     assert all(declared.values()), declared
     assert all(list(d[0])[0] == "file" for d in declared.values())
     # Every declared tool is actually shipped, so a correct install has no absent capability.
@@ -3160,8 +3204,8 @@ def test_the_real_ability_declares_the_capabilities_its_tools_need(env):
         assert _f.probe_capabilities(pn) == [], (pn, _f.probe_capabilities(pn))
     # The honest-empty branch survived: absence of CHANGES is still reachable without any
     # capability being absent.
-    assert "checks_meaningful" in _f.schema_of("blast_radius")
-    assert "analysis_ran" in _f.schema_of("blast_radius")
+    assert "checks_meaningful" in _f.schema_of("shipcheck-asis.blast_radius")
+    assert "analysis_ran" in _f.schema_of("shipcheck-asis.blast_radius")
 
 
 def _claim_probe(body_extra: str = "") -> pathlib.Path:
@@ -3180,7 +3224,7 @@ def _claim_probe(body_extra: str = "") -> pathlib.Path:
         "    return {'found_count': int(v)}\n",
         encoding="utf-8")
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __claim_test__\nrole: fixture\nscope_kind: x\n"
+        "version: 2\nability: __claim_test__\nrole: fixture\nscope_kind: x\n"
         "facts:\n  providers: [probe_facts]\n"
         "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
         "steps:\n"
@@ -3318,8 +3362,8 @@ def test_a_pure_compute_tool_is_wired_through_the_provider_seam(env):
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
     _fl.load_extensions("shipcheck-asis")
-    assert "run_metrics" in _f.registered()
-    caps = _f.capabilities("run_metrics")
+    assert "shipcheck-asis.run_metrics" in _f.registered()
+    caps = _f.capabilities("shipcheck-asis.run_metrics")
     kinds = [next(iter(d)) for d in caps]
     assert kinds == ["file", "file"], caps
     # The tool's own presence AND the runtime record it reads are both declared. Declaring
@@ -3368,7 +3412,7 @@ def test_capability_present_but_no_data_is_its_own_answer(env, monkeypatch):
     tool = REPO / "abilities" / "shipcheck-asis" / "tools" / "analyze-run-metrics.py"
     proc = subprocess.run([sys.executable, str(tool), "--since", str(opened),
                            "--mode", "plan-doc"], capture_output=True, text=True)
-    got = _f.gather("run_metrics", {"run_id": "mx", "scope": str(REPO),
+    got = _f.gather("shipcheck-asis.run_metrics", {"run_id": "mx", "scope": str(REPO),
                                     "scope_kind": "workspace", "ability": "shipcheck-asis"})
     assert got["metrics_available"] is (proc.returncode == 0), (proc.returncode, got)
     if proc.returncode != 0:
@@ -3376,7 +3420,7 @@ def test_capability_present_but_no_data_is_its_own_answer(env, monkeypatch):
         # thing the criterion above exists to refuse.
         assert (got["run_turns"], got["run_calls"], got["run_peak_ctx_pct"]) == (0, 0, 0), got
     # A run_id the store does not have is the same honest nothing, by a different route.
-    absent = _f.gather("run_metrics", {"run_id": "no-such-run", "scope": str(REPO),
+    absent = _f.gather("shipcheck-asis.run_metrics", {"run_id": "no-such-run", "scope": str(REPO),
                                        "scope_kind": "workspace", "ability": "shipcheck-asis"})
     assert absent["metrics_available"] is False, absent
 
@@ -3397,10 +3441,10 @@ def test_a_net_dependent_provider_declares_the_host_and_touches_no_credentials(e
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
     _fl.load_extensions("cr-reviewer")
-    caps = _f.capabilities("cr_review_state")
+    caps = _f.capabilities("cr-reviewer.cr_review_state")
     assert {"cmd": "curl"} in caps, caps
     assert any("net" in d and "code.amazon.com" in d["net"] for d in caps), caps
-    schema = _f.schema_of("cr_review_state")
+    schema = _f.schema_of("cr-reviewer.cr_review_state")
     # Authorization is a FACT, not a fifth capability kind: the engine can probe presence,
     # and probing authorization would mean making a real authenticated request, which is
     # domain knowledge the engine must not hold.
@@ -3462,7 +3506,7 @@ def test_an_unreachable_review_host_refuses_the_claim_of_having_read_it(env):
             "def _o(ctx):\n    return {'host_answered': True}\n",
             encoding="utf-8")
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __net_test__\nrole: fixture\nscope_kind: cr\n"
+            "version: 2\nability: __net_test__\nrole: fixture\nscope_kind: cr\n"
             "facts:\n  providers: [offsite_facts]\n"
             "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
             "steps:\n"
@@ -3501,9 +3545,9 @@ def _fleet_fixture() -> pathlib.Path:
     d = REPO / "abilities" / "__fleet_test__"
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        "version: 1\nability: __fleet_test__\nrole: fixture\nscope_kind: repo\n"
+        "version: 2\nability: __fleet_test__\nrole: fixture\nscope_kind: repo\n"
         "requires: [shipcheck-asis]\n"
-        "facts:\n  providers: [fleet_central]\n"
+        "facts:\n  providers: [shipcheck-asis.fleet_central]\n"
         "phases:\n  - id: p\n    goal: {type: phase_steps_closed}\n"
         "steps:\n"
         "  - id: S1\n    phase: p\n    title: t\n    directive: d\n"
@@ -3721,7 +3765,7 @@ def test_the_declared_bar_is_read_and_the_unmeasurable_half_stays_visible(
         "baselines:\n  ship-check:\n"
         "    context: {status: real, duration_p50: 1, duration_p95: 2}\n"
         "    coding: {status: placeholder, duration_p50: 1, duration_p95: 2}\n"))
-    got = _f.gather("quality_slo", ctx)
+    got = _f.gather("shipcheck-asis.quality_slo", ctx)
     assert got["slo_readable"] == "yes" and got["layer_green_threshold"] == "8.0", got
     assert got["baselines_are_placeholder"] is True, got
 
@@ -3730,23 +3774,23 @@ def test_the_declared_bar_is_read_and_the_unmeasurable_half_stays_visible(
         "slo:\n  ship-check:\n    _default:\n      layer: {green: 7.5}\n"
         "baselines:\n  ship-check:\n"
         "    context: {status: real, duration_p50: 1, duration_p95: 2}\n"))
-    got = _f.gather("quality_slo", ctx)
+    got = _f.gather("shipcheck-asis.quality_slo", ctx)
     assert got["baselines_are_placeholder"] is False, got
     assert got["layer_green_threshold"] == "7.5", got
 
     # ② A declaration with no threshold at all is NOT a readable bar.
     monkeypatch.setenv("HARNESS_QUALITY_SLO", decl("slo:\n  ship-check: {}\n"))
-    got = _f.gather("quality_slo", ctx)
+    got = _f.gather("shipcheck-asis.quality_slo", ctx)
     assert got["slo_readable"] == "", got
     monkeypatch.setenv("HARNESS_QUALITY_SLO", str(tmp_path / "does-not-exist.yaml"))
-    assert _f.gather("quality_slo", ctx)["slo_readable"] == "", "a missing file is no bar"
+    assert _f.gather("shipcheck-asis.quality_slo", ctx)["slo_readable"] == "", "a missing file is no bar"
     # A CORRUPT declaration must land on the same answer by a different route. Without the
     # provider's own catch it escapes as an exception, which the facts layer turns into a loud
     # failure that refuses the whole run — "the engine broke" instead of "there is no bar".
     bad = tmp_path / "corrupt.yaml"
     bad.write_text("slo: [this is: not, a mapping\n  - and unbalanced\n", encoding="utf-8")
     monkeypatch.setenv("HARNESS_QUALITY_SLO", str(bad))
-    assert _f.gather("quality_slo", ctx)["slo_readable"] == "", "corrupt is no bar, not a crash"
+    assert _f.gather("shipcheck-asis.quality_slo", ctx)["slo_readable"] == "", "corrupt is no bar, not a crash"
 
     # ③ The severity mapping, pinned by recording one of each.
     monkeypatch.setenv("HARNESS_QUALITY_SLO", decl(
@@ -3758,12 +3802,12 @@ def test_the_declared_bar_is_read_and_the_unmeasurable_half_stays_visible(
             _st.record_violation(conn, "q1", None, "probe", "x", severity=sev)
     finally:
         conn.close()
-    got = _f.gather("quality_slo", ctx)
+    got = _f.gather("shipcheck-asis.quality_slo", ctx)
     assert got["error_violation_count"] == 3, got     # blocked -> error
     assert got["warning_violation_count"] == 1, got   # breach  -> warning
 
     # The design claim: no total is produced, and the two real dimensions stay separate.
-    schema = _f.schema_of("quality_slo")
+    schema = _f.schema_of("shipcheck-asis.quality_slo")
     assert not any("score" in k or "total" in k for k in schema), schema
     assert "completeness_rate_pct" in schema and "error_violation_count" in schema, schema
     rc(["close-run", "--run", "q1", "--result", "aborted",
@@ -3814,7 +3858,7 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     (data / "done" / f"{slug}.md").write_text(
         f"---\nstatus: done\nslug: {slug}\n---\n\n# T\n\n## Shipped\n\ncommit abc\n",
         encoding="utf-8")
-    got = _f.gather("plan_writeback", ctx)
+    got = _f.gather("shipcheck-asis.plan_writeback", ctx)
     assert got["plan_doc_found"] is True and got["plan_doc_dir"] == "done", got
     assert got["plan_doc_status"] == "done", got
     assert got["shipped_block_present"] is True, got
@@ -3824,14 +3868,14 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     rec = hlog / f"2026-09-02_bms_{slug}"
     rec.mkdir()
     (rec / "record.md").write_text("x\n", encoding="utf-8")
-    assert _f.gather("plan_writeback", ctx)["history_record_exists"] is True
+    assert _f.gather("shipcheck-asis.plan_writeback", ctx)["history_record_exists"] is True
 
     # ③ A document that LOST its frontmatter but quotes a yaml block later. The leading-block
     #    read reports no status; a whole-document search would report the snippet's.
     (data / "done" / f"{slug}.md").write_text(
         "# Title\n\nsome prose\n\n---\nstatus: bogus-from-a-quoted-block\n---\n",
         encoding="utf-8")
-    drifted = _f.gather("plan_writeback", ctx)
+    drifted = _f.gather("shipcheck-asis.plan_writeback", ctx)
     assert drifted["plan_doc_found"] is True, drifted
     assert drifted["plan_doc_status"] == "", drifted
     assert drifted["shipped_block_present"] is False, drifted
@@ -3842,7 +3886,7 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     (data / "done" / f"{slug}.md").write_text(
         "---\nstatus: done\n---\n\n# T\n\nThis will be Shipped in a follow-up change.\n",
         encoding="utf-8")
-    talks = _f.gather("plan_writeback", ctx)
+    talks = _f.gather("shipcheck-asis.plan_writeback", ctx)
     assert talks["plan_doc_status"] == "done", talks
     assert talks["shipped_block_present"] is False, talks
     rc(["close-run", "--run", "pw", "--result", "aborted",
@@ -3866,7 +3910,7 @@ def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path)
     # A path with no store at all: the CLI creates an empty database, finds no tables, and
     # exits non-zero. The count it implies is an artefact of that failure.
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "nope.db"))
-    got = _f.gather("hot_set", {})
+    got = _f.gather("shipcheck-asis.hot_set", {})
     assert got["hot_banner_readable"] is False, got
     assert got["hot_set_count"] == 0 and got["hot_set_ids"] == [], got
 
@@ -3878,7 +3922,7 @@ def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path)
     if cli.is_file():
         proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
                               capture_output=True, text=True)
-        live = _f.gather("hot_set", {})
+        live = _f.gather("shipcheck-asis.hot_set", {})
         assert live["hot_banner_readable"] is (proc.returncode == 0), (proc.returncode, live)
         if proc.returncode == 0:
             # The listing lines are load-bearing: a count with the per-entry lines dropped is
@@ -3906,19 +3950,19 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path, m
 
     # This repository IS a source checkout — `.git` is a directory.
     assert (REPO / ".git").is_dir()
-    src = _f.gather("worktree_state", {"run_id": "none", "scope": str(REPO)})
+    src = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(REPO)})
     assert src["in_linked_worktree"] is False, src
 
     # The shape of a linked worktree, without touching a real one.
     wt = tmp_path / "linked"
     wt.mkdir()
     (wt / ".git").write_text(f"gitdir: {REPO}/.git/worktrees/probe\n", encoding="utf-8")
-    linked = _f.gather("worktree_state", {"run_id": "none", "scope": str(wt)})
+    linked = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(wt)})
     assert linked["in_linked_worktree"] is True, linked
     # A directory that is not a repository at all is neither isolated nor on a branch.
     plain = tmp_path / "plain"
     plain.mkdir()
-    bare = _f.gather("worktree_state", {"run_id": "none", "scope": str(plain)})
+    bare = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(plain)})
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 
@@ -4007,7 +4051,7 @@ def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
     )
     owner = flowmod.load("shipcheck-asis").facts_owner
     for f in facts_used:
-        assert owner.get(f) == "hot_set", (f, owner.get(f))
+        assert owner.get(f) == "shipcheck-asis.hot_set", (f, owner.get(f))
 
 
 def test_the_design_lifecycle_is_documented_as_executed_ELSEWHERE(env):
@@ -4170,7 +4214,7 @@ def test_a_spec_that_declares_nothing_lands_on_the_strict_role(env):
     d.mkdir(exist_ok=True)
     try:
         (d / "flow.yaml").write_text(
-            "version: 1\nability: __default_role_test__\nscope_kind: s\n"
+            "version: 2\nability: __default_role_test__\nscope_kind: s\n"
             "phases:\n  - id: p\nsteps:\n  - id: S1\n    phase: p\n"
             "    title: t\n    directive: d\n    completion: {type: attest}\n",
             encoding="utf-8")
@@ -4457,7 +4501,7 @@ def _external_flow(root: Path, name: str, *, title: str = "External") -> Path:
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "flow.yaml").write_text(
-        f"version: 1\nability: {name}\ntitle: {title}\n"
+        f"version: 2\nability: {name}\ntitle: {title}\n"
         f"when: a flow kept outside the engine tree, which is the point of this test\n"
         f"scope_kind: s\nphases:\n  - id: p1\n    title: P1\n"
         f"steps:\n  - id: W01\n    phase: p1\n    title: Do it\n    directive: Do the thing.\n",
@@ -4581,7 +4625,7 @@ def _no_guard_fixture(name: str) -> Path:
     d = REPO / "abilities" / name
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        f"version: 1\nability: {name}\nrole: fixture\nscope_kind: repo\n"
+        f"version: 2\nability: {name}\nrole: fixture\nscope_kind: repo\n"
         f"phases:\n  - id: p1\n    title: P1\n"
         f"steps:\n  - id: W01\n    phase: p1\n    title: Work\n    directive: Work.\n",
         encoding="utf-8",
@@ -5265,7 +5309,7 @@ def _uses_spec(name: str, body: str) -> Path:
     d = REPO / "abilities" / name
     d.mkdir(exist_ok=True)
     (d / "flow.yaml").write_text(
-        f"version: 1\nability: {name}\nscope_kind: s\n{body.strip()}\n", encoding="utf-8")
+        f"version: 2\nability: {name}\nscope_kind: s\n{body.strip()}\n", encoding="utf-8")
     return d
 
 
@@ -5652,7 +5696,7 @@ def test_the_brief_is_tailored_to_what_is_installed(env, tmp_path):
     root = tmp_path / "tree"
     (root / "tiny").mkdir(parents=True)
     (root / "tiny" / "flow.yaml").write_text(
-        "version: 1\nability: tiny\n"
+        "version: 2\nability: tiny\n"
         "when: a minimal flow, used to check the brief is tailored rather than fixed\n"
         "uses: [gates]\nscope_kind: s\n"
         "phases:\n  - id: p1\n    title: P1\n"
@@ -5952,7 +5996,7 @@ def _ver_env(env, root: Path) -> dict:
     return {**env, "HARNESS_ABILITIES_PATH": str(root)}
 
 
-@pytest.mark.parametrize("version", ["1", '"1.0"', '"1.7"'])
+@pytest.mark.parametrize("version", ["2", '"2.0"', '"2.7"'])
 def test_the_same_major_is_readable_whatever_the_minor(env, tmp_path, version):
     """MAJOR is the readability claim; MINOR only says keys were added.
 
@@ -5975,14 +6019,14 @@ def test_a_key_from_a_newer_minor_is_refused_as_a_version_gap_not_a_typo(env, tm
     no mention of a version.
     """
     root = tmp_path / "minor"
-    _ver_spec(root, "newer", 'version: "1.4"\nwhen: a flow from a newer minor carrying an '
+    _ver_spec(root, "newer", 'version: "2.4"\nwhen: a flow from a newer minor carrying an '
                              'unknown key\nuses: []\nretry_policy: aggressive\n')
-    _ver_spec(root, "typo", 'version: 1\nwhen: a flow at this format that simply misspells a '
+    _ver_spec(root, "typo", 'version: 2\nwhen: a flow at this format that simply misspells a '
                             'key\nuses: []\nretry_polcy: aggressive\n')
 
     newer = run(["validate", "newer"], _ver_env(env, root))
     assert newer.returncode == BAD_SPEC
-    assert "format 1.4" in newer.stderr and "same MAJOR" in newer.stderr, newer.stderr
+    assert "format 2.4" in newer.stderr and "same MAJOR" in newer.stderr, newer.stderr
     assert "A typo here" not in newer.stderr, "a version gap was reported as a typo"
 
     typo = run(["validate", "typo"], _ver_env(env, root))
@@ -5999,11 +6043,11 @@ def test_the_version_is_read_before_any_key_is_judged(env, tmp_path):
     the symptom and never mentioned the cause — which is exactly what happened.
     """
     root = tmp_path / "order"
-    _ver_spec(root, "both", "version: 2\nwhen: a newer major that also carries an unknown "
+    _ver_spec(root, "both", "version: 3\nwhen: a newer major that also carries an unknown "
                             "key\nuses: []\nretry_policy: aggressive\n")
     out = run(["validate", "both"], _ver_env(env, root))
     assert out.returncode == BAD_SPEC
-    assert "spec format 2.0 cannot be read" in out.stderr, out.stderr
+    assert "spec format 3.0 cannot be read" in out.stderr, out.stderr
     # The crisp discriminator is the KEY NAME: it can only appear if the key check ran. Phrases
     # like "does not know" are no good here — the correct message contains one of its own
     # ("does not know what moved"), so asserting on those passes for the wrong reason.
@@ -6019,9 +6063,9 @@ def test_an_unreadable_major_says_whether_the_machinery_is_missing_too(env, tmp_
     reader. The version number alone cannot tell them apart, so the refusal does.
     """
     root = tmp_path / "gap"
-    _ver_spec(root, "formatonly", "version: 2\nwhen: a newer major needing nothing this engine "
+    _ver_spec(root, "formatonly", "version: 3\nwhen: a newer major needing nothing this engine "
                                   "lacks\nuses: [gates, prose]\n")
-    _ver_spec(root, "alsomissing", "version: 2\nwhen: a newer major that also needs absent "
+    _ver_spec(root, "alsomissing", "version: 3\nwhen: a newer major that also needs absent "
                                    "machinery\nuses: [gates, leases]\n")
 
     fmt = run(["validate", "formatonly"], _ver_env(env, root))
@@ -6042,11 +6086,11 @@ def test_a_float_version_is_refused_because_minors_would_collide(env, tmp_path):
     says 1.10 and what arrives is 1.1.
     """
     root = tmp_path / "float"
-    _ver_spec(root, "floaty", "version: 1.10\nwhen: a flow whose version was left unquoted\n"
+    _ver_spec(root, "floaty", "version: 2.10\nwhen: a flow whose version was left unquoted\n"
                               "uses: []\n")
     out = run(["validate", "floaty"], _ver_env(env, root))
     assert out.returncode == BAD_SPEC
-    assert "is a float (1.1)" in out.stderr, out.stderr
+    assert "is a float (2.1)" in out.stderr, out.stderr
     assert "SAME" in out.stderr and "Quote it" in out.stderr
 
 
@@ -6082,50 +6126,146 @@ def test_the_builtin_providers_report_only_what_the_engine_holds(env):
 
     # And the flow that used the moved provider still gets it — from its own file.
     f = fl.load("delivery")
-    assert "git_tree" in f.facts_providers
+    assert "delivery.git_tree" in f.facts_providers, f.facts_providers
     assert (REPO / "abilities" / "delivery" / "providers.py").is_file()
-    assert "git_tree" in fa.registered()
+    assert "delivery.git_tree" in fa.registered()
     # Now that it lives with a flow, it can declare the tool it needs — which as a built-in it
     # could not, and that declaration is the whole difference between an absent tool and an
     # empty answer.
-    assert any("git" in str(d) for d in fa.capabilities("git_tree")), fa.capabilities("git_tree")
+    assert any("git" in str(d) for d in fa.capabilities("delivery.git_tree")), fa.capabilities("delivery.git_tree")
 
 
 # ------------------------------------------------- a name collision names both sides
 
-def test_a_registration_collision_names_both_sides(env, tmp_path):
-    """Two independent flows claiming one name must not read as a defect in the loser.
+def _ns_ability(root: Path, name: str, reg_name: str, *, uses: str = "[facts]",
+                body: str | None = None) -> None:
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "providers.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from engine import facts\n"
+        f"@facts.provider({reg_name!r}, schema={{'n': 'int'}})\n"
+        "def _p(ctx):\n    return {'n': 1}\n", encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        f"version: 2\nability: {name}\ntitle: T\n"
+        f"when: reach for this one when exercising how registrations are namespaced\n"
+        f"uses: {uses}\nscope_kind: s\n"
+        + (f"facts:\n  provider: {reg_name}\n" if body is None else body) +
+        f"phases:\n  - id: p1\n    title: P1\n"
+        f"steps:\n  - id: W01\n    phase: p1\n"
+        f"    completion: {{type: evidence, kind: k}}\n    directive: Do it.\n",
+        encoding="utf-8")
 
-    The registries are process-global and load order is alphabetical, so the old message — which
-    named only the second — accused whichever author happened to sort later. Nothing here removes
-    the collision; this removes the wrong diagnosis, which is the part that sends someone looking
-    in the wrong file.
+
+def test_two_unrelated_abilities_may_now_use_one_obvious_word(env, tmp_path):
+    """THE POINT OF NAMESPACING, asserted on the case that used to be impossible.
+
+    Two authors who have never met both pick `open_findings` — the obvious word for the thing
+    they each look at. Under one flat namespace the second to load raised, and load order is
+    alphabetical, so which of them worked was decided by spelling. Nothing about that was a
+    defect in either flow; the base simply could not host both.
     """
-    root = tmp_path / "clash"
-    for name in ("aaa", "bbb"):
-        d = root / name
-        d.mkdir(parents=True)
-        (d / "providers.py").write_text(
-            "from engine.predicates import predicate\n"
-            "@predicate('shared_name')\n"
-            "def _c(conn, run_id, step, spec):\n    return True, 'ok'\n", encoding="utf-8")
-        (d / "flow.yaml").write_text(
-            f"version: 1\nability: {name}\n"
-            f"when: one of two flows that happen to pick the same extension name\n"
-            f"uses: []\nscope_kind: s\nphases:\n  - id: p1\n    title: P1\n"
-            f"steps:\n  - id: W01\n    phase: p1\n    completion: {{type: shared_name}}\n"
-            f"    directive: Do it.\n", encoding="utf-8")
-
+    root = tmp_path / "ns"
+    _ns_ability(root, "alpha", "open_findings")
+    _ns_ability(root, "beta", "open_findings")
     e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
-    assert rc(["validate", "aaa"], e) == OK, "each is fine on its own"
-    assert rc(["validate", "bbb"], e) == OK
 
-    both = run(["validate"], e)
-    assert both.returncode == BAD_SPEC
-    assert "claimed twice" in both.stderr, both.stderr
-    assert str(root / "aaa") in both.stderr and str(root / "bbb") in both.stderr, \
-        "the message must name both sides, not only the one that lost"
-    assert "not a defect in" in both.stderr
+    assert rc(["validate"], e) == OK, "both flows must load in ONE process"
+
+    import os
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as fa, flow as fl
+    prior = os.environ.get("HARNESS_ABILITIES_PATH")
+    os.environ["HARNESS_ABILITIES_PATH"] = str(root)
+    try:
+        a, b = fl.load("alpha"), fl.load("beta")
+        keys = [k for k in fa.registered() if k.endswith("open_findings")]
+        assert keys == ["alpha.open_findings", "beta.open_findings"], keys
+        # Each spec's bare reference resolved to ITS OWN, not to whoever loaded first.
+        assert a.facts_providers == ("alpha.open_findings",), a.facts_providers
+        assert b.facts_providers == ("beta.open_findings",), b.facts_providers
+        # And the two are genuinely different callables, not one entry read twice.
+        assert fa._PROVIDERS["alpha.open_findings"]["fn"] is not \
+            fa._PROVIDERS["beta.open_findings"]["fn"]
+    finally:
+        for k in ("alpha.open_findings", "beta.open_findings"):
+            fa._PROVIDERS.pop(k, None)
+            fa._OWNERS.pop(k, None)
+        for n in ("alpha", "beta"):
+            fl._EXTENSIONS_LOADED.discard(n)
+        if prior is None:
+            os.environ.pop("HARNESS_ABILITIES_PATH", None)
+        else:
+            os.environ["HARNESS_ABILITIES_PATH"] = prior
+
+
+def test_the_collision_that_remains_is_one_ability_naming_one_thing_twice(env, tmp_path):
+    """The only collision left is a real defect, and it is blamed on the right file.
+
+    Namespacing removes the collision between strangers. It cannot remove — and should not —
+    one ability registering one name twice: that is one author, one namespace, two claims. The
+    message must say which, or the fix (rename mine) reads as the old advice (rename someone
+    else's).
+    """
+    root = tmp_path / "dup"
+    d = root / "solo"
+    d.mkdir(parents=True)
+    (d / "providers.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from engine import facts\n"
+        "@facts.provider('twice', schema={'n': 'int'})\n"
+        "def _a(ctx):\n    return {'n': 1}\n"
+        "@facts.provider('twice', schema={'n': 'int'})\n"
+        "def _b(ctx):\n    return {'n': 2}\n", encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        "version: 2\nability: solo\ntitle: T\n"
+        "when: reach for this one when one ability claims a single name twice\n"
+        "uses: [facts]\nscope_kind: s\nfacts:\n  provider: twice\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n"
+        "    completion: {type: evidence, kind: k}\n    directive: Do it.\n", encoding="utf-8")
+
+    out = run(["validate", "solo"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == BAD_SPEC
+    assert "claimed twice by ability 'solo'" in out.stderr, out.stderr
+    assert "NOT a collision with some" in out.stderr
+    assert str(d / "providers.py") in out.stderr
+
+
+def test_an_ability_may_not_shadow_a_name_the_engine_defines(env, tmp_path):
+    """Reserved, because shadowing would be invisible in both specs.
+
+    A flow redefining `all_of` would make one word mean its version inside itself and the
+    engine's everywhere else, with nothing in either yaml to show it — and namespacing is what
+    makes that tempting, since the author now correctly believes their names are private.
+    """
+    root = tmp_path / "shadow"
+    d = root / "shady"
+    d.mkdir(parents=True)
+    (d / "providers.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from engine import predicates\n"
+        "@predicates.predicate('all_of')\n"
+        "def _x(conn, run_id, step, spec):\n    return True, 'ok'\n", encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        "version: 2\nability: shady\ntitle: T\n"
+        "when: reach for this one when an ability tries to redefine an engine name\n"
+        "uses: []\nscope_kind: s\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n"
+        "    completion: {type: evidence, kind: k}\n    directive: Do it.\n", encoding="utf-8")
+
+    out = run(["validate", "shady"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == BAD_SPEC
+    assert "the ENGINE already defines" in out.stderr, out.stderr
+    assert "Shadowing it would make one word mean" in out.stderr
+    # It must say the restriction is about the ENGINE only, or the author will conclude their
+    # names have to avoid every other ability as well — the opposite of what changed.
+    assert "does not have to avoid other ABILITIES" in out.stderr
 
 
 def test_the_registry_itself_decides_whether_a_name_is_taken(env):
@@ -6253,3 +6393,36 @@ def test_next_states_its_requirements_as_data(env):
     # The pointer, not the text — the tiering must survive the machine form.
     assert d["guide"] is None or "file" in d["guide"]
     assert "directive" in d and len(d["remaining"]) > 1
+
+
+def test_the_major_bump_says_what_moved_instead_of_only_refusing(env, tmp_path):
+    """A MAJOR that cannot describe itself is a wall; one that can is a migration.
+
+    Refusing a 1.x spec is correct — under one flat namespace a bare name reached any ability in
+    the process, so the meaning of an unqualified reference genuinely changed and reading it
+    anyway would resolve it differently than its author saw. But the refusal is the only place
+    an author with a 1.x spec looks, so it has to name the change and the fix.
+
+    Asserted alongside the case it must NOT claim to know: a version this engine never defined
+    gets the refusal WITHOUT an invented migration note.
+    """
+    root = tmp_path / "mig"
+    _ver_spec(root, "old", "version: 1\nwhen: a flow written against the previous spec major\n"
+                           "uses: []\n")
+    _ver_spec(root, "future", "version: 9\nwhen: a flow from a format this engine never had\n"
+                              "uses: []\n")
+
+    old = run(["validate", "old"], _ver_env(env, root))
+    assert old.returncode == BAD_SPEC
+    assert "WHAT CHANGED IN 2.0" in old.stderr, old.stderr
+    assert "namespaced per ability" in old.stderr
+    assert "requires:" in old.stderr
+    # The half that needs no work must be said too, or every 1.x author starts by auditing
+    # names that were never affected.
+    assert "stay bare and need no change" in old.stderr
+
+    fut = run(["validate", "future"], _ver_env(env, root))
+    assert fut.returncode == BAD_SPEC
+    assert "cannot be read" in fut.stderr
+    assert "WHAT CHANGED" not in fut.stderr, \
+        "the engine described a format gap it cannot possibly know"

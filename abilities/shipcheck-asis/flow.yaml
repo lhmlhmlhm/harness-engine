@@ -8,7 +8,7 @@
 # 引擎只会「记录一个 gate」，不会「算出该不该 gate」—— 后者是 2,143 行的爆炸半径
 # 分析，作为黑盒复制在 tools/，经 providers.py 声明成 8 个事实接进来。
 
-version: 1
+version: 2
 ability: shipcheck-asis
 title: 交付生命周期（真实 ship-check 转写）
 scope_kind: repo

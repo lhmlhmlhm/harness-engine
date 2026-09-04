@@ -47,10 +47,20 @@ def predicate(name: str, *, requires: tuple[str, ...] = (),
     an ability using such a predicate actually declares a provider for the fact.
     """
     def deco(fn: Callable) -> Callable:
-        registry.claim("completion predicate", name, _REGISTRY, _OWNERS, fn)
-        _REGISTRY[name] = {"fn": fn, "requires": requires, "needs_facts": needs_facts}
+        key = registry.claim("completion predicate", name, _REGISTRY, _OWNERS, fn)
+        _REGISTRY[key] = {"fn": fn, "requires": requires, "needs_facts": needs_facts}
         return fn
     return deco
+
+
+def resolve(ref: str, *, asking: str | None, requires: tuple[str, ...] = ()) -> str:
+    """A spec's completion type -> a registry key. Raises registry.ResolveError."""
+    return registry.resolve("completion predicate", ref, _REGISTRY,
+                            asking=asking, requires=requires)
+
+
+def visible(owner: str | None) -> list[str]:
+    return registry.visible(_REGISTRY, owner)
 
 
 def needs_facts(name: str) -> bool:

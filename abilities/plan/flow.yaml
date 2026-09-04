@@ -14,7 +14,7 @@
 #   * 有一个「禁止 default」的 gate（slug 索取），是 preauth 语义的反面：不允许预授权
 #   * 无 guard —— plan 不触发任何需要保护的外部动作，这一点与 push/shipcheck 都不同
 
-version: 1
+version: 2
 ability: plan
 title: 方案生成（真实 plan 转写，双变体）
 scope_kind: plan_slug
@@ -49,7 +49,7 @@ facts:
   # 工作区，而本流程的 scope 是一份待写的方案。喂给它只会让任何方案都不命中、一律落默认，
   # 而输出仍写着「derived」。workspace_taxonomy 改从 run 自己记录的 workspace 证据派生
   # （G03 记，见下），这也是唯一能在本流程里回答这个问题的时点。
-  providers: [workspace_taxonomy]
+  providers: [push.workspace_taxonomy]   # borrowed; declared in requires:
 
 prose:
   root: prose/

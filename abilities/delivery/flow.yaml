@@ -24,7 +24,7 @@
 #
 # Everything below is DATA. The engine has never heard of "commit" or "D02".
 
-version: 1
+version: 2
 ability: delivery
 role: fixture
 title: 交付生命周期

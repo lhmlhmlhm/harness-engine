@@ -44,8 +44,8 @@ class NoWitness(RuntimeError):
 
 def witness(name: str) -> Callable:
     def deco(fn: Callable) -> Callable:
-        registry.claim("witness", name, _WITNESSES, _OWNERS, fn)
-        _WITNESSES[name] = fn
+        key = registry.claim("witness", name, _WITNESSES, _OWNERS, fn)
+        _WITNESSES[key] = fn
         return fn
     return deco
 

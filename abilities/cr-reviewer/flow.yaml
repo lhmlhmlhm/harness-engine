@@ -9,7 +9,7 @@
 # scope 是**被评审的那个 CR**，不是任何本地路径：同一个人可以同时评审多个 CR，而它们
 # 各自的意见绝不能混。scope_match 因此是 exact —— 路径式的放宽在这里没有意义。
 
-version: 1
+version: 2
 ability: cr-reviewer
 title: 代码评审（评审他人的 CR）
 scope_kind: cr

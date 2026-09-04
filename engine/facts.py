@@ -198,21 +198,31 @@ def provider(name: str, *, schema: dict, requires: tuple = ()) -> Callable:
         reqs.append({kind: str(desc[kind])})
 
     def deco(fn: Callable) -> Callable:
-        registry.claim("fact provider", name, _PROVIDERS, _OWNERS, fn)
+        key = registry.claim("fact provider", name, _PROVIDERS, _OWNERS, fn)
         # A relative `file` resolves against the directory that REGISTERED the provider, so
         # an ability names its own tools the way it stores them and stays movable.
         try:
             base = Path(inspect.getfile(fn)).resolve().parent
         except TypeError:  # pragma: no cover - builtins cannot register providers
             base = Path.cwd()
-        _PROVIDERS[name] = {"fn": fn, "schema": dict(schema),
-                            "requires": tuple(reqs), "base": base}
+        _PROVIDERS[key] = {"fn": fn, "schema": dict(schema),
+                           "requires": tuple(reqs), "base": base}
         return fn
     return deco
 
 
 def is_registered(name: str) -> bool:
     return name in _PROVIDERS
+
+
+def resolve(ref: str, *, asking: str | None, requires: tuple[str, ...] = ()) -> str:
+    """A spec's provider reference -> a registry key. Raises registry.ResolveError."""
+    return registry.resolve("fact provider", ref, _PROVIDERS,
+                            asking=asking, requires=requires)
+
+
+def visible(owner: str | None) -> list[str]:
+    return registry.visible(_PROVIDERS, owner)
 
 
 def registered() -> list[str]:

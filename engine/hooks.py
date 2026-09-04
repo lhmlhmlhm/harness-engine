@@ -200,7 +200,8 @@ HOOK_KEYS = {"id", "trigger", "phase", "step", "mode", "contract", "command", "w
 
 
 def parse(raw_list, flow_steps: dict, flow_phases: tuple, schema: dict,
-          reject_unknown, path) -> tuple[Hook, ...]:
+          reject_unknown, path, *, asking: str | None = None,
+          requires: tuple[str, ...] = ()) -> tuple[Hook, ...]:
     """Build and validate the hook list. Every failure is fatal at load time."""
     if not isinstance(raw_list, list):
         raise HookError(f"{path}: 'hooks' must be a list")
@@ -264,7 +265,8 @@ def parse(raw_list, flow_steps: dict, flow_phases: tuple, schema: dict,
 
         when = raw.get("when")
         if when is not None:
-            conditions.validate(when, schema, f"{path}: hook '{hid}' when")
+            conditions.validate(when, schema, f"{path}: hook '{hid}' when",
+                                asking=asking, requires=requires)
 
         obligation = bool(raw.get("obligation", False))
         fail_closed = bool(raw.get("fail_closed", False))
