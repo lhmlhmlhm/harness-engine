@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import flow as flowmod
+from . import trust
 from . import brief as briefmod
 from . import conditions, facts, hooks as hookmod, predicates, proof, prose, store
 
@@ -129,6 +130,92 @@ def cmd_init(args) -> int:
     return OK
 
 
+def _code_fields(ability: str) -> dict:
+    """Whether an ability ships code and whether it is trusted — computed WITHOUT loading it.
+
+    Reported on the invalid branch too, because "invalid" and "not approved" are different
+    answers and the second one has a fix the first does not.
+    """
+    mod = flowmod.ability_dir(ability) / "providers.py"
+    if not mod.is_file():
+        return {"executes_code": False, "trust": None}
+    st, _d = trust.state(ability, mod)
+    return {"executes_code": True, "trust": st}
+
+
+def _code_files() -> list[tuple[str, Path]]:
+    """Installed abilities that ship code, WITHOUT loading any of them.
+
+    Deliberately does not go through `flow.load`: the whole point is to describe a file you
+    have not agreed to run yet, and loading it is running it.
+    """
+    out = []
+    for name in flowmod.available_abilities():
+        mod = flowmod.ability_dir(name) / "providers.py"
+        if mod.is_file():
+            out.append((name, mod))
+    return out
+
+
+def cmd_trust(args) -> int:
+    """Review and approve the extension files this installation would import."""
+    if args.forget:
+        if trust.forget(args.forget):
+            print(f"forgotten: {args.forget}   (it will ask again before importing)")
+            return OK
+        _err(f"no approval recorded for '{args.forget}'")
+        return USAGE
+    if args.ability:
+        pairs = dict(_code_files())
+        mod = pairs.get(args.ability)
+        if mod is None:
+            _err(f"ability '{args.ability}' ships no providers.py — nothing to approve.\n"
+                 f"  with code: {', '.join(sorted(pairs)) or '(none)'}")
+            return USAGE
+        if trust.is_internal(mod):
+            _err(f"{mod}\n"
+                 f"  is inside this engine's own tree, so it is not pinned and cannot be\n"
+                 f"  approved: anyone able to edit it can edit the engine, and a record the\n"
+                 f"  engine keeps cannot outlast an editor of the engine.")
+            return USAGE
+        dg = trust.approve(args.ability, mod)
+        print(f"approved {args.ability}\n  {mod}\n  {dg}\n  recorded in {trust.trust_path()}")
+        return OK
+
+    rows = []
+    for name, mod in _code_files():
+        st, detail = trust.state(name, mod)
+        rows.append({"ability": name, "path": str(mod), "state": st,
+                     "digest": detail["digest"], "approved": detail.get("approved"),
+                     "approved_at": detail.get("at") or None,
+                     "imports": trust.declared_imports(mod)})
+    if args.json:
+        return _emit(args, {"record": str(trust.trust_path()),
+                            "engine_tree": str(trust.ENGINE_TREE),
+                            "extensions": rows}, lambda _d: None)
+    if not rows:
+        print("(no installed ability ships code — every flow here is purely declarative)")
+        return OK
+    MARK = {trust.STATE_INTERNAL: "—", trust.STATE_APPROVED: "✅",
+            trust.STATE_UNKNOWN: "⚠️ ", trust.STATE_CHANGED: "⛔"}
+    print(f"record {trust.trust_path()}")
+    print(f"engine {trust.ENGINE_TREE}")
+    for r in rows:
+        print(f"{MARK[r['state']]} {r['ability']:<16} {r['state']:<9} {r['digest'][:23]}…")
+        print(f"     {r['path']}")
+        print(f"     imports (advisory): {', '.join(r['imports']) or '(none)'}")
+        if r["state"] == trust.STATE_CHANGED:
+            print(f"     approved earlier:   {r['approved'][:23]}…  — REVIEW THE DIFF")
+    n = sum(1 for r in rows if r["state"] in (trust.STATE_UNKNOWN, trust.STATE_CHANGED))
+    if n:
+        print(f"\n{n} file(s) will refuse to load. Approve one with: "
+              f"harness trust <ability>")
+    print("\nApproval records that you accepted these bytes. It is NOT a sandbox: an approved\n"
+          "file runs with everything this engine can reach. Files inside the engine's own tree\n"
+          "are not pinned — see `harness trust --json` for which tree that is.")
+    return OK
+
+
 def cmd_abilities(args) -> int:
     names = flowmod.available_abilities()
     if args.json:
@@ -138,7 +225,7 @@ def cmd_abilities(args) -> int:
                 f = flowmod.load(name)
             except flowmod.FlowError as exc:
                 out.append({"ability": name, "valid": False,
-                            "error": str(exc).splitlines()[0]})
+                            "error": str(exc).splitlines()[0], **_code_fields(name)})
                 continue
             out.append({
                 "ability": name, "valid": True, "title": f.title, "role": f.role,
@@ -154,6 +241,7 @@ def cmd_abilities(args) -> int:
                 "facts_providers": list(f.facts_providers),
                 "facts": sorted(f.facts_schema),
                 "hooks": len(f.hooks), "uses": list(flowmod.capabilities_used(f)),
+                **_code_fields(name),
             })
         return _emit(args, {"roots": [str(r) for r in flowmod.abilities_roots()],
                             "abilities": out}, lambda _d: None)
@@ -1932,6 +2020,11 @@ def build_parser() -> argparse.ArgumentParser:
     ab = sub.add_parser("abilities", help="list installed abilities")
     ab.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     ab.set_defaults(fn=cmd_abilities)
+    tr = sub.add_parser("trust", help="review/approve extension files this install imports")
+    tr.add_argument("ability", nargs="?", help="approve this ability's providers.py")
+    tr.add_argument("--forget", metavar="ABILITY", help="drop a recorded approval")
+    tr.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    tr.set_defaults(fn=cmd_trust)
     lz = sub.add_parser("leases", help="show delegated scopes")
     lz.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     lz.set_defaults(fn=cmd_leases)

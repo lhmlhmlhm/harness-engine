@@ -38,8 +38,12 @@ EXIT_MEANINGS: dict[str, tuple[str, str]] = {
     "OK": ("passed", "carry on"),
     "USAGE": ("bad usage, or an environment that cannot answer",
               "fix the command, or the environment it names"),
-    "BAD_SPEC": ("the flow spec itself is invalid",
-                 "report it upstream; do NOT edit the spec to get past it"),
+    "BAD_SPEC": ("the flow could not be loaded — invalid, or its extension code is not "
+                 "approved on this machine",
+                 "read stderr. If it names an unapproved extension file, that is a LOCAL "
+                 "decision for whoever owns this machine (`harness trust`), not something to "
+                 "report or work around. Otherwise report it upstream; either way do NOT edit "
+                 "the spec to get past it"),
     "REFUSED": ("a rule is not satisfied",
                 "read stderr — it names what is missing and the command that supplies it"),
     "BLOCKED": ("a protected action has no recorded authorisation",

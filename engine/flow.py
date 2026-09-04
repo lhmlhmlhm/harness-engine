@@ -223,6 +223,7 @@ GATE_PREAUTH_PREFIX = "preauth:"
 
 from . import conditions as conditionsmod
 from . import registry
+from . import trust
 from .conditions import ConditionError as ConditionErrorAlias
 
 
@@ -651,9 +652,19 @@ def load_extensions(ability: str) -> None:
     if ability in _EXTENSIONS_LOADED:
         return
     mod_path = ability_dir(ability) / "providers.py"
-    _EXTENSIONS_LOADED.add(ability)
     if not mod_path.is_file():
+        # Nothing to trust: an ability with no providers.py is purely declarative, and that
+        # difference is exactly what the separate file is for.
+        _EXTENSIONS_LOADED.add(ability)
         return
+    # Checked BEFORE the load marker is set. Marking first would mean a refused import leaves
+    # the ability recorded as loaded, and a second attempt in the same process would skip the
+    # check — a guard that stops firing after it fires once.
+    try:
+        trust.check(ability, mod_path)
+    except trust.TrustError as exc:
+        raise FlowError(str(exc)) from None
+    _EXTENSIONS_LOADED.add(ability)
     import importlib.util
     spec = importlib.util.spec_from_file_location(f"_ability_{ability}_providers", mod_path)
     if spec is None or spec.loader is None:

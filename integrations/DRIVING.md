@@ -24,7 +24,7 @@ Everything below uses `harness`.
 |---|---|---|
 | **0** | passed | carry on |
 | **1** | bad usage, or an environment that cannot answer | fix the command, or the environment it names |
-| **2** | the flow spec itself is invalid | report it upstream; do NOT edit the spec to get past it |
+| **2** | the flow could not be loaded — invalid, or its extension code is not approved on this machine | read stderr. If it names an unapproved extension file, that is a LOCAL decision for whoever owns this machine (`harness trust`), not something to report or work around. Otherwise report it upstream; either way do NOT edit the spec to get past it |
 | **3** | a rule is not satisfied | read stderr — it names what is missing and the command that supplies it |
 | **4** | a protected action has no recorded authorisation | get a real human affirmation. Do NOT reword the action to slip past |
 | **5** | the engine failed in a way it does not account for | report it with the traceback; this is a defect in the engine, not your input |

@@ -6137,6 +6137,18 @@ def test_the_builtin_providers_report_only_what_the_engine_holds(env):
 
 # ------------------------------------------------- a name collision names both sides
 
+def _approve(env, root: Path, *abilities: str) -> None:
+    """Approve external extension files the way a human does — through the CLI.
+
+    Not by writing the record file directly: the point of these fixtures is that code from
+    outside the engine's tree does not run until someone says so, and a test that forged the
+    record would stop exercising the saying-so.
+    """
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    for a in abilities:
+        assert rc(["trust", a], e) == OK, a
+
+
 def _ns_ability(root: Path, name: str, reg_name: str, *, uses: str = "[facts]",
                 body: str | None = None) -> None:
     d = root / name
@@ -6170,6 +6182,7 @@ def test_two_unrelated_abilities_may_now_use_one_obvious_word(env, tmp_path):
     _ns_ability(root, "alpha", "open_findings")
     _ns_ability(root, "beta", "open_findings")
     e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    _approve(env, root, "alpha", "beta")
 
     assert rc(["validate"], e) == OK, "both flows must load in ONE process"
 
@@ -6178,7 +6191,14 @@ def test_two_unrelated_abilities_may_now_use_one_obvious_word(env, tmp_path):
     _s.path.insert(0, str(REPO))
     from engine import facts as fa, flow as fl
     prior = os.environ.get("HARNESS_ABILITIES_PATH")
+    prior_state = os.environ.get("HARNESS_STATE_DIR")
     os.environ["HARNESS_ABILITIES_PATH"] = str(root)
+    # conftest points the in-process state dir at an UNINITIALISED scratch dir, which is a
+    # different directory from the one the CLI subprocesses used — so the approvals just
+    # recorded would be invisible here. Pointing it at the same place is what conftest says a
+    # test must do when it means to load in-process. No database is opened either way: the
+    # trust record is a file, because flow loading never touches the store.
+    os.environ["HARNESS_STATE_DIR"] = env["HARNESS_STATE_DIR"]
     try:
         a, b = fl.load("alpha"), fl.load("beta")
         keys = [k for k in fa.registered() if k.endswith("open_findings")]
@@ -6195,10 +6215,11 @@ def test_two_unrelated_abilities_may_now_use_one_obvious_word(env, tmp_path):
             fa._OWNERS.pop(k, None)
         for n in ("alpha", "beta"):
             fl._EXTENSIONS_LOADED.discard(n)
-        if prior is None:
-            os.environ.pop("HARNESS_ABILITIES_PATH", None)
-        else:
-            os.environ["HARNESS_ABILITIES_PATH"] = prior
+        for k, v in (("HARNESS_ABILITIES_PATH", prior), ("HARNESS_STATE_DIR", prior_state)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_the_collision_that_remains_is_one_ability_naming_one_thing_twice(env, tmp_path):
@@ -6228,6 +6249,7 @@ def test_the_collision_that_remains_is_one_ability_naming_one_thing_twice(env, t
         "steps:\n  - id: W01\n    phase: p1\n"
         "    completion: {type: evidence, kind: k}\n    directive: Do it.\n", encoding="utf-8")
 
+    _approve(env, root, "solo")
     out = run(["validate", "solo"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
     assert out.returncode == BAD_SPEC
     assert "claimed twice by ability 'solo'" in out.stderr, out.stderr
@@ -6259,6 +6281,7 @@ def test_an_ability_may_not_shadow_a_name_the_engine_defines(env, tmp_path):
         "steps:\n  - id: W01\n    phase: p1\n"
         "    completion: {type: evidence, kind: k}\n    directive: Do it.\n", encoding="utf-8")
 
+    _approve(env, root, "shady")
     out = run(["validate", "shady"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
     assert out.returncode == BAD_SPEC
     assert "the ENGINE already defines" in out.stderr, out.stderr
@@ -6426,3 +6449,210 @@ def test_the_major_bump_says_what_moved_instead_of_only_refusing(env, tmp_path):
     assert "cannot be read" in fut.stderr
     assert "WHAT CHANGED" not in fut.stderr, \
         "the engine described a format gap it cannot possibly know"
+
+
+# ------------------------------------------------- an extension file is code
+
+def _ext_root(tmp_path: Path, *, code: str | None = None, name: str = "ext") -> Path:
+    """An ability under an EXTERNAL root — the only place a trust boundary exists."""
+    root = tmp_path / "outside"
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    if code is not None:
+        (d / "providers.py").write_text(code, encoding="utf-8")
+    (d / "flow.yaml").write_text(
+        f"version: 2\nability: {name}\ntitle: T\n"
+        f"when: reach for this one when checking that outside code is not run unasked\n"
+        f"uses: {'[facts]' if code is not None else '[]'}\nscope_kind: s\n"
+        + ("facts:\n  provider: ext_findings\n" if code is not None else "")
+        + "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n"
+        "    completion: {type: evidence, kind: k}\n    directive: Do it.\n",
+        encoding="utf-8")
+    return root
+
+
+_EXT_CODE = (
+    "import sys\n"
+    f"sys.path.insert(0, {str(REPO)!r})\n"
+    "from engine import facts\n"
+    "@facts.provider('ext_findings', schema={'n': 'int'})\n"
+    "def _p(ctx):\n    return {'n': 1}\n"
+)
+
+
+def test_reading_a_spec_will_not_run_code_from_outside_the_engines_tree(env, tmp_path):
+    """The exposure is that READING runs code, so the refusal has to be at read time.
+
+    Loading a flow imports its `providers.py`. So `validate` — the command whose whole purpose
+    is to check a spec you do not trust yet — executed the untrusted part of it. Asserted on
+    `validate` rather than `open` for exactly that reason.
+    """
+    root = _ext_root(tmp_path, code=_EXT_CODE)
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+
+    out = run(["validate", "ext"], e)
+    assert out.returncode == BAD_SPEC
+    assert "has not been approved here" in out.stderr, out.stderr
+    assert "reading its spec would run it" in out.stderr
+    assert "sha256:" in out.stderr
+    assert "harness trust ext" in out.stderr
+
+    # The non-claims are part of the message, not of the documentation. A refusal that reads as
+    # protection is worse than none, because the reader stops looking.
+    assert "NOT a sandbox" in out.stderr
+    # Phrase chosen to sit on ONE line of the message: the first attempt here spanned a wrap
+    # ("will not\n  appear in it") and so could never match, which is an empty assertion.
+    assert "assembles an import name at runtime" in out.stderr, \
+        "the advisory import list was presented as a check"
+
+    # A purely declarative ability from the same untrusted root is free — nothing of it runs,
+    # so there is nothing to approve, and charging for it would push authors toward code.
+    plain = _ext_root(tmp_path, code=None, name="declarative")
+    assert rc(["validate", "declarative"],
+              {**env, "HARNESS_ABILITIES_PATH": str(plain)}) == OK
+
+
+def test_approval_pins_the_bytes_so_a_later_change_asks_again(env, tmp_path):
+    """The one thing a record kept by the engine can actually establish.
+
+    It cannot make the code safe. It can make "the ability I installed changed its code" stop
+    being silent — so that is what is asserted: approve, load, edit one line, refused again
+    with BOTH digests, and `--forget` returns it to asking.
+    """
+    root = _ext_root(tmp_path, code=_EXT_CODE)
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    mod = root / "ext" / "providers.py"
+
+    _approve(env, root, "ext")
+    assert rc(["validate", "ext"], e) == OK
+
+    before = (root / "ext" / "providers.py").read_text()
+    mod.write_text(before + "\n# a line the approver never saw\n", encoding="utf-8")
+    out = run(["validate", "ext"], e)
+    assert out.returncode == BAD_SPEC
+    assert "changed after you approved it" in out.stderr, out.stderr
+    digests = re.findall(r"sha256:[0-9a-f]{64}", out.stderr)
+    assert len(set(digests)) == 2, digests
+    assert "--forget ext" in out.stderr
+
+    # Re-approving the new content is one command, and then it loads again.
+    _approve(env, root, "ext")
+    assert rc(["validate", "ext"], e) == OK
+
+    assert rc(["trust", "--forget", "ext"], e) == OK
+    assert rc(["validate", "ext"], e) == BAD_SPEC, "forgetting must restore the asking"
+
+
+def test_the_engines_own_tree_is_not_pinned_and_says_why(env):
+    """Pinning it would be theatre, and theatre in a trust feature is the failure mode.
+
+    Anyone able to edit `<tree>/abilities/x/providers.py` can edit `<tree>/engine/facts.py`, so
+    a record the engine keeps cannot outlast an editor of the engine. The installed abilities
+    therefore need no approval — and asking to record one is refused with that reason, rather
+    than accepted as a harmless no-op that would imply the boundary is there.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import trust as tr
+
+    inhouse = [n for n in _rows_of_abilities()
+               if (REPO / "abilities" / n / "providers.py").is_file()]
+    assert inhouse, "expected at least one shipped ability with code"
+
+    for name in inhouse:
+        st, _d = tr.state(name, REPO / "abilities" / name / "providers.py")
+        assert st == tr.STATE_INTERNAL, (name, st)
+        assert rc(["validate", name], env) == OK, name
+
+    out = run(["trust", inhouse[0]], env)
+    assert out.returncode == USAGE
+    assert "inside this engine's own tree" in out.stderr, out.stderr
+    assert "can edit the engine" in out.stderr
+
+
+def _rows_of_abilities() -> list[str]:
+    return sorted(p.parent.name for p in (REPO / "abilities").glob("*/flow.yaml"))
+
+
+def test_the_report_describes_a_file_it_has_not_agreed_to_run(env, tmp_path):
+    """Reviewing has to be possible BEFORE approving, or approval is a coin toss.
+
+    So the report may not go through flow loading — loading it is running it. Asserted by
+    reading the digest and the import list of a file that is refused for loading in the same
+    breath.
+    """
+    root = _ext_root(tmp_path, code=_EXT_CODE.replace(
+        "import sys\n", "import sys\nimport json\n"))
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+
+    assert rc(["validate", "ext"], e) == BAD_SPEC, "precondition: it must NOT be loadable"
+
+    rep = run(["trust", "--json"], e)
+    assert rep.returncode == OK, rep.stderr
+    d = json.loads(rep.stdout)
+    ext = [r for r in d["extensions"] if r["ability"] == "ext"]
+    assert len(ext) == 1, d
+    assert ext[0]["state"] == "unknown"
+    assert ext[0]["digest"].startswith("sha256:")
+    assert "json" in ext[0]["imports"] and "engine" in ext[0]["imports"]
+    assert d["record"] and d["engine_tree"]
+
+    # `abilities` must still say WHY, structurally: "invalid" and "not approved" are different
+    # answers and only one of them has a fix.
+    ab = json.loads(run(["abilities", "--json"], e).stdout)
+    row = [a for a in ab["abilities"] if a["ability"] == "ext"][0]
+    assert row["valid"] is False
+    assert row["executes_code"] is True and row["trust"] == "unknown"
+
+
+def test_a_refused_import_does_not_count_as_loaded(env, tmp_path):
+    """A guard that stops firing after it fires once is not a guard.
+
+    The load marker exists so an ability's extensions import at most once per process. Set
+    before the check, a refusal would leave the ability recorded as loaded, and the next
+    attempt in the same process would sail past — which is the shape where a long-lived
+    process trusts something nobody approved.
+    """
+    root = _ext_root(tmp_path, code=_EXT_CODE)
+    import os
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    prior_a = os.environ.get("HARNESS_ABILITIES_PATH")
+    prior_s = os.environ.get("HARNESS_STATE_DIR")
+    os.environ["HARNESS_ABILITIES_PATH"] = str(root)
+    os.environ["HARNESS_STATE_DIR"] = env["HARNESS_STATE_DIR"]
+    try:
+        for attempt in (1, 2):
+            with pytest.raises(fl.FlowError) as caught:
+                fl.load_extensions("ext")
+            assert "has not been approved" in str(caught.value), attempt
+        assert "ext" not in fl._EXTENSIONS_LOADED
+    finally:
+        fl._EXTENSIONS_LOADED.discard("ext")
+        for k, v in (("HARNESS_ABILITIES_PATH", prior_a), ("HARNESS_STATE_DIR", prior_s)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_the_contract_tells_a_driver_that_approval_is_a_LOCAL_decision(env):
+    """Exit 2 now has two causes with two different human actions, and only one is upstream.
+
+    NO new exit code for the second one, deliberately: an adapter's behaviour is identical for
+    both (allow the tool call; this flow is unusable either way), so a code would be a branch
+    nothing branches on. What differs is what the PERSON does — and the contract is where a
+    person's next action is written. Left as "report it upstream", a driver hitting an
+    unapproved extension would file a report and stall on a one-command local fix.
+    """
+    out = run(["brief"], env)
+    assert out.returncode == OK
+    body = out.stdout
+    assert "harness trust" in body, body[:400]
+    assert "LOCAL decision" in body
+    assert "not approved" in body or "not\napproved" in body or "is not " in body
+    # And the upstream half must survive, or the genuinely-invalid case loses its advice.
+    assert "report it upstream" in body
+    assert "do NOT edit" in body

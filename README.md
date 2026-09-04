@@ -15,6 +15,7 @@ harness-engine/
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
 │   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
 │   ├── registry.py          四个注册表共享的那件事：名字归谁、引用怎么解析
+│   ├── trust.py             扩展文件是代码：钉内容、报告、以及它不声称的东西
 │   ├── schema.sql           9 表，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
@@ -24,7 +25,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   308 个测试
+└── tests/                   318 个测试
 ```
 
 ## 快速开始
@@ -228,6 +229,53 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### 扩展文件是代码：读一份 spec 会运行它
+
+一个 flow 可以带 `providers.py`，而**装载它就是 import 它**。所以「校验一份你还不信任的 spec」这个
+动作本身，会在引擎进程里以引擎的权限运行写这份 flow 的人的代码。这不是一个待打的补丁——它是扩展缝
+的价格，而那道缝正是让领域知识留在基座外面的东西。
+
+**先说这件事不做什么，否则它会被误读成保护：**
+
+| 不是 | 为什么 |
+|---|---|
+| **不是沙箱** | 这里没有沙箱。用 Python 在进程内写一个是**一个守不住的声明**——逃逸路径众多且公开，交付它等于把一个可见的风险换成一个不可见的风险 |
+| **批准不是安全判断** | 它记录你对某份文件**内容**做过的决定。被批准的文件以引擎能触及的一切运行 |
+| **import 列表只是参考** | 从语法树读出，所以运行时拼出 import 名的文件不会出现在里面。它服务于人的审阅，**从不参与判定** |
+
+**它做的、且可证伪的那件事：钉内容。** 来自引擎自身树之外的扩展必须按摘要批准一次，此后**文件一变就
+重新询问**而不是直接运行。于是「我装的某个 ability 被更新了、它的代码变了」不再是静默的——而这是这整片
+区域里，引擎保存的记录**真能**确立的唯一一件事。
+
+```
+$ harness validate ext
+❌ ext
+/outside/ext/providers.py
+  is code from outside this engine's own tree and has not been approved here.
+  digest:             sha256:8a5bff28…
+  imports (advisory): engine, json, subprocess, sys
+  Loading this flow IMPORTS the file, so reading its spec would run it. An ability
+  with no providers.py is purely declarative and needs no approval at all.
+  Review it, then:    harness trust ext
+```
+
+`harness trust` 报告**不经由 flow 装载**得出——审阅必须发生在批准之前，而装载它就是运行它。所以摘要与
+import 列表是直接读文件得到的（有变异钉住这条：让报告走 `flow.load` 会变红）。
+
+**引擎自身树内的 ability 不钉，而这是刻意的。** 能改 `<tree>/abilities/x/providers.py` 的人也能改
+`<tree>/engine/facts.py`，**引擎保存的记录活不过一个能编辑引擎的人**。钉它是表演，而信任功能里的表演
+正是最坏的失败模式——所以检查只在边界真实存在的地方：代码来自引擎自己的代码不在的地方。按 pip 装好之后
+引擎树里没有任何 ability，于是每一个 flow 都是外部的、都要钉。
+
+**没有为它新加退出码，这也是刻意的。** 这个引擎当初拆 3/4 的判据是「一个机器消费者需不需要按它分支」，
+而信任拒绝与坏 spec 对适配器来说动作**完全相同**（都 allow、这个 flow 都用不了）。不同的只有**人**的
+下一步——那属于散文，于是改的是驱动契约里 exit 2 的建议：它此前只说「上报上游」，一个撞上未批准扩展的
+driver 会去开一张单然后卡住，而正确动作是这台机器的主人跑一条命令。加一个没人分支的码，就是本项目一直
+在删的那种「只有一种取值的键」。
+
+**加载标记在检查之后才置位。** 先置位会让一次被拒的 import 把该 ability 记成「已加载」，同一进程里的
+第二次尝试就直接放行——**一个响过一次就不再响的守卫**。这条也有变异钉住。
 
 ### 读命令都能用 JSON 作答
 
@@ -609,17 +657,17 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 308 passed
+python3 -m pytest tests/ -q      # 318 passed
 ```
 
 分两类：
 
-- `test_engine_purity.py`（59）—— **结构性不变量**。引擎源码里不许有 step id 形态的
+- `test_engine_purity.py`（63）—— **结构性不变量**。引擎源码里不许有 step id 形态的
   token、不许有能力专有名词、不许有能力词汇当标识符、不许 import 或硬编码路径进 abilities、
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（249）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（255）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
