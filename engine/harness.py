@@ -1441,11 +1441,30 @@ def cmd_guard_tool(args) -> int:
         return OK
     try:
         hits = []
+        unreadable: list[tuple[str, str, str]] = []
         for row in store.all_open_runs(conn):
             try:
                 f = flowmod.load(row["ability"])
-            except flowmod.FlowError:
-                continue          # a broken spec must not brick unrelated tooling
+            except flowmod.FlowError as exc:
+                # A run whose flow cannot be READ is not a run without guards. Skipping it
+                # in silence makes "nothing to guard" and "I cannot see what to guard" look
+                # identical — the same distinction this integration already draws for the
+                # state directory, for the same reason.
+                #
+                # Three ways it happens, and every one of them used to be soundless: the
+                # ability is not on this process's search path, its spec is invalid, or its
+                # extension code is not approved here so loading refuses. The last arrived
+                # WITH the trust check — editing an approved providers.py turned that run's
+                # guards off and printed nothing, which is a safety feature handing out a
+                # bypass.
+                #
+                # NOT filtered by scope, because deciding whether this run's scope covers the
+                # call needs the flow that just failed to load. Reporting a run that turns out
+                # to be irrelevant is noise; staying quiet about one that was relevant is the
+                # failure this exists to remove.
+                why = " — ".join(x.strip() for x in str(exc).split("\n")[:2] if x.strip())
+                unreadable.append((row["run_id"], row["ability"], why))
+                continue
             if not f.scope_covers(row["scope_key"], args.cwd, payload):
                 continue
             for action, rules in f.guard_matches.items():
@@ -1460,6 +1479,21 @@ def cmd_guard_tool(args) -> int:
                         hits.append((row, f, action, f.guards[action], rule["pattern"]))
                         break
 
+        if unreadable:
+            _err(f"⚠️  guard-tool: {len(unreadable)} open run(s) whose flow it CANNOT READ. "
+                 f"Their\n"
+                 f"    guards are not enforced for this call — that is \"the guard could not be\n"
+                 f"    looked up\", not \"there is no guard\".")
+            for run_id, ability, why in unreadable:
+                _err(f"      {run_id} ({ability}): {why}")
+            _err("    Allowing anyway: this hook runs before every matching tool call, so it\n"
+                 "    must never brick normal work. Fix whichever applies:\n"
+                 "      · not visible here     → HARNESS_ABILITIES_PATH must cover the runs\n"
+                 "                               this hook is expected to guard\n"
+                 "      · spec invalid         → harness validate <ability>\n"
+                 "      · extension unapproved → harness trust <ability>  (a changed\n"
+                 "                               providers.py re-asks, and until it is\n"
+                 "                               answered that run's guards cannot be read)")
         if not hits:
             return OK
         owners = {h[0]["run_id"] for h in hits}

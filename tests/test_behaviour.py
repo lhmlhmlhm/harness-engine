@@ -6656,3 +6656,115 @@ def test_the_contract_tells_a_driver_that_approval_is_a_LOCAL_decision(env):
     # And the upstream half must survive, or the genuinely-invalid case loses its advice.
     assert "report it upstream" in body
     assert "do NOT edit" in body
+
+
+# ------------------------------------------------- a guard that cannot be looked up says so
+
+_GUARDED_FLOW = """version: 2
+ability: priv
+title: T
+when: reach for this one when checking the ways a guard can be made to go quiet
+uses: [guards, gates, facts]
+scope_kind: repo
+scope_match: path_prefix
+facts:
+  provider: ext_fact
+guards:
+  deploy:
+    step: G01
+    matches:
+      - tool: shell
+        field: command
+        pattern: (^|\\s)deploy-thing(\\s|$)
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: G01
+    phase: p1
+    title: The gate that guards deploying
+    gate: affirm
+    completion: {type: gate_recorded}
+    directive: Ask the human.
+"""
+
+
+def _guarded_ext(tmp_path: Path) -> tuple[Path, Path]:
+    """An EXTERNAL ability carrying a guard, plus the scope its run will claim."""
+    root = tmp_path / "outside"
+    d = root / "priv"
+    d.mkdir(parents=True)
+    (d / "flow.yaml").write_text(_GUARDED_FLOW, encoding="utf-8")
+    (d / "providers.py").write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from engine import facts\n"
+        "@facts.provider('ext_fact', schema={'n': 'int'})\n"
+        "def _p(ctx):\n    return {'n': 1}\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    return root, work
+
+
+def _guard_call(env, root: Path | None, work: Path):
+    e = {**env}
+    if root is not None:
+        e["HARNESS_ABILITIES_PATH"] = str(root)
+    return run(["guard-tool", "--tool", "shell",
+                "--input-json", '{"command":"deploy-thing now"}',
+                "--cwd", str(work)], e)
+
+
+@pytest.mark.parametrize("cause,fragment", [
+    ("invisible", "no flow spec for ability"),
+    ("invalid", "unsupported key"),
+    ("unapproved", "changed after you approved it"),
+])
+def test_a_run_whose_flow_cannot_be_read_says_so_instead_of_going_quiet(
+        env, tmp_path, cause, fragment):
+    """Three ways a guard goes quiet, and every one of them was soundless.
+
+    `guard-tool` skipped any open run whose flow would not load — correctly refusing to let one
+    broken spec brick unrelated tooling, and incorrectly making that indistinguishable from
+    "this run has no guard for you". This integration ALREADY draws that distinction for the
+    state directory, in as many words: "nothing to guard" and "I cannot see what to guard"
+    must not look alike.
+
+    The third cause arrived with the trust check: editing an approved providers.py revokes it,
+    loading then refuses, and that turned the run's guards off with no output at all — a safety
+    feature handing out a bypass.
+
+    Fail-open is NOT relaxed here and the test pins that: still exit 0, because this runs before
+    every matching tool call in every session. The fix is that it now SAYS so.
+    """
+    root, work = _guarded_ext(tmp_path)
+    _approve(env, root, "priv")
+    assert rc(["open", "priv", "--scope", str(work), "--run", "r1"],
+              {**env, "HARNESS_ABILITIES_PATH": str(root)}) == OK
+
+    # Baseline: correctly configured, this call IS blocked. Without this the test could pass
+    # against a fixture that was never guarded in the first place.
+    base = _guard_call(env, root, work)
+    assert base.returncode == BLOCKED, base.stderr
+    assert "requires gate 'G01'" in base.stderr
+
+    use_root: Path | None = root
+    if cause == "invisible":
+        use_root = None                       # the hook's search path differs from the run's
+    elif cause == "invalid":
+        p = root / "priv" / "flow.yaml"
+        p.write_text(p.read_text() + "\nbogus_key: 1\n", encoding="utf-8")
+    else:
+        p = root / "priv" / "providers.py"
+        p.write_text(p.read_text() + "\n# a line the approver never saw\n", encoding="utf-8")
+
+    out = _guard_call(env, use_root, work)
+    assert out.returncode == OK, \
+        "fail-open must survive: this hook may never brick normal work"
+    assert "CANNOT READ" in out.stderr, out.stderr
+    assert 'not "there is no guard"' in out.stderr
+    assert "r1 (priv)" in out.stderr, "the warning must name the run whose guards went quiet"
+    assert fragment in out.stderr, (cause, out.stderr)
+    # All three fixes are offered, because the report cannot always tell which one applies.
+    for hint in ("HARNESS_ABILITIES_PATH", "harness validate", "harness trust"):
+        assert hint in out.stderr, hint

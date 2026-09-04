@@ -116,6 +116,37 @@ open run 时放行（fail-open 是铁律，它跑在每个会话的每次工具�
 
 诚实的现状：**这套接线让「开了 run 之后绕过门」变得不可能，而没有让「开 run」变成不可能不做。**
 
+### 「没什么要守」与「我看不见要守什么」不许长得一样
+
+`guard-tool` 会遍历**所有** open run 去判断这次调用是否被守。一个 flow **读不出来**的 run 曾经被
+静默跳过——理由是对的（一个坏 spec 不该把无关工具链砸死），后果是错的：它让「这个 run 没有守你」
+和「这个 run 的守卫查不到」输出完全相同，也就是零输出。
+
+三种成因，此前**全部无声**：
+
+| 成因 | 修法 |
+|---|---|
+| ability 不在这个进程的搜索路径上（`HARNESS_ABILITIES_PATH` 与 run 不一致） | 让 hook 的路径覆盖它要守的 run |
+| spec 无效 | `harness validate <ability>` |
+| **扩展代码未在本机批准**，于是装载拒绝 | `harness trust <ability>` |
+
+第三种是随内容钉定一起到来的：**编辑一个已批准的 `providers.py` 会撤销批准，装载随即拒绝，那个
+run 的 guard 就此无声关闭**——一个安全特性顺手发出了一张绕过券。
+
+现在它出声，而且**仍然放行**：
+
+```
+⚠️  guard-tool: 1 open run(s) whose flow it CANNOT READ. Their
+    guards are not enforced for this call — that is "the guard could not be
+    looked up", not "there is no guard".
+      r1 (priv): <为什么读不出来>
+    Allowing anyway: this hook runs before every matching tool call, so it
+    must never brick normal work. Fix whichever applies: …
+```
+
+**不按 scope 过滤**：判断这个 run 的 scope 是否覆盖本次调用，需要那份刚刚装载失败的 flow。报一个
+后来发现无关的 run 是噪音；对一个其实相关的 run 保持沉默，正是这条要消除的失效。
+
 ## 多个 agent 同时用同一个引擎
 
 隔离轴是 `(scope_kind, scope_key)`，**不是 agent**——守卫回答的是「这件事能不能对**这个东西**
