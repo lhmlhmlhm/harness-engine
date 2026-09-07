@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import flow as flowmod
+from . import outputs
 from . import policy
 from . import trust
 from . import brief as briefmod
@@ -909,7 +910,7 @@ def cmd_enter(args) -> int:
         # phase had been entered or closed before now.
         phase_ids = {x.id for x in f.steps_in_phase(s.phase)}
         if not (phase_ids & (prior | entered_before)):
-            return _fire(conn, f, row, "phase_start", s.phase)
+            return _fire(conn, f, row, "phase_start", s.phase)[0]
         return OK
     finally:
         conn.close()
@@ -928,6 +929,10 @@ def cmd_close_step(args) -> int:
             store.log_step(conn, row["run_id"], s.id, "refused",
                            f"deps open: {','.join(missing)}")
             _err(f"⛔ REFUSED: '{s.id}' depends on unclosed step(s): {', '.join(missing)}")
+            if getattr(args, "json", False):
+                _emit(args, {"run": row["run_id"], "step": s.id, "closed": False,
+                             "refused_because": "deps_open", "deps_open": missing},
+                      lambda _d: None)
             return REFUSED
 
         ok, why = predicates.check(conn, row["run_id"], s, s.completion,
@@ -935,6 +940,14 @@ def cmd_close_step(args) -> int:
         if not ok:
             store.log_step(conn, row["run_id"], s.id, "refused", why.splitlines()[0])
             _err(f"⛔ REFUSED: '{s.id}' is not complete.\n    {why}")
+            if getattr(args, "json", False):
+                # `why` rides as prose on purpose. It is a sentence naming what is missing and
+                # the command that supplies it; re-encoding it as fields would be a second copy
+                # of the same message, free to drift from the one stderr prints.
+                _emit(args, {"run": row["run_id"], "step": s.id, "closed": False,
+                             "refused_because": "criterion_unmet", "why": why,
+                             "required": predicates.requirements(s.completion)},
+                      lambda _d: None)
             return REFUSED
 
         store.log_step(conn, row["run_id"], s.id, "closed", why)
@@ -954,14 +967,49 @@ def cmd_close_step(args) -> int:
         remaining = [sid for sid in f.order if sid not in done]
         store.touch_run(conn, row["run_id"],
                         current_step=remaining[0] if remaining else None)
-        print(f"✅ closed {s.id} ({s.title}) — {why.splitlines()[0]}")
-        rc_hooks = _fire(conn, f, row, "step_close", s.id)
+        quiet = bool(getattr(args, "json", False))
+        if not quiet:
+            print(f"✅ closed {s.id} ({s.title}) — {why.splitlines()[0]}")
+
+        # WHAT THIS STEP HANDS BACK. Read from a row the driver recorded AT THIS STEP — not
+        # run-wide: the payload is "what this step produced", and reaching into another step's
+        # rows would make it depend on unrelated history. Read BEFORE the hooks fire, so a hook
+        # cannot change what is reported as the step's own product.
+        out_payload = None
+        if s.output:
+            recorded = [r["value"] for r in
+                        store.find_evidence(conn, row["run_id"], s.id, s.output["from_evidence"])]
+            out_payload = outputs.deliver(s.output, recorded=recorded)
+            # The digest and the source, never the content: "what was handed back" stays
+            # answerable while the ledger stays a ledger. Same shape as the extension pinning.
+            store.log_step(conn, row["run_id"], s.id, "output", json.dumps(
+                {k: v for k, v in out_payload.items() if k != "content"}, ensure_ascii=False))
+            if not quiet:
+                print("   " + outputs.summarise(out_payload))
+
+        rc_hooks, fired = _fire(conn, f, row, "step_close", s.id, quiet=quiet)
         # phase_end fires once every REQUIRED step of the phase is accounted for.
         req_in_phase = [x for x in f.required_steps(row["variant"])
                         if f.step(x).phase == s.phase]
         if req_in_phase and all(x in done for x in req_in_phase):
-            rc2 = _fire(conn, f, row, "phase_end", s.phase)
+            rc2, fired2 = _fire(conn, f, row, "phase_end", s.phase, quiet=quiet)
             rc_hooks = rc_hooks or rc2
+            fired = fired + fired2
+        if quiet:
+            _emit(args, {
+                "run": row["run_id"], "step": s.id, "closed": True,
+                "satisfied_by": predicates.requirements(s.completion),
+                "why": why,
+                "skipped_siblings": siblings_skipped,
+                "next": remaining[0] if remaining else None,
+                "remaining": remaining,
+                "fired_hooks": fired,
+                "output": out_payload,
+                # A fail_closed hook command that failed does not un-close the step; it changes
+                # the exit code. Reported so a caller need not infer it from that code.
+                "hooks_blocked": rc_hooks != OK,
+            }, lambda _d: None)
+            return rc_hooks
         if siblings_skipped:
             print(f"   ↳ exclusive group resolved; skipped {', '.join(siblings_skipped)}")
         if remaining:
@@ -1042,7 +1090,7 @@ def cmd_gate(args) -> int:
         print(f"✅ gate {s.id} = {args.decision}"
               f"  (witness={proof_doc.get('witness')}){flag}")
         if args.decision != "decline":
-            return _fire(conn, f, row, "gate_recorded", s.id)
+            return _fire(conn, f, row, "gate_recorded", s.id)[0]
         return OK
     finally:
         conn.close()
@@ -1087,10 +1135,19 @@ def _facts_resolver(f, row, spec: dict):
     return resolve
 
 
-def _fire(conn, f, row, on: str, selector: str) -> int:
-    """Fire the hooks on one boundary and report. Returns a non-OK code only when a
-    fail_closed command failed — everything else is reported and allowed through,
-    matching the reference system's "log one line, continue — never STOP"."""
+def _fire(conn, f, row, on: str, selector: str, *, quiet: bool = False) -> tuple[int, list[dict]]:
+    """Fire the hooks on one boundary. Returns (code, what fired) — BOTH, deliberately.
+
+    The code is non-OK only when a fail_closed command failed; everything else is reported and
+    allowed through. What changed here is the second half: a hook firing, and above all an
+    OBLIGATION being raised, used to be announced in prose and nowhere else. `obligations` could
+    list it afterwards, but the moment it was created was unreadable by anything that is not a
+    human — so a driver either parsed the print or missed the debt it had just been handed.
+    """
+    def say(line: str) -> None:
+        if not quiet:
+            print(line)
+
     try:
         fired = hookmod.fire(conn, f, row, on, selector)
     except facts.FactsError as exc:
@@ -1098,33 +1155,46 @@ def _fire(conn, f, row, on: str, selector: str) -> int:
         # condition false and mute every hook, which is the exact failure this design
         # exists to prevent.
         _err(f"⛔ facts unavailable for {on} '{selector}': {exc}")
-        return REFUSED
+        return REFUSED, [{"boundary": on, "selector": selector, "facts_error": str(exc)}]
     blocked = OK
+    data: list[dict] = []
     for fr in fired:
         h = fr.hook
+        entry: dict = {"boundary": on, "selector": selector, "hook": h.id,
+                       "matched": fr.matched, "mode": h.mode,
+                       "obligation": h.obligation or None}
         if not fr.matched:
-            print(f"  ⃝ hook {h.id}: condition not met")
+            entry["trace"] = list(fr.trace)
+            data.append(entry)
+            say(f"  ⃝ hook {h.id}: condition not met")
             for line in fr.trace:
-                print(f"      {line}")
+                say(f"      {line}")
             continue
         tag = " [obligation]" if h.obligation else ""
-        print(f"  🔔 hook {h.id}{tag}")
+        say(f"  🔔 hook {h.id}{tag}")
         if h.mode == hookmod.MODE_CONTRACT:
+            entry["rendered"] = fr.rendered
+            entry["obligation_created"] = bool(fr.obligation_created)
             for line in fr.rendered.splitlines():
-                print(f"      {line}")
+                say(f"      {line}")
             if fr.obligation_created:
-                print(f"      ↳ discharge with: harness discharge --run {row['run_id']} "
-                      f"--hook {h.id} --evidence \"<what you did>\"")
+                entry["discharge_with"] = (f"harness discharge --run {row['run_id']} "
+                                           f"--hook {h.id} --evidence <what you did>")
+                say(f"      ↳ discharge with: harness discharge --run {row['run_id']} "
+                    f"--hook {h.id} --evidence \"<what you did>\"")
         else:
             ok = fr.command_rc == 0
-            print(f"      command exit {fr.command_rc}"
-                  + ("" if ok else ("  ⛔ fail_closed" if h.fail_closed else "  ⚠️ warning only")))
+            entry.update({"command_exit": fr.command_rc, "fail_closed": bool(h.fail_closed),
+                          "command_out": fr.command_out or ""})
+            say(f"      command exit {fr.command_rc}"
+                + ("" if ok else ("  ⛔ fail_closed" if h.fail_closed else "  ⚠️ warning only")))
             if fr.command_out:
                 for line in fr.command_out.splitlines()[:8]:
-                    print(f"      | {line}")
+                    say(f"      | {line}")
             if not ok and h.fail_closed:
                 blocked = REFUSED
-    return blocked
+        data.append(entry)
+    return blocked, data
 
 
 def _mark(step, done: set) -> str:
@@ -2464,6 +2534,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("close-step", help="close a step (exit 3 if incomplete)")
     c.add_argument("--run", required=True)
     c.add_argument("--step", required=True)
+    c.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
     c.set_defaults(fn=cmd_close_step)
 
     g = sub.add_parser("gate", help="record a gate decision (exit 3 if unproven)")

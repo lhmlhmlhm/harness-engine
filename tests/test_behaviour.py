@@ -7439,3 +7439,216 @@ def test_a_guard_a_hook_cannot_fire_is_reported_not_hidden(env, tmp_path):
     out = run(["abilities"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
     assert out.returncode == OK, out.stderr
     assert "1 ask-only: publish" in out.stdout, out.stdout
+
+
+# ------------------------------------------------- what a step hands back
+
+_LOG = """============================= test session starts ===========================
+collected 412 items
+tests/test_a.py ..........
+## FAILURES
+tests/test_b.py::test_thing FAILED
+    assert 3 == 4
+## short test summary
+2 failed, 410 passed
+"""
+
+
+def _to_k02(env, run_id: str, scope: Path) -> None:
+    """Drive the fixture to its verification step, which is the one that declares an output."""
+    assert rc(["open", "delivery", "--scope", str(scope), "--run", run_id], env) == OK
+    for step, kind in (("C01", "change_list"), ("C02", "test_baseline"), ("K01", "diff")):
+        assert rc(["evidence", "--run", run_id, "--step", step,
+                   "--kind", kind, "--value", "x"], env) == OK
+        assert rc(["close-step", "--run", run_id, "--step", step], env) == OK
+    assert rc(["evidence", "--run", run_id, "--step", "K02",
+               "--kind", "test_result", "--value", "412 pass, mutation ok"], env) == OK
+
+
+def test_a_step_hands_back_the_part_of_a_file_it_declared(env, tmp_path):
+    """The engine reads the artifact and returns the declared part of it.
+
+    The path comes from a row the DRIVER recorded, never from the spec: a spec cannot know this
+    run's artifact paths, and one that hard-coded a path would be wrong on the second machine
+    while nothing in the ledger said what was read.
+
+    Section-finding is prose's, reused rather than rewritten — one rule for "where does a section
+    end", so the two cannot disagree. Asserted by the stop boundary: the excerpt must contain the
+    heading it was asked for and NOT the next one.
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(_LOG, encoding="utf-8")
+    _to_k02(env, "o1", tmp_path / "repo")
+    assert rc(["evidence", "--run", "o1", "--step", "K02",
+               "--kind", "test_log", "--value", str(log)], env) == OK
+
+    out = run(["close-step", "--run", "o1", "--step", "K02", "--json"], env)
+    assert out.returncode == OK, out.stderr
+    d = json.loads(out.stdout)
+    o = d["output"]
+    assert o["status"] == "delivered", o
+    assert o["from"] == {"evidence_kind": "test_log", "rows": 1, "path": str(log)}
+    assert o["select"] == {"anchor": "FAILURES"}
+    assert "## FAILURES" in o["content"] and "test_thing FAILED" in o["content"]
+    assert "short test summary" not in o["content"], \
+        "the excerpt ran past the next same-level heading"
+    assert o["sha256"].startswith("sha256:") and o["bytes"] == len(o["content"].encode())
+    assert o["truncated"] is False
+
+    # The ledger keeps the digest and the source, never the content.
+    logged = _rows(env, "SELECT detail FROM step_log WHERE run_id='o1' AND event='output'")
+    assert len(logged) == 1
+    recorded = json.loads(logged[0]["detail"])
+    assert recorded["sha256"] == o["sha256"] and recorded["from"]["path"] == str(log)
+    assert "content" not in recorded, "the ledger is not a blob store"
+
+
+@pytest.mark.parametrize("case,expect", [
+    ("nothing_recorded", "no_source_recorded"),
+    ("path_absent", "source_missing"),
+    ("anchor_absent", "selector_no_match"),
+])
+def test_failing_to_hand_something_back_never_blocks_the_step(env, tmp_path, case, expect):
+    """An output is a channel, not a criterion — and this is the assertion that keeps it one.
+
+    The content comes from a path the driver recorded. If failing to read it could change whether
+    a step closes, the shape would be: the driver writes a file saying the work passed, the engine
+    reads it back, and a reader takes that for verification. So the step closes either way, and
+    the reason it could not be read is REPORTED rather than absorbed — "the file is not there",
+    "the selector matched nothing" and "the content is empty" are three different answers.
+    """
+    _to_k02(env, "o1", tmp_path / "repo")
+    if case == "path_absent":
+        assert rc(["evidence", "--run", "o1", "--step", "K02", "--kind", "test_log",
+                   "--value", str(tmp_path / "not-here.log")], env) == OK
+    elif case == "anchor_absent":
+        log = tmp_path / "clean.log"
+        log.write_text("all green, nothing to report\n", encoding="utf-8")
+        assert rc(["evidence", "--run", "o1", "--step", "K02", "--kind", "test_log",
+                   "--value", str(log)], env) == OK
+
+    out = run(["close-step", "--run", "o1", "--step", "K02", "--json"], env)
+    assert out.returncode == OK, out.stderr
+    d = json.loads(out.stdout)
+    assert d["closed"] is True, "a step that met its criterion was blocked by its output"
+    assert d["output"]["status"] == expect, d["output"]
+    assert d["output"]["content"] is None
+    assert d["output"]["detail"], "a status with no explanation is a code to look up"
+
+    # And the text form says it too, rather than staying silent about a channel that failed.
+    _to_k02(env, "o2", tmp_path / "repo2")
+    if case != "nothing_recorded":
+        src = (tmp_path / "not-here.log") if case == "path_absent" else (tmp_path / "clean.log")
+        assert rc(["evidence", "--run", "o2", "--step", "K02", "--kind", "test_log",
+                   "--value", str(src)], env) == OK
+    text = run(["close-step", "--run", "o2", "--step", "K02"], env).stdout
+    assert expect in text, text
+
+
+def test_closing_a_step_answers_in_json_including_what_the_hooks_did(env, tmp_path):
+    """Reads were structured and writes were prose, and the writes carry the load-bearing part.
+
+    A hook firing — above all an OBLIGATION being raised — was announced in prose and nowhere
+    else. `obligations` could list it afterwards, but the moment a debt was handed over was
+    unreadable by anything that is not a human, so a driver either parsed the print or missed it.
+    """
+    _to_k02(env, "o1", tmp_path / "repo")
+    out = run(["close-step", "--run", "o1", "--step", "K02", "--json"], env)
+    assert out.returncode == OK, out.stderr
+    d = json.loads(out.stdout)
+
+    assert d["run"] == "o1" and d["step"] == "K02" and d["closed"] is True
+    assert d["next"] == "D01" and "D01" in d["remaining"]
+    assert d["hooks_blocked"] is False
+    # The criterion is reported as DATA, and it carries `match` — which the engine enforces and
+    # the requirement list used to omit, so the list understated what the step demanded.
+    assert d["satisfied_by"] == [{"what": "evidence", "kind": "test_result", "match": "pass"}]
+    assert d["fired_hooks"], "hooks fired at this boundary and the envelope showed none"
+    for h in d["fired_hooks"]:
+        assert h["boundary"] and h["hook"] and "matched" in h
+    # Text form must stay text: a command that only speaks JSON has moved, not gained.
+    plain = run(["close-step", "--run", "o1", "--step", "D01"], env)
+    assert plain.returncode == OK
+    assert not plain.stdout.lstrip().startswith("{")
+
+
+def test_a_refusal_answers_in_json_too_and_carries_its_sentence(env, tmp_path):
+    """A caller that asked for JSON must not have to parse stderr on the one path that matters.
+
+    The sentence rides as prose ON PURPOSE: it names what is missing and the command that
+    supplies it, and re-encoding that as fields would be a second copy of the same message, free
+    to drift from the one stderr prints.
+    """
+    assert rc(["open", "delivery", "--scope", str(tmp_path / "repo"), "--run", "o1"], env) == OK
+    out = run(["close-step", "--run", "o1", "--step", "C01", "--json"], env)
+    assert out.returncode == REFUSED
+    d = json.loads(out.stdout)
+    assert d["closed"] is False
+    assert d["refused_because"] == "criterion_unmet"
+    assert "change_list" in d["why"]
+    assert d["required"] == [{"what": "evidence", "kind": "change_list", "min_count": 1}]
+
+
+@pytest.mark.parametrize("block,fragment", [
+    ("output:\n      select: {anchor: X}\n", "needs 'from_evidence'"),
+    ("output:\n      from_evidence: log\n      select: {anchor: X, lines: 1-2}\n", "Pick one"),
+    ("output:\n      from_evidence: log\n      select: {lines: 0-5}\n", "not a range"),
+    ("output:\n      from_evidence: log\n      select: {lines: 9-2}\n", "not a range"),
+    ("output:\n      from_evidence: log\n      select: {lines: nope}\n", "must be 'N-M'"),
+    ("output:\n      from_evidence: log\n      select: {regex: '('}\n", "not a valid regex"),
+    ("output:\n      from_evidence: log\n      max_bytes: 0\n", "positive integer"),
+    ("output:\n      from_evidence: log\n      whole_file: true\n", "unsupported key"),
+    ("output:\n      from_evidence: log\n      select: {heading: X}\n", "unsupported key"),
+], ids=lambda x: x[:28])
+def test_an_output_declaration_is_checked_at_load_time(env, block, fragment):
+    """Every refusal the parse writes, exercised — because an unexercised refusal is a claim.
+
+    The load-time checks are the whole reason a spec can be trusted at all: `from_evidence` is
+    mandatory because a path written into the spec would be wrong on the second machine; one
+    selector at a time because two have no defined order, so which part came back would depend on
+    the engine rather than the spec; a cap of zero because it would hand nothing back while
+    reporting success.
+    """
+    d = _spec(env, "zzz_out", f"""
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+    {block.rstrip()}
+""")
+    try:
+        out = run(["validate", "zzz_out"], env)
+        assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+        assert fragment in out.stderr, out.stderr
+    finally:
+        _rm(d)
+
+
+def test_a_declared_output_is_a_capability_that_must_be_declared(env, tmp_path):
+    """`output` joins the manifest, so a flow using it has to say so — and one saying so has to
+    use it. The same bidirectional check every other mechanism gets; a capability exempt from it
+    would be the one nobody notices going stale."""
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+
+    assert "outputs" in fl.ENGINE_CAPABILITIES
+    assert "outputs" in fl.capabilities_used(fl.load("delivery"))
+
+    root = tmp_path / "outside"
+    d = root / "und"
+    d.mkdir(parents=True)
+    (d / "flow.yaml").write_text(
+        "version: 2\nability: und\ntitle: T\n"
+        "when: reach for this one when a flow hands something back without declaring it\n"
+        "uses: []\nscope_kind: s\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n    directive: Do it.\n"
+        "    completion: {type: evidence, kind: k}\n"
+        "    output:\n      from_evidence: k\n", encoding="utf-8")
+    out = run(["validate", "und"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
+    assert out.returncode == BAD_SPEC
+    assert "outputs" in out.stderr and "without declaring it" in out.stderr, out.stderr

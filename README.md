@@ -17,6 +17,7 @@ harness-engine/
 │   ├── registry.py          四个注册表共享的那件事：名字归谁、引用怎么解析
 │   ├── trust.py             扩展文件是代码：钉内容、报告、以及它不声称的东西
 │   ├── policy.py            哪里的流程是强制的（防遗漏，不防颠覆）
+│   ├── outputs.py           一步交回什么：读文件的一部分，且刻意不承重
 │   ├── schema.sql           9 表，引擎自己拥有
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
@@ -26,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   359 个测试
+└── tests/                   379 个测试
 ```
 
 ## 快速开始
@@ -230,6 +231,61 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### 一步交回什么：`output`
+
+写命令此前只回散文——`close-step` 打印「关了、下一步是谁」，而 hook 触发、尤其是**一条 obligation
+被挂上**，只在散文里宣布过。事后可以 `obligations --json` 列出来，但**债被交到手上的那一刻**对任何
+非人类的东西都是不可读的。
+
+现在 `close-step --json` 回一个信封，而 step 可以声明它**交回什么**：
+
+```yaml
+steps:
+  - id: K02
+    completion: {type: evidence, kind: test_result, match: "pass"}
+    output:
+      from_evidence: test_log        # 路径来自 driver 记录的那条 evidence
+      select: {anchor: "FAILURES"}   # 或 lines: 120-180 / regex: …；三者只能给一个
+      max_bytes: 4096
+```
+
+```
+$ harness close-step --run o2 --step K02
+✅ closed K02 (验证（含变异验证）) — 1 evidence row(s) of kind 'test_result'
+   📤 output delivered: 118 bytes from anchor 'FAILURES'  [/…/pytest.log]
+```
+
+**它刻意不承重，而这是整个设计的支点。** 内容来自 driver 记录的路径——如果交回失败能改变一步能否
+关闭，形状就会变成：driver 写一个文件说「通过了」，引擎读回来，然后有人把这当成验证。所以
+`output` 永不出现在 `completion` 里，**交回失败绝不改变步骤是否关闭**（有变异钉住：把失败改成阻断
+会变红）。
+
+**路径来自 evidence 行，不来自 spec。** spec 不可能知道这次 run 的产物路径（取决于 scope、在哪里
+干活、哪个任务），写死一个在第二台机器上就是错的；而来自记录行还意味着「交回了什么」在账本里有答案，
+不是引擎发明的。**flow 自带的文件是另一回事，早有通道**——散文层，按指针取。这一个是给「run 发生前
+不存在」的内容。
+
+**读不到不等于是空的。** 状态是闭集：
+
+| 状态 | |
+|---|---|
+| `delivered` | 读到了，附 `bytes` / `sha256` / `truncated` |
+| `no_source_recorded` | 那个 kind 一行都没记，所以没有路径可读 |
+| `source_missing` | 记了，但那不是一个可读文件 |
+| `selector_no_match` | 文件读到了，选择器在里面什么都没匹配到 |
+| `unreadable` | 打开失败，附异常 |
+
+**截取复用散文层的实现**：`prose.extract_section` 已经在做「按标题截一段并在下一个同级标题处停」。
+不为 output 再造一套——「一段在哪里结束」只有一条规则，两条会打架。有变异钉住这条（让它跑过下一个
+标题会变红）。
+
+**账本存摘要不存内容**：`step_log` 记一行 `event='output'`，带来源 + `sha256` + 字节数 + 是否截断。
+于是「那一刻交回的是什么」可回答，而账本不会变成 blob 存储。和扩展内容钉定同一个形状。
+
+顺带修掉一处：**`requirements()` 漏报 `match`**。`match` 是 `evidence` 断言真的会读的键，但它没出现
+在机器可读的要求清单里——于是清单**低报**了判据。一份漏了一条要求的要求清单比没有更糟，因为它会被
+信任。
 
 ### 已结束的 run 不接受写入
 
@@ -843,17 +899,17 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 359 passed
+python3 -m pytest tests/ -q      # 379 passed
 ```
 
 分两类：
 
-- `test_engine_purity.py`（67）—— **结构性不变量**。引擎源码里不许有 step id 形态的
+- `test_engine_purity.py`（71）—— **结构性不变量**。引擎源码里不许有 step id 形态的
   token、不许有能力专有名词、不许有能力词汇当标识符、不许 import 或硬编码路径进 abilities、
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（287）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（303）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

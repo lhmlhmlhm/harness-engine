@@ -62,6 +62,20 @@ harness history        # list runs that have ended
 Read the requirement lines and the directive. The guide and topic lines are POINTERS
 — fetch them only when you need them (`harness show --run <id> --step C00`).
 
+## Some steps hand something back
+
+A step may declare an OUTPUT: a path you recorded as evidence, which the engine reads
+and returns the declared part of when the step closes. `close-step --json` carries it;
+the text form prints one line about it.
+
+It is a channel, not a criterion. Failing to read it NEVER changes whether the step
+closed — so do not treat a delivered excerpt as proof of anything. The status is one of
+delivered / no_source_recorded / source_missing / selector_no_match / unreadable, and
+'could not read it' is deliberately not the same answer as 'it was empty'.
+
+If it comes back truncated, that is reported — the cap is declared by the step, and a
+silently shortened excerpt would be worse than none.
+
 ## Gates
 
 A step whose gate is `affirm` needs an authorisation you cannot produce yourself — see

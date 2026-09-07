@@ -187,6 +187,14 @@ steps:
       新写的测试必须做变异验证：把修复去掉，确认测试真的变红。
       绿色本身不证明测试有效。
       记录：harness evidence --step K02 --kind test_result --value "<n pass, mutation ok>"
+      再把日志路径记下来，引擎会把其中的失败段交回给你：
+      harness evidence --step K02 --kind test_log --value "<路径>"
+    # 这一步交回什么。刻意用一个 completion 并【不】要求的 kind：交回失败绝不改变这一步能否
+    # 关闭 —— output 是交回通道，不是判据。没记路径时它报 no_source_recorded，然后照常关闭。
+    output:
+      from_evidence: test_log
+      select: {anchor: "FAILURES"}
+      max_bytes: 4096
 
   # ── deliver ───────────────────────────────────────────────────────────────
   - id: D01

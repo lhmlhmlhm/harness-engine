@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS step_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id  TEXT NOT NULL REFERENCES run(run_id) ON DELETE CASCADE,
     step_id TEXT NOT NULL,
-    event   TEXT NOT NULL,                -- entered | closed | refused | skipped
+    event   TEXT NOT NULL,                -- entered | closed | refused | skipped | output
     at      TEXT NOT NULL,
     detail  TEXT
 );

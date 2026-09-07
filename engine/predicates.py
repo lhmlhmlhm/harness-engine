@@ -614,6 +614,13 @@ def requirements(spec: dict) -> list[dict]:
             item = {"what": "evidence", "kind": str(spec[key])}
             if spec.get("min_count"):
                 item["min_count"] = int(spec["min_count"])
+            # `match` is ENFORCED by the evidence predicate and was missing here, so the
+            # machine-readable requirements understated the criterion: a driver reading them saw
+            # "record a row of this kind" for a step that also demanded the value contain
+            # something. Reported now, because a requirement list that omits a requirement is
+            # worse than none — it is trusted.
+            if spec.get("match"):
+                item["match"] = str(spec["match"])
             if "value" in spec:
                 item["must_equal"] = spec["value"]
             if "values" in spec:

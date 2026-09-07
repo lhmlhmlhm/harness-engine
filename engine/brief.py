@@ -128,6 +128,19 @@ JUDGMENT: tuple[tuple[str, str, str], ...] = (
 # Sections that only make sense when the installation actually uses the mechanism. Keyed by the
 # capability name the engine detects in a flow (see flow.ENGINE_CAPABILITIES).
 _CONDITIONAL: dict[str, tuple[str, str]] = {
+    "outputs": (
+        "Some steps hand something back",
+        "A step may declare an OUTPUT: a path you recorded as evidence, which the engine reads\n"
+        "and returns the declared part of when the step closes. `close-step --json` carries it;\n"
+        "the text form prints one line about it.\n"
+        "\n"
+        "It is a channel, not a criterion. Failing to read it NEVER changes whether the step\n"
+        "closed — so do not treat a delivered excerpt as proof of anything. The status is one of\n"
+        "delivered / no_source_recorded / source_missing / selector_no_match / unreadable, and\n"
+        "'could not read it' is deliberately not the same answer as 'it was empty'.\n"
+        "\n"
+        "If it comes back truncated, that is reported — the cap is declared by the step, and a\n"
+        "silently shortened excerpt would be worse than none."),
     "gates": (
         "Gates",
         "A step whose gate is `affirm` needs an authorisation you cannot produce yourself — see\n"

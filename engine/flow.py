@@ -257,6 +257,10 @@ class Step:
     # Named judgment topics this step is prone to. Read on demand, never up front —
     # loading every caveat before every step is how a context window dies.
     topics: tuple[str, ...] = ()
+    # What this step HANDS BACK when it closes: a path the driver recorded as evidence, read by
+    # the engine and returned. NOT a criterion — see engine/outputs.py for why a channel whose
+    # content comes from the driver must never be able to satisfy one.
+    output: dict | None = None
     # A step that may legitimately run more than once — a fix/re-check cycle.
     repeatable: bool = False
     # How many attempts the budget allows. 0 = unlimited.
@@ -533,6 +537,7 @@ class Flow:
 # another appends a duplicate registration without a uniqueness check. Cheap to
 # prevent here, expensive to debug later.
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
+             "output",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget"}
 TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
@@ -544,6 +549,11 @@ FACTS_KEYS = {"provider", "providers"}
 VARIANT_KEYS = {"values", "default", "fact"}
 GUARD_KEYS = {"step", "matches"}
 GUARD_MATCH_KEYS = {"tool", "field", "pattern"}
+# What a step may declare about the content it HANDS BACK. No `from_path`: a flow's own files
+# already have a channel (the prose tier, reached by pointer), and this exists for content that
+# does not exist until the run does.
+OUTPUT_KEYS = {"from_evidence", "select", "max_bytes"}
+SELECT_KEYS = {"anchor", "lines", "regex"}
 SCOPE_MATCH_MODES = ("exact", "path_prefix", "in_payload")
 
 
@@ -951,6 +961,54 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             )
         guide = s.get("guide")
         guide = str(guide) if guide else None
+        out_raw = s.get("output")
+        output = None
+        if out_raw is not None:
+            if not isinstance(out_raw, dict):
+                raise FlowError(f"{path}: step '{sid}' has 'output' that is not a mapping")
+            reject(out_raw, OUTPUT_KEYS, f"step '{sid}' output", path)
+            kind = str(out_raw.get("from_evidence") or "").strip()
+            if not kind:
+                raise FlowError(
+                    f"{path}: step '{sid}' output needs 'from_evidence' — the path it reads comes "
+                    f"from a row the driver RECORDED.\n"
+                    f"  A path written into the spec would be wrong on the second machine, and "
+                    f"nothing in the ledger would say what was read.")
+            sel = out_raw.get("select") or {}
+            if not isinstance(sel, dict):
+                raise FlowError(f"{path}: step '{sid}' output 'select' is not a mapping")
+            reject(sel, SELECT_KEYS, f"step '{sid}' output select", path)
+            if len(sel) > 1:
+                raise FlowError(
+                    f"{path}: step '{sid}' output selects by {', '.join(sorted(sel))} at once. "
+                    f"Pick one — two selectors have no defined order, so which part was returned "
+                    f"would depend on the engine rather than on the spec.")
+            if "lines" in sel:
+                m = re.fullmatch(r"(\d+)-(\d+)", str(sel["lines"]).strip())
+                if m is None:
+                    raise FlowError(
+                        f"{path}: step '{sid}' output select.lines must be 'N-M' (1-based, "
+                        f"inclusive); got {sel['lines']!r}")
+                lo, hi = int(m.group(1)), int(m.group(2))
+                if lo < 1 or hi < lo:
+                    raise FlowError(
+                        f"{path}: step '{sid}' output select.lines {sel['lines']!r} is not a "
+                        f"range: it must start at 1 or later and not end before it starts")
+            if "regex" in sel:
+                try:
+                    re.compile(str(sel["regex"]))
+                except re.error as exc:
+                    raise FlowError(f"{path}: step '{sid}' output select.regex is not a valid "
+                                    f"regex: {exc}") from None
+            cap = out_raw.get("max_bytes")
+            if cap is not None and (not isinstance(cap, int) or isinstance(cap, bool) or cap < 1):
+                raise FlowError(
+                    f"{path}: step '{sid}' output max_bytes must be a positive integer; "
+                    f"got {cap!r}. A cap of zero would deliver nothing while reporting success.")
+            output = {"from_evidence": kind, "select": dict(sel)}
+            if cap is not None:
+                output["max_bytes"] = int(cap)
+
         topics_raw = s.get("topics") or []
         if not isinstance(topics_raw, list):
             raise FlowError(f"{path}: step '{sid}' has 'topics' that is not a list")
@@ -973,6 +1031,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             budget=budget,
             guide=guide,
             topics=topics,
+            output=output,
             optional=optional,
             strict_witness=strict,
         )
@@ -1389,6 +1448,7 @@ ENGINE_CAPABILITIES: dict = {
     "repeatable": lambda f: any(st.repeatable for st in f.steps.values()),
     "optional_steps": lambda f: any(st.optional for st in f.steps.values()),
     "ability_deps": lambda f: bool(f.requires),
+    "outputs": lambda f: any(st.output for st in f.steps.values()),
 }
 
 
