@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   406 个测试
+└── tests/                   413 个测试
 ```
 
 ## 快速开始
@@ -651,7 +651,53 @@ harness close-run --run <id> --json # result_source：flow_default / explicit / 
 | | 命令 | |
 |---|---|---|
 | `PROSE_ONLY` | `brief` `show` `validate` `adapter-contract` `guard-tool` `init` `purge-run` | 各有理由，如「退出码就是答案，旁边再放一份 payload 会引人去解析 payload」 |
-| `NO_JSON_YET` | `assert-goal` `guard` | **不是设计决定，是缺口**。`guard` 的 allow 路径今天什么都不打印，所以那是新输出而不是既有输出的第二种渲染 |
+| `NO_JSON_YET` | *（空）* | 表**留着不删**：它是下一个没有机器形态的命令必须落进去的地方。删掉它等于把那个命令放回分区测试要消灭的那片沉默里 |
+
+### `guard` 的裁决是闭集，因为它的 allow 互不等价
+
+`guard` 回答一个问题：这个动作可以进行吗？而它的 **allow 有五种**，一个裸 `allowed: true` 恰好抹掉
+这个引擎一直在守的那条区别——**「这里没有东西要守」和「我看不见要守什么」不许长得一样**。
+
+```
+blocked           有 run 守这个动作，而它要的门没有记录          exit 4
+no_run_in_scope   这个 scope 没有 open run                    ← 没有东西要守
+not_guarded       有 run，但它们的 flow 都不声明这个动作
+gate_recorded     它要的门已经记录了
+unadjudicated     多个 run 共享 scope 且无可用租约 → 归属不可判定（并记一条 violation）
+store_unusable    账本缺失或 schema 太新：**无法**守，而且连「无法守」都记不下来
+view_incomplete   至少一个 open run 的 flow 读不出来           ← 我看不见要守什么
+```
+
+有测试断言**每一个声明的裁决都可达**（声明了却没人能产出的裁决是死重），而每个裁决自带一句说明，
+所以调用方不用从名字去猜含义。
+
+#### 顺路补掉 ask 侧的同一个洞
+
+`guard-tool`（hook 侧）上一轮补过「读不出 flow 的 run 被静默跳过」；**`harness guard`（主动询问侧）
+还留着同一行 `continue`**。同一个 run、同一个动作、同一个账本：
+
+```
+读得出   → verdict=blocked          exit 4
+读不出   → verdict=not_guarded      exit 0     ← 修之前：一个【引擎无法支撑】的声明
+读不出   → verdict=view_incomplete  exit 0     ← 现在
+```
+
+一旦这个命令以数据作答，`not_guarded` 就不再只是「少说了一句」，而是**引擎在陈述一件它没法背书的事**。
+
+#### 信封不许报告它没检查过的东西
+
+第一版我在**第一个阻断处就返回**，于是 `unreadable` 会是空列表——因为链上更后面的 link 根本没被看。
+**空列表读起来是「一切都可读」**。改成先扫完整条链再裁决（链只有一两节，成本为零），于是阻断信封
+同时带两个都为真的事实：
+
+```
+verdict    blocked
+blocked_by {'run': 'la', 'step': 'G01', 'link': 1, 'of': 2}
+unreadable [('lb', 'zzz_b')]
+```
+
+而 `unadjudicated` 那条**根本不带 `unreadable` 键**——它在读任何 flow 之前就判定了，凭空加一个
+汇报「未尝试的工作」的键是同一个谎的另一个方向。两条都有变异钉住。
 
 实现是**一份数据两种渲染**（`_emit`）：另建一份机器形态等于把同一个查询实现两遍，而其中一个先长出
 新字段的那一刻它们就漂了。
@@ -1020,7 +1066,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 406 passed
+python3 -m pytest tests/ -q      # 413 passed
 ```
 
 分两类：

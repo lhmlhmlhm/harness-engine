@@ -8166,3 +8166,241 @@ def test_a_malformed_invocation_stays_prose_and_says_so(env):
     assert out.returncode == USAGE
     assert out.stdout.strip() == "", "a payload here would have to be invented"
     assert "required" in out.stderr
+
+
+# ------------------------------------------------------------------ the last two read commands
+
+_GV_SPEC = """
+scope_match: exact
+guards:
+  deploy: {step: G01, matches: [{tool: shell, field: command, pattern: 'deploy-thing'}]}
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: G01
+    phase: p1
+    gate: affirm
+    title: The gate that guards deploying
+    directive: Confirm.
+"""
+
+
+@pytest.mark.parametrize("goal,declared,met,code", [
+    (None, False, None, OK),
+    ("phase_steps_closed", True, False, REFUSED),
+])
+def test_assert_goal_answers_declared_and_met_as_two_facts(env, goal, declared, met, code):
+    """A phase with NO criterion and a phase whose criterion holds both exit 0.
+
+    Reporting `met: true` for the first would be the answer inventing a check nobody wrote, so
+    "was anything asserted" and "did it hold" are separate fields and the first can be false.
+    """
+    d = _spec(env, "zzz_ag", f"""
+phases:
+  - id: p1
+    title: P1
+{f"    goal:{chr(10)}      type: {goal}" if goal else ""}
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+""")
+    try:
+        run(["open", "zzz_ag", "--scope", "s1", "--run", "a1"], env)
+        out = run(["assert-goal", "--run", "a1", "--phase", "p1", "--json"], env)
+        assert out.returncode == code, out.stderr
+        got = _one_json(out)
+        assert got["command"] == "assert-goal"
+        assert (got["declared"], got["met"]) == (declared, met), got
+        if code == REFUSED:
+            # Emitted by the site, not by the backstop: `met: false` is branchable and the
+            # backstop can only offer the sentence.
+            assert "code_name" not in got, "the backstop answered over a richer envelope"
+            assert got["why"], got
+    finally:
+        _rm(d)
+
+
+def test_guard_verdicts_are_a_closed_set_and_every_one_is_reachable(env, tmp_path, monkeypatch):
+    """All seven, produced for real — a declared verdict nothing can produce is dead weight.
+
+    The kinds of ALLOW are the point. `no_run_in_scope` and `view_incomplete` both allow, and
+    treating them as one answer is exactly the collapse this command exists not to make.
+    """
+    sys.path.insert(0, str(REPO))
+    from engine.harness import GUARD_VERDICTS
+
+    def ask(scope, action="deploy", env_extra=None, kind="s"):
+        out = run(["guard", "--action", action, "--scope-kind", kind,
+                   "--scope", scope, "--json"], {**env, **(env_extra or {})})
+        return out.returncode, _one_json(out)
+
+    seen = {}
+    d = _spec(env, "zzz_gv", _GV_SPEC)
+    try:
+        # nothing open here at all
+        _, g = ask("empty-scope")
+        seen[g["verdict"]] = g
+        assert g["allowed"] is True and g["runs"] == []
+
+        run(["open", "zzz_gv", "--scope", "s-one", "--run", "v1"], env)
+
+        # open, guarded, no gate → the only verdict that refuses
+        code, g = ask("s-one")
+        seen[g["verdict"]] = g
+        assert code == BLOCKED and g["allowed"] is False
+        assert g["blocked_by"]["step"] == "G01" and g["blocked_by"]["of"] == 1
+
+        # open, but this flow says nothing about that action
+        _, g = ask("s-one", action="something-else")
+        seen[g["verdict"]] = g
+        assert g["allowed"] is True and g["runs"] == ["v1"]
+
+        # the gate it wanted, recorded
+        tr = transcript_with(tmp_path, 2)
+        assert rc(["gate", "--run", "v1", "--step", "G01", "--decision", "affirm",
+                   "--evidence", "a person said so"], env,
+                  transcript=tr, witness="transcript") == OK
+        _, g = ask("s-one")
+        seen[g["verdict"]] = g
+        assert g["gate_recorded"] == [{"run": "v1", "step": "G01", "decision": "affirm"}]
+
+        # two runs in one scope, no delegation → who owns the action is unanswerable
+        run(["open", "zzz_gv", "--scope", "s-one", "--run", "v2", "--allow-concurrent"], env)
+        _, g = ask("s-one")
+        seen[g["verdict"]] = g
+        assert g["allowed"] is True and g["violation_recorded"] is True
+        assert g["runs"] == ["v1", "v2"]
+
+        # no store: cannot guard, and cannot record that it could not
+        _, g = ask("s-one", env_extra={"HARNESS_STATE_DIR": str(tmp_path / "absent")})
+        seen[g["verdict"]] = g
+        assert g["allowed"] is True and g["detail"]
+
+        # a run whose flow cannot be READ. v2 has to go first: two open runs with no lease is
+        # decided BEFORE any flow is loaded, so it would mask this path rather than combine
+        # with it.
+        assert rc(["close-run", "--run", "v2", "--force-steps"], env) == OK
+        (d / "flow.yaml").write_text(
+            (d / "flow.yaml").read_text(encoding="utf-8") + "\nnot_a_key: 1\n",
+            encoding="utf-8")
+        _, g = ask("s-one")
+        seen[g["verdict"]] = g
+        assert g["allowed"] is True
+        assert [u["run"] for u in g["unreadable"]] == ["v1"]
+    finally:
+        _rm(d)
+
+    assert set(seen) == set(GUARD_VERDICTS), \
+        f"unreachable: {sorted(set(GUARD_VERDICTS) - set(seen))}; " \
+        f"undeclared: {sorted(set(seen) - set(GUARD_VERDICTS))}"
+    # Every verdict states its own meaning, so a caller is not left inferring one from a name.
+    for name, g in seen.items():
+        assert g["why"] == GUARD_VERDICTS[name] and len(g["why"]) > 40, name
+
+
+def test_guard_says_it_could_not_look_rather_than_that_nothing_guards_it(env, tmp_path):
+    """THE HOLE THIS CLOSES, asserted as the difference it makes to one identical question.
+
+    The same run, the same action, the same ledger. Readable, it BLOCKS. Unreadable, it used to
+    answer exactly as it does when no flow guards the action at all — and once this command
+    answers as data, that would be the engine stating a claim it cannot back.
+    """
+    d = _spec(env, "zzz_gh", _GV_SPEC)
+    try:
+        run(["open", "zzz_gh", "--scope", "sh", "--run", "h1"], env)
+        args = ["guard", "--action", "deploy", "--scope-kind", "s", "--scope", "sh", "--json"]
+
+        out = run(args, env)
+        assert out.returncode == BLOCKED
+        assert _one_json(out)["verdict"] == "blocked"
+
+        (d / "flow.yaml").write_text(
+            (d / "flow.yaml").read_text(encoding="utf-8") + "\nnot_a_key: 1\n",
+            encoding="utf-8")
+
+        out = run(args, env)
+        got = _one_json(out)
+        assert got["verdict"] == "view_incomplete", got
+        assert got["verdict"] != "not_guarded", "an unread flow reported as an absent one"
+        # Still allows — the iron law of a guard that runs in front of everything.
+        assert out.returncode == OK and got["allowed"] is True
+        assert got["unreadable"][0]["run"] == "h1" and got["unreadable"][0]["why"]
+        # And the human channel says it too, not only the payload.
+        assert "CANNOT READ" in out.stderr and "there is no guard" in out.stderr
+    finally:
+        _rm(d)
+
+
+def test_a_block_stands_and_reports_the_partial_view_rather_than_hiding_it(env):
+    """Two facts, both true at once: this action is refused, AND the view was not complete.
+
+    A declared lease is what makes two runs in one scope adjudicable, so this is the only shape
+    in which "one link blocks, another link cannot be read" is reachable at all.
+
+    It also pins why the whole chain is scanned before anything is decided. Returning at the
+    first block was cheaper and made the answer LIE: `unreadable` came back empty because the
+    links past the block were never looked at, and an empty list reads as "everything was
+    readable".
+    """
+    a = _spec(env, "zzz_la", _GV_SPEC)
+    b = _spec(env, "zzz_lb", _GV_SPEC)
+    try:
+        assert rc(["open", "zzz_la", "--scope", "sy", "--run", "la"], env) == OK
+        assert rc(["enter", "--run", "la", "--step", "G01"], env) == OK
+        assert rc(["open", "zzz_lb", "--scope", "sy", "--run", "lb",
+                   "--leased-from", "la", "--leased-at", "G01"], env) == OK
+        (b / "flow.yaml").write_text(
+            (b / "flow.yaml").read_text(encoding="utf-8") + "\nnot_a_key: 1\n",
+            encoding="utf-8")
+
+        out = run(["guard", "--action", "deploy", "--scope-kind", "s", "--scope", "sy",
+                   "--json"], env)
+        got = _one_json(out)
+        # More information cannot turn a refusal into an allow.
+        assert out.returncode == BLOCKED and got["verdict"] == "blocked"
+        assert got["blocked_by"]["run"] == "la" and got["blocked_by"]["of"] == 2
+        # ...and the caveat is not dropped on the way.
+        assert [u["run"] for u in got["unreadable"]] == ["lb"], got
+        assert "CANNOT READ" in out.stderr and "BLOCKED" in out.stderr
+    finally:
+        _rm(a)
+        _rm(b)
+
+
+def test_an_unanswerable_owner_is_decided_before_any_flow_is_read(env):
+    """Two open runs with no lease is settled without loading a spec — so a broken spec in the
+    scope cannot mask it, and it cannot mask a broken spec either.
+
+    Worth pinning because both verdicts allow, and if the order flipped, the answer to "why did
+    this go through" would change while the exit code did not.
+    """
+    d = _spec(env, "zzz_un", _GV_SPEC)
+    try:
+        assert rc(["open", "zzz_un", "--scope", "su", "--run", "u1"], env) == OK
+        assert rc(["open", "zzz_un", "--scope", "su", "--run", "u2",
+                   "--allow-concurrent"], env) == OK
+        (d / "flow.yaml").write_text(
+            (d / "flow.yaml").read_text(encoding="utf-8") + "\nnot_a_key: 1\n",
+            encoding="utf-8")
+        got = _one_json(run(["guard", "--action", "deploy", "--scope-kind", "s",
+                             "--scope", "su", "--json"], env))
+        assert got["verdict"] == "unadjudicated", got
+        assert got["violation_recorded"] is True
+        # No `unreadable` key at all: it never got as far as trying to read one, and a key
+        # reporting on unattempted work would be the same lie in the other direction.
+        assert "unreadable" not in got, got
+    finally:
+        _rm(d)
+
+
+def test_the_pending_table_is_empty_and_still_exists(env):
+    """It is the place a command with no machine form has to land.
+
+    Deleting the table once it emptied would put the next such command back into the silence the
+    partition test exists to make impossible.
+    """
+    sys.path.insert(0, str(REPO))
+    from engine.harness import NO_JSON_YET
+    assert NO_JSON_YET == {}

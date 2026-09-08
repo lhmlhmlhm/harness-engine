@@ -488,6 +488,30 @@ def _scope_taken(scope_kind: str, scope_key: str, rows) -> None:
     )
 
 
+# Every way `guard` can answer. A closed set, because the whole value of this command is that
+# its kinds of ALLOW are not interchangeable: "there is nothing here to guard" and "I could not
+# see what to guard" are the two the engine has always had to keep apart, and a bare
+# `allowed: true` erases exactly that distinction.
+GUARD_VERDICTS: dict[str, str] = {
+    "blocked":
+        "a run guards this action and its gate is not recorded.",
+    "no_run_in_scope":
+        "no run is open in this scope. Nothing to guard — not the same as nothing guarding it.",
+    "not_guarded":
+        "run(s) are open here and none of their flows declares this action.",
+    "gate_recorded":
+        "a run guards this action and the gate it needs is already recorded.",
+    "unadjudicated":
+        "several runs share this scope with no usable delegation, so which one owns the action "
+        "is unanswerable. Allowed, and recorded as a violation.",
+    "store_unusable":
+        "the store is absent or at a schema this engine will not read. CANNOT guard — and "
+        "cannot record that it could not, because recording needs the store just refused.",
+    "view_incomplete":
+        "at least one open run's flow could not be READ, so its guards were not consulted. No "
+        "readable run blocked; that is not the same as nothing blocking.",
+}
+
 UNADJUDICATED = "guard_unadjudicated"
 LEASE_OUTSTANDING = "lease_outstanding"
 
@@ -1346,6 +1370,14 @@ def cmd_guard(args) -> int:
     unrelated action is worse than one that misses: being told to satisfy a gate that
     does not belong to your work leaves forging that gate as the only way forward.
     """
+    def answer(verdict: str, **extra) -> int:
+        """One place builds the answer, so the prose and the payload cannot disagree."""
+        assert verdict in GUARD_VERDICTS, verdict
+        _emit(args, {"action": args.action, "scope_kind": args.scope_kind, "scope": args.scope,
+                     "allowed": verdict != "blocked", "verdict": verdict,
+                     "why": GUARD_VERDICTS[verdict], **extra}, lambda _d: None)
+        return BLOCKED if verdict == "blocked" else OK
+
     try:
         conn = store.connect(read_only=True)
     except store.StoreUnusable as exc:
@@ -1354,11 +1386,11 @@ def cmd_guard(args) -> int:
         # machine. It also cannot be RECORDED, because recording needs the very store just
         # refused; that asymmetry is why this one prints instead of leaving a row.
         _err(f"⚠️  guard not enforced: {str(exc).splitlines()[0]}")
-        return OK
+        return answer("store_unusable", detail=str(exc).splitlines()[0])
     try:
         candidates = store.open_runs_in_scope(conn, args.scope_kind, args.scope)
         if not candidates:
-            return OK
+            return answer("no_run_in_scope", runs=[])
         by_id = {r["run_id"]: r for r in candidates}
         if len(candidates) == 1:
             chain = [candidates[0]["run_id"]]
@@ -1379,36 +1411,82 @@ def cmd_guard(args) -> int:
                     f"    Recorded as '{UNADJUDICATED}'. To make this adjudicable, start the "
                     f"inner run with --leased-from/--leased-at."
                 )
-                return OK
+                return answer("unadjudicated", runs=sorted(by_id),
+                              violation_recorded=True, detail=why)
         # EVERY run in the chain that guards this action must have its gate — not only the
         # holder. Otherwise delegating becomes the way around a gate: the outer run says "no
         # such action here until a human affirms", hands the scope to a flow that guards
         # nothing, and the action goes through. The outer gate is not an unrelated run's gate:
         # that run authorised the delegation, over this very scope.
+        # THE WHOLE CHAIN IS EXAMINED BEFORE ANYTHING IS DECIDED. Returning at the first block
+        # was cheaper and made the answer lie: `unreadable` would come back EMPTY because the
+        # links past the block were never looked at, and an empty list reads as "everything was
+        # readable". A payload may not report on what it did not check. Chains are one or two
+        # links, so the cost is nil.
+        unreadable: list[dict] = []
+        gated: list[dict] = []
+        blocks: list[dict] = []
         for i, run_id in enumerate(chain):
             row = by_id[run_id]
             try:
                 f = flowmod.load(row["ability"])
-            except flowmod.FlowError:
-                continue  # a broken spec must not brick unrelated tooling
+            except flowmod.FlowError as exc:
+                # THE SAME HOLE THE HOOK SIDE HAD, on the side a caller ASKS. Skipping in
+                # silence made "this run declares no guard for the action" and "I could not
+                # read the flow that might" produce the identical answer — and once this
+                # command answers as data, the first of those is a claim the engine would be
+                # stating without being able to back it.
+                #
+                # Three causes, all of them soundless until now: the ability is not on this
+                # process's search path, its spec is invalid, or its extension code is not
+                # approved here so loading refuses.
+                unreadable.append({
+                    "run": run_id, "ability": row["ability"],
+                    "why": " — ".join(x.strip() for x in str(exc).split("\n")[:2] if x.strip()),
+                })
+                continue
             step_id = f.guards.get(args.action)
             if step_id is None:
                 continue  # this ability does not guard this action
             g = store.get_gate(conn, run_id, step_id)
             if g is not None and g["decision"] in ("affirm", "preauth"):
+                gated.append({"run": run_id, "step": step_id, "decision": g["decision"]})
                 continue
-            s = f.step(step_id)
-            where = "" if len(chain) == 1 else f" (link {i + 1} of {len(chain)} in this scope)"
+            blocks.append({"run": run_id, "step": step_id, "title": f.step(step_id).title,
+                            "link": i + 1, "of": len(chain)})
+
+        if unreadable:
+            _err(f"⚠️  guard: {len(unreadable)} run(s) in this scope whose flow it CANNOT "
+                 f"READ.\n"
+                 f"    Their guards were not consulted — that is \"the guard could not be "
+                 f"looked up\",\n"
+                 f"    not \"there is no guard\".")
+            for u in unreadable:
+                _err(f"      {u['run']} ({u['ability']}): {u['why']}")
+            _err("    Fix whichever applies:\n"
+                 "      · not visible here     → HARNESS_ABILITIES_PATH must cover the runs\n"
+                 "      · spec invalid         → harness validate <ability>\n"
+                 "      · extension unapproved → harness trust <ability>")
+
+        if blocks:
+            b = blocks[0]
+            where = "" if b["of"] == 1 else f" (link {b['link']} of {b['of']} in this scope)"
             _err(
-                f"⛔ BLOCKED: action '{args.action}' requires gate '{step_id}' "
-                f"({s.title}) on run {run_id}{where}.\n"
+                f"⛔ BLOCKED: action '{args.action}' requires gate '{b['step']}' "
+                f"({b['title']}) on run {b['run']}{where}.\n"
                 f"    Do not proceed. Get a real human affirmation, then record it:\n"
-                f"      harness gate --run {run_id} --step {step_id} "
+                f"      harness gate --run {b['run']} --step {b['step']} "
                 f"--decision affirm --evidence \"<what they said>\"\n"
                 f"    Recording it without a witnessed human turn is refused."
             )
-            return BLOCKED
-        return OK
+            # A block stands whatever else could not be read: more information cannot turn a
+            # refusal into an allow. Reported WITH the partial view rather than instead of it.
+            return answer("blocked", blocked_by=b, unreadable=unreadable)
+        if unreadable:
+            return answer("view_incomplete", unreadable=unreadable, gate_recorded=gated)
+        if gated:
+            return answer("gate_recorded", gate_recorded=gated)
+        return answer("not_guarded", runs=sorted(by_id))
     finally:
         conn.close()
 
@@ -1487,13 +1565,25 @@ def cmd_assert_goal(args) -> int:
                  f"    phases: {', '.join(f.phases)}")
             return USAGE
         applicable, ok, why = _check_goal(conn, row, f, args.phase)
+        say = _sayer(args)
         if not applicable:
-            print(f"⃝  phase '{args.phase}' declares no goal — nothing to assert")
-            return OK
+            say(f"⃝  phase '{args.phase}' declares no goal — nothing to assert")
+            # `declared: false` with `met: null`. A phase with no criterion and a phase whose
+            # criterion holds both exit 0, and only this tells them apart — reporting `met:
+            # true` for the first would be the answer inventing a check nobody wrote.
+            return _emit(args, {"run": row["run_id"], "phase": args.phase,
+                                "declared": False, "met": None, "why": None},
+                         lambda _d: None)
         if ok:
-            print(f"✅ phase '{args.phase}' goal met: {why}")
-            return OK
+            say(f"✅ phase '{args.phase}' goal met: {why}")
+            return _emit(args, {"run": row["run_id"], "phase": args.phase,
+                                "declared": True, "met": True, "why": why},
+                         lambda _d: None)
         _err(f"⛔ REFUSED: phase '{args.phase}' goal NOT met.\n    {why}")
+        # Emitted here rather than left to the backstop: `met: false` is a fact a caller can
+        # branch on, and the backstop can only offer the sentence.
+        _emit(args, {"run": row["run_id"], "phase": args.phase,
+                     "declared": True, "met": False, "why": why}, lambda _d: None)
         return REFUSED
     finally:
         conn.close()
@@ -2094,15 +2184,10 @@ PROSE_ONLY: dict[str, str] = {
         "deletes a closed run's rows; the count is a human confirmation, not an answer.",
 }
 
-# NOT a design decision — an absence, named so it stays visible. Both are read commands whose
-# verdict is exactly the kind of thing a non-shell caller wants as data.
-NO_JSON_YET: dict[str, str] = {
-    "assert-goal":
-        "would answer {declared, met, why}; nothing structural is in the way.",
-    "guard":
-        "would answer {allowed, blocked_by, chain}. Its ALLOW path prints nothing at all today, "
-        "so an envelope is new output rather than a second rendering of existing output.",
-}
+# Empty, and kept rather than deleted: the table is what made the two entries that used to be
+# here visible as a GAP instead of as a decision, and the partition test needs somewhere to put
+# the next one. A command with no machine form must land in a table, not in the silence.
+NO_JSON_YET: dict[str, str] = {}
 
 
 def _arg_shape(action) -> dict:
@@ -2762,6 +2847,7 @@ def build_parser() -> argparse.ArgumentParser:
     gu.add_argument("--action", required=True)
     gu.add_argument("--scope-kind", required=True)
     gu.add_argument("--scope", required=True)
+    _add_json(gu)
     gu.set_defaults(fn=cmd_guard)
 
     pr = sub.add_parser("purge-run",
@@ -2799,6 +2885,7 @@ def build_parser() -> argparse.ArgumentParser:
     ag = sub.add_parser("assert-goal", help="check whether a phase meets its acceptance criterion")
     ag.add_argument("--run", required=True)
     ag.add_argument("--phase", required=True)
+    _add_json(ag)
     ag.set_defaults(fn=cmd_assert_goal)
 
     sm = sub.add_parser("summarize", help="record a phase's rollup")
