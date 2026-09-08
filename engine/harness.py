@@ -275,6 +275,11 @@ def cmd_abilities(args) -> int:
                                 for a in sorted(f.guards)},
                 "variants": list(f.variants),
                 "requires": list(f.requires),
+                # So a driver knows the vocabulary BEFORE it closes a run, not only from the
+                # refusal it gets for guessing. Null means the flow never said, and then any
+                # string is still accepted.
+                "results": ({"values": list(f.result_spec["values"]),
+                             "default": f.result_spec["default"]} if f.result_spec else None),
                 "facts_providers": list(f.facts_providers),
                 "facts": sorted(f.facts_schema),
                 "hooks": len(f.hooks), "uses": list(flowmod.capabilities_used(f)),
@@ -2356,6 +2361,24 @@ def cmd_close_run(args) -> int:
     try:
         row = _run_or_exit(conn, args.run)
         f = _flow_for_run(conn, row)
+        spec = f.result_spec
+        if spec:
+            if args.result is None:
+                result = spec["default"]
+            elif args.result not in spec["values"]:
+                _err(f"⛔ '{args.result}' is not one of the results "
+                     f"'{row['ability']}' declares.\n"
+                     f"    legal: {', '.join(spec['values'])}   (default {spec['default']})\n"
+                     f"    A free-form outcome cannot be counted or compared: this flow's own\n"
+                     f"    history would end up holding several words for one ending.")
+                return USAGE
+            else:
+                result = args.result
+        else:
+            # The flow never said. Keep the engine's old fallback rather than inventing a
+            # vocabulary on its behalf — and `harness abilities` reports which flows are in
+            # this state, so the silence is visible.
+            result = args.result if args.result is not None else "completed"
         done = store.closed_steps(conn, row["run_id"])
         # Optional steps and untaken exclusive branches are not owed. Demanding them is
         # what made the transcribed 111-step flow impossible to close.
@@ -2405,8 +2428,8 @@ def cmd_close_run(args) -> int:
                 f"when this run closed",
                 severity="breach")
         freed = store.release_leases_touching(conn, row["run_id"], "run_closed")
-        store.close_run(conn, row["run_id"], args.result)
-        print(f"✅ closed run {row['run_id']} → {args.result}")
+        store.close_run(conn, row["run_id"], result)
+        print(f"✅ closed run {row['run_id']} → {result}")
         if freed["held"] or freed["granted"]:
             print(f"   leases released: {freed['held']} held, {freed['granted']} granted")
         if outgoing:
@@ -2620,7 +2643,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     cr = sub.add_parser("close-run", help="close a run (exit 3 if steps remain)")
     cr.add_argument("--run", required=True)
-    cr.add_argument("--result", default="completed")
+    # No default here: the FLOW decides, when it has said. Baking one in was how a word the
+    # flow never chose ("completed") ended up in its own history alongside three others.
+    cr.add_argument("--result", default=None,
+                    help="one of the flow's declared results; see `harness abilities --json`")
     # TWO flags, deliberately, and no combined one. They authorise different things:
     # leaving work undone, versus leaving a recorded commitment unmet. One switch made
     # whoever reached for it grant both — usually while meaning only the first — and the

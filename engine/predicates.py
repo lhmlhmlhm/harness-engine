@@ -33,11 +33,18 @@ _OWNERS: dict[str, str] = {}
 
 
 def predicate(name: str, *, requires: tuple[str, ...] = (),
+              optional: tuple[str, ...] = (),
               needs_facts: bool = False) -> Callable:
     """Register a completion predicate under `name`.
 
     `requires` names the spec keys the flow must supply, checked at flow-load time so
     a typo in an ability's yaml is a startup error rather than a mid-run surprise.
+
+    `optional` names the rest of the keys this predicate READS. Together the two make the
+    completion spec a closed set, which it was not: an unknown key used to be ignored in
+    silence, so `min_counts` for `min_count` quietly downgraded a criterion to "any one row"
+    while the yaml still read as if it demanded two. Everywhere else in a spec a typo is fatal
+    for exactly that reason; this was the one place it was not.
 
     `needs_facts` marks a predicate that must consult DERIVED facts, not only what was
     recorded. Declared rather than assumed, for two reasons: the caller passes the fact
@@ -48,7 +55,8 @@ def predicate(name: str, *, requires: tuple[str, ...] = (),
     """
     def deco(fn: Callable) -> Callable:
         key = registry.claim("completion predicate", name, _REGISTRY, _OWNERS, fn)
-        _REGISTRY[key] = {"fn": fn, "requires": requires, "needs_facts": needs_facts}
+        _REGISTRY[key] = {"fn": fn, "requires": requires, "optional": optional,
+                          "needs_facts": needs_facts}
         return fn
     return deco
 
@@ -78,6 +86,18 @@ def registered() -> list[str]:
 
 def validate_spec(name: str, spec: dict, where: str) -> None:
     entry = _REGISTRY[name]
+    allowed = {"type"} | set(entry["requires"]) | set(entry.get("optional") or ())
+    unknown = sorted(k for k in spec if k not in allowed)
+    if unknown:
+        raise ValueError(
+            f"{where}: completion type '{name}' has unsupported key(s): "
+            f"{', '.join(unknown)}\n"
+            f"  supported: {', '.join(sorted(allowed))}\n"
+            f"  A key nothing reads does not fail — it makes the criterion WEAKER than it\n"
+            f"  looks. `min_counts` where `min_count` was meant is a silent downgrade to\n"
+            f"  \"any one row\", with the yaml still reading as though it demanded several.\n"
+            f"  If the mechanism is missing, that is an engine gap: raise it, do not spell it."
+        )
     for key in entry["requires"]:
         if key not in spec:
             raise ValueError(
@@ -134,7 +154,7 @@ def _attest(conn, run_id, step, spec) -> tuple[bool, str]:
     return True, "attested"
 
 
-@predicate("evidence", requires=("kind",))
+@predicate("evidence", requires=("kind",), optional=("min_count", "match"))
 def _evidence(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when at least one evidence row of `kind` exists for this step.
 
@@ -176,7 +196,7 @@ def _gate_recorded(conn, run_id, step, spec) -> tuple[bool, str]:
     return True, f"gate recorded ({row['decision']})"
 
 
-@predicate("all_of", requires=("steps",))
+@predicate("all_of", requires=("steps",), optional=("any_of",))
 def _all_of(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when every named step is closed, and each `any_of` group has one closed.
 
@@ -209,7 +229,7 @@ def _all_of(conn, run_id, step, spec) -> tuple[bool, str]:
     return False, "; ".join(why)
 
 
-@predicate("no_open_violations")
+@predicate("no_open_violations", optional=("include_blocked",))
 def _no_open_violations(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when the run carries no recorded violations.
 
@@ -266,7 +286,7 @@ def _evidence_in(conn, run_id, step, spec) -> tuple[bool, str]:
     return False, f"{spec['kind']} is {latest!r}, expected one of {allowed}"
 
 
-@predicate("evidence_all_in", requires=("kind", "values"))
+@predicate("evidence_all_in", requires=("kind", "values"), optional=("min_count",))
 def _evidence_all_in(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when EVERY recorded row of `kind` carries one of `values` — not just the latest.
 
@@ -389,7 +409,7 @@ def _claim_corroborated(conn, run_id, step, spec, facts_fn=None) -> tuple[bool, 
     )
 
 
-@predicate("fields_agree", requires=("kind_a", "kind_b"))
+@predicate("fields_agree", requires=("kind_a", "kind_b"), optional=("absent_ok", "value_in"))
 def _fields_agree(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when two recorded values AGREE, and optionally the agreed value is acceptable.
 
@@ -472,7 +492,7 @@ def _evidence_matches_variant(conn, run_id, step, spec) -> tuple[bool, str]:
     )
 
 
-@predicate("phases_summarized")
+@predicate("phases_summarized", optional=("exclude",))
 def _phases_summarized(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when every phase the run has REACHED also has a summary row.
 
@@ -500,7 +520,7 @@ def _phases_summarized(conn, run_id, step, spec) -> tuple[bool, str]:
     )
 
 
-@predicate("phase_steps_closed")
+@predicate("phase_steps_closed", optional=("allow_optional_open",))
 def _phase_steps_closed(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when every REQUIRED step of the subject's phase is closed (or legitimately skipped).
 

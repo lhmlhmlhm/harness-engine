@@ -32,6 +32,13 @@ title: 交付生命周期
 # ambiguous, so the engine refuses the second unless told otherwise.
 scope_kind: repo
 
+# 这条流程可以怎样结束。声明出来，`--result` 才有词汇表可对 —— 在这之前它接受任意字符串，
+# 于是 done / completed 和 abort / aborted 成了四个词表达两件事，history 也就无法聚合。
+results:
+  values: [completed, abandoned]
+  default: completed
+
+
 # 🔧 PROJECT-SPECIFIC — pre-authorisation switches. A gate declared
 # `preauth:<key>` may be satisfied by config INSTEAD of a human, but only when the
 # key is truthy. Absent or false ⇒ the gate refuses and records a violation.

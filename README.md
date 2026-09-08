@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   379 个测试
+└── tests/                   393 个测试
 ```
 
 ## 快速开始
@@ -231,6 +231,78 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
 于是下一次注册被判为「与无人冲突」。现在不同步只会让消息退化，**不会凭空造出一个冲突**。
+
+### completion spec 也是闭集了
+
+flow.yaml 有 13 组闭集，未知键一律 exit 2 并列出合法键——**除了 completion spec 内部**。那里
+`validate_spec` 只检查必填键在不在，不拒绝未知键。后果不是「它会坏」，而是**它会变弱**：
+
+```yaml
+completion: {type: evidence, kind: k, min_counts: 2}
+                                      ↑ 多一个 s，被静默忽略，判据降级成「任意一行」
+                                        而 yaml 读起来仍然像要求两行
+```
+
+修法是把每个断言**真正读的键**声明出来——`predicate(name, requires=(...), optional=(...))`——于是
+`{"type"} | requires | optional` 就是那个断言的闭集：
+
+```
+evidence          requires=(kind,)              optional=(min_count, match)
+all_of            requires=(steps,)             optional=(any_of,)
+fields_agree      requires=(kind_a, kind_b)     optional=(absent_ok, value_in)
+no_open_violations                              optional=(include_blocked,)
+phase_steps_closed                              optional=(allow_optional_open,)
+phases_summarized                               optional=(exclude,)
+```
+
+**是 per-predicate 的闭集，不是所有断言的并集**（有变异钉住这条）：`match` 属于 `evidence`，写在
+`evidence_equals` 上要被拒；`kind` 在 `attest` 上要被拒。
+
+```
+step 'W01': completion type 'evidence' has unsupported key(s): min_counts
+  supported: kind, match, min_count, type
+  A key nothing reads does not fail — it makes the criterion WEAKER than it
+  looks. `min_counts` where `min_count` was meant is a silent downgrade to
+  "any one row", with the yaml still reading as though it demanded several.
+```
+
+还有一条**从实现侧交叉核对**的测试：走每个断言的源码抽出它读的 `spec` 键，断言全部已声明——否则
+机制会拿自己的实现去拒绝自己。
+
+### flow 声明自己可以怎样结束：`results`
+
+`--result` 此前接受**任意字符串**，默认 `completed`。证据就在这个仓库自己的测试里：
+
+```
+"--result", "completed"  ×5      "--result", "done"    ×4
+"--result", "aborted"    ×3      "--result", "abort"   ×2
+```
+
+**四个词表达两件事**，而 `history` 能显示它们却无法聚合。
+
+```yaml
+results:
+  values: [completed, abandoned]
+  default: completed
+```
+
+**形状照 `variants:` 来（values + 显式 default），不用裸列表**——裸列表会让**顺序**决定默认值，而
+「顺序有含义」是一条在 yaml 里看不见的规则。
+
+| 情形 | 行为 |
+|---|---|
+| flow 声明了，`--result` 省略 | 用 **flow 的** default（不是引擎的词，有变异钉住） |
+| flow 声明了，`--result` 不在 values 里 | exit 1，列出合法值与默认值，**且不会在拒绝前先关掉 run** |
+| **flow 没声明** | 与从前逐字节相同：任意字符串，省略则 `completed` |
+
+最后一行是刻意的：把声明变成必填会是一次 spec 格式破坏，而别处写的 2.0 flow 可能并没有这个洞。所以
+未声明仍然合法，而 `abilities --json` 报出哪些 flow 处于那个状态——**沉默是可见的，不是被假设的**。
+
+词汇表在 `abilities --json` 里可读，所以 driver **在关 run 之前**就知道合法值，而不是只能从一次拒绝里学到。
+
+7 个已装 flow 全部声明了 `[completed, abandoned]`。**这个集合刻意保守**：`abandoned` 是引擎已经半知道
+的那个区别（强制关闭与干净关闭不是一件事）。更贴合各 flow 的词汇（`shipped` / `drafted` / `pushed`）现在
+可表达了，但那是领域判断，不该由我替这些 spec 决定。
 
 ### 一步交回什么：`output`
 
@@ -899,7 +971,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 379 passed
+python3 -m pytest tests/ -q      # 393 passed
 ```
 
 分两类：
@@ -909,7 +981,7 @@ python3 -m pytest tests/ -q      # 379 passed
   **不许把任何已装 flow 的名字写成字面量或标识符**（名单从磁盘派生，不手写）。
   另有一条反向测试确保词汇**真的**在 spec 里（否则纯净测试可以被一个啥也不干的引擎满足），
   以及一条守卫的守卫（文件集合为空时不许静默通过——因为检查了 0 个文件而变绿是最糟的绿）。
-- `test_behaviour.py`（303）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
+- `test_behaviour.py`（317）—— 全部断言**退出码数字**而非文案。hook 判断的是数字；
   如果重构保留了措辞却改了码，强制就静默消失，只有这些断言会发现。
 
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮

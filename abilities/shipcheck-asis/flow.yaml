@@ -12,10 +12,17 @@ version: 2
 ability: shipcheck-asis
 title: 交付生命周期（真实 ship-check 转写）
 scope_kind: repo
+
+# 这条流程可以怎样结束。声明出来，`--result` 才有词汇表可对 —— 在这之前它接受任意字符串，
+# 于是 done / completed 和 abort / aborted 成了四个词表达两件事，history 也就无法聚合。
+results:
+  values: [completed, abandoned]
+  default: completed
+
 # 这条 flow 依赖的引擎机制。加载期与 flow 实际做的事**双向核对**：
 # 声明了没用 -> 拒；用了没声明 -> 拒。它不是开关（可关掉的强制不是强制），
 # 而是这条 flow 的表面 + 一份会指名缺了什么的引擎版本契约。
-uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, repeatable, stages]
+uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, repeatable, results, stages]
 
 when: |
   任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（101 步），

@@ -3721,7 +3721,7 @@ def test_tearing_down_an_isolated_worktree_is_guarded(env, cmd, blocked):
         if blocked:
             assert "E21" in r.stdout + r.stderr, r.stdout + r.stderr
     finally:
-        rc(["close-run", "--run", "gwt", "--result", "aborted",
+        rc(["close-run", "--run", "gwt", "--result", "abandoned",
             "--force-steps", "--force-obligations"], env)
 
 
@@ -3810,7 +3810,7 @@ def test_the_declared_bar_is_read_and_the_unmeasurable_half_stays_visible(
     schema = _f.schema_of("shipcheck-asis.quality_slo")
     assert not any("score" in k or "total" in k for k in schema), schema
     assert "completeness_rate_pct" in schema and "error_violation_count" in schema, schema
-    rc(["close-run", "--run", "q1", "--result", "aborted",
+    rc(["close-run", "--run", "q1", "--result", "abandoned",
         "--force-steps", "--force-obligations"], env)
 
 
@@ -3889,7 +3889,7 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     talks = _f.gather("shipcheck-asis.plan_writeback", ctx)
     assert talks["plan_doc_status"] == "done", talks
     assert talks["shipped_block_present"] is False, talks
-    rc(["close-run", "--run", "pw", "--result", "aborted",
+    rc(["close-run", "--run", "pw", "--result", "abandoned",
         "--force-steps", "--force-obligations"], env)
 
 
@@ -4792,14 +4792,14 @@ def test_a_lease_ends_when_either_end_of_it_ends(env):
 
     active = "SELECT * FROM scope_lease WHERE released_at IS NULL"
     assert len(_rows(env, active)) == 1
-    assert rc(["close-run", "--run", "H6", "--result", "done", "--force-steps"], env) == OK
+    assert rc(["close-run", "--run", "H6", "--result", "completed", "--force-steps"], env) == OK
     assert _rows(env, active) == []
     assert _rows(env, "SELECT * FROM violation WHERE code='lease_outstanding'") == []
 
     assert rc(["open", "delivery", "--scope", "/repo/L", "--run", "H6b",
                "--leased-from", "G6", "--leased-at", "C01"], env) == OK
     assert len(_rows(env, active)) == 1
-    assert rc(["close-run", "--run", "G6", "--result", "done", "--force-steps",
+    assert rc(["close-run", "--run", "G6", "--result", "completed", "--force-steps",
                "--force-obligations"], env) == OK
     assert _rows(env, active) == []
     out = _rows(env, "SELECT * FROM violation WHERE code='lease_outstanding'")
@@ -5839,7 +5839,7 @@ def test_closed_runs_are_listable_and_the_actor_filter_precedes_the_limit(env):
     for i, who in enumerate(["a-agent", "b-agent", "b-agent", "b-agent"]):
         e = {**env, "HARNESS_ACTOR": who}
         assert rc(["open", "delivery", "--scope", f"/repo/h{i}", "--run", f"H{i}"], e) == OK
-        assert rc(["close-run", "--run", f"H{i}", "--result", "done", "--force-steps",
+        assert rc(["close-run", "--run", f"H{i}", "--result", "completed", "--force-steps",
                    "--force-obligations"], e) == OK
 
     listed = run(["history"], env)
@@ -7297,7 +7297,7 @@ def _closed_run(env) -> str:
     """A run taken all the way to closed, with a real record behind it."""
     assert rc(["open", "authoring", "--scope", "doc/x", "--run", "fin"], env) == OK
     assert rc(["close-step", "--run", "fin", "--step", "A1"], env) == OK
-    assert rc(["close-run", "--run", "fin", "--result", "done",
+    assert rc(["close-run", "--run", "fin", "--result", "completed",
                "--force-steps", "--force-obligations"], env) == OK
     return "fin"
 
@@ -7311,7 +7311,7 @@ def _closed_run(env) -> str:
     ["skip", "--step", "A1", "--reason", "late"],
     ["discharge", "--hook", "h", "--evidence", "late"],
     ["config", "--set", "k=v"],
-    ["close-run", "--result", "abort"],
+    ["close-run", "--result", "abandoned"],
 ], ids=lambda a: a[0] + ("-set" if "--set" in a else ""))
 def test_a_finished_run_does_not_accept_writes(env, argv):
     """The engine had no notion of "this run is over". Every write command took a closed one.
@@ -7345,16 +7345,16 @@ def test_the_recorded_result_of_a_finished_run_is_not_rewritable(env):
 
     Kept as its own test rather than folded into the table above, because the table asserts "the
     ledger is unchanged" while this asserts WHICH fact was at stake — a reader of `history` was
-    being shown `abort` for a run that finished `done`.
+    being shown one outcome for a run that finished with another.
     """
     run_id = _closed_run(env)
-    out = run(["close-run", "--run", run_id, "--result", "abort"], env)
+    out = run(["close-run", "--run", run_id, "--result", "abandoned"], env)
     assert out.returncode == USAGE
     assert "✅" not in out.stdout, "it reported success for something it did not do"
 
     hist = json.loads(run(["history", "--json"], env).stdout)
     rows = [r for r in hist["runs"] if r["run_id"] == run_id]
-    assert len(rows) == 1 and rows[0]["result"] == "done", rows
+    assert len(rows) == 1 and rows[0]["result"] == "completed", rows
 
 
 def test_reading_a_finished_run_still_works(env):
@@ -7652,3 +7652,206 @@ def test_a_declared_output_is_a_capability_that_must_be_declared(env, tmp_path):
     out = run(["validate", "und"], {**env, "HARNESS_ABILITIES_PATH": str(root)})
     assert out.returncode == BAD_SPEC
     assert "outputs" in out.stderr and "without declaring it" in out.stderr, out.stderr
+
+
+# ------------------------------------------------- the completion spec is a closed set too
+
+@pytest.mark.parametrize("spec,fragment", [
+    ("{type: evidence, kind: k, min_counts: 2}", "min_counts"),
+    ("{type: evidence, kind: k, matches: pass}", "matches"),
+    ("{type: all_of, steps: [], any_ofs: []}", "any_ofs"),
+    ("{type: attest, kind: k}", "kind"),
+    ("{type: evidence_equals, kind: k, value: v, match: x}", "match"),
+], ids=lambda x: x[:30])
+def test_a_completion_spec_rejects_a_key_nothing_reads(env, spec, fragment):
+    """The last place in a spec where a typo was silent, and the one that cost the most.
+
+    Everywhere else an unknown key is fatal, with the reason spelled out: a typo would change
+    what the spec MEANS. Inside a completion spec it was ignored — so `min_counts` for
+    `min_count` quietly downgraded a criterion to "any one row" while the yaml still read as
+    though it demanded two. The failure is not that it breaks; it is that it WEAKENS.
+
+    Also asserted for a key that is legal on a DIFFERENT predicate (`match` belongs to
+    `evidence`, not `evidence_equals`) and for one legal nowhere (`kind` on `attest`): a closed
+    set per predicate, not one union across all of them.
+    """
+    d = _spec(env, "zzz_ck", f"""
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+    completion: {spec}
+""")
+    try:
+        out = run(["validate", "zzz_ck"], env)
+        assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+        assert "unsupported key(s)" in out.stderr and fragment in out.stderr, out.stderr
+        assert "makes the criterion WEAKER" in out.stderr
+        assert "supported:" in out.stderr, "a refusal that does not list the legal keys is a riddle"
+    finally:
+        _rm(d)
+
+
+def test_every_key_a_predicate_reads_is_declared(env):
+    """The closed set is only as good as its completeness, so it is derived and cross-checked.
+
+    A predicate that READS a key it did not declare would have that key refused at load time —
+    the mechanism would be enforcing against its own implementation. This walks each predicate's
+    source for `spec` reads and asserts every one is declared.
+    """
+    import ast as _ast
+    import re as _re
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import predicates as pr
+
+    src = (REPO / "engine" / "predicates.py").read_text(encoding="utf-8")
+    fns = {n.name: n for n in _ast.walk(_ast.parse(src))
+           if isinstance(n, _ast.FunctionDef)}
+    missing = []
+    for name, entry in pr._REGISTRY.items():
+        node = fns.get(entry["fn"].__name__)
+        if node is None:
+            continue
+        seg = _ast.get_source_segment(src, node) or ""
+        read = set(_re.findall(r'spec\.get\("([a-z_]+)"', seg))
+        read |= set(_re.findall(r'spec\["([a-z_]+)"\]', seg))
+        declared = {"type"} | set(entry["requires"]) | set(entry.get("optional") or ())
+        for key in sorted(read - declared):
+            missing.append((name, key))
+    assert not missing, f"predicates read keys they do not declare: {missing}"
+
+    # And the shipped flows must not depend on anything undeclared — which load-time validation
+    # already enforces, so this is really a statement that they all still load.
+    from engine import flow as fl
+    for n in fl.available_abilities():
+        fl.load(n)
+
+
+# ------------------------------------------------- a flow declares how it may end
+
+def test_a_flow_declares_how_it_may_end(env, tmp_path):
+    """`--result` took ANY string, so an outcome could not be counted or compared.
+
+    Measured before fixing, in this suite's own calls: `done` and `completed`, `abort` and
+    `aborted` — four words for two endings, none of them declared anywhere. `history` could show
+    them but not group them.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+
+    for name in fl.available_abilities():
+        spec = fl.load(name).result_spec
+        assert spec, f"{name} does not declare how it may end"
+        assert spec["default"] in spec["values"], spec
+
+    # Readable BEFORE closing, so a driver need not learn the vocabulary from a refusal.
+    ab = json.loads(run(["abilities", "--json"], env).stdout)
+    by = {a["ability"]: a for a in ab["abilities"] if a.get("valid")}
+    assert by["delivery"]["results"] == {"values": ["completed", "abandoned"],
+                                         "default": "completed"}, by["delivery"]["results"]
+
+    assert rc(["open", "delivery", "--scope", str(tmp_path / "r"), "--run", "e1"], env) == OK
+    # Omitting it takes the FLOW's default, not a word the engine picked.
+    assert rc(["close-run", "--run", "e1", "--force-steps", "--force-obligations"], env) == OK
+    hist = json.loads(run(["history", "--json"], env).stdout)
+    assert [r for r in hist["runs"] if r["run_id"] == "e1"][0]["result"] == "completed"
+
+    assert rc(["open", "delivery", "--scope", str(tmp_path / "r2"), "--run", "e2"], env) == OK
+    out = run(["close-run", "--run", "e2", "--result", "done",
+               "--force-steps", "--force-obligations"], env)
+    assert out.returncode == USAGE, out.stdout + out.stderr
+    assert "is not one of the results" in out.stderr
+    assert "legal: completed, abandoned" in out.stderr
+    assert "(default completed)" in out.stderr
+    # And it did NOT close on the way to refusing.
+    assert _rows(env, "SELECT status FROM run WHERE run_id='e2'")[0]["status"] == "open"
+
+    assert rc(["close-run", "--run", "e2", "--result", "abandoned",
+               "--force-steps", "--force-obligations"], env) == OK
+
+    # And the default must be the FLOW's, not the engine's word. Every shipped flow happens to
+    # default to `completed`, which is the same string the engine falls back to — so a flow whose
+    # default differs is what makes the claim checkable at all.
+    root = tmp_path / "outside"
+    d = root / "ships"
+    d.mkdir(parents=True)
+    (d / "flow.yaml").write_text(
+        "version: 2\nability: ships\ntitle: T\n"
+        "when: reach for this one when a flow's own default is not the engine's fallback\n"
+        "uses: [results]\nscope_kind: s\n"
+        "results:\n  values: [shipped, abandoned]\n  default: shipped\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n    directive: Do it.\n", encoding="utf-8")
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    assert rc(["open", "ships", "--scope", "s9", "--run", "s9"], e) == OK
+    assert rc(["close-run", "--run", "s9", "--force-steps", "--force-obligations"], e) == OK
+    assert _rows(env, "SELECT result FROM run WHERE run_id='s9'")[0]["result"] == "shipped", \
+        "an omitted --result took the engine's word instead of the flow's declared default"
+
+
+def test_a_flow_that_never_said_keeps_the_old_freedom(env, tmp_path):
+    """Not declaring is still legal, and then nothing changed — the fallback stays the engine's.
+
+    Making the declaration mandatory would have been a spec-format break for every 2.0 flow
+    written elsewhere, to close a hole those flows may not have. So an undeclared flow keeps
+    taking any string, and `abilities --json` reports which flows are in that state so the
+    silence is visible rather than assumed.
+    """
+    root = tmp_path / "outside"
+    d = root / "loose"
+    d.mkdir(parents=True)
+    (d / "flow.yaml").write_text(
+        "version: 2\nability: loose\ntitle: T\n"
+        "when: reach for this one when a flow has not said how it may end\n"
+        "uses: []\nscope_kind: s\n"
+        "phases:\n  - id: p1\n    title: P1\n"
+        "steps:\n  - id: W01\n    phase: p1\n    directive: Do it.\n", encoding="utf-8")
+    e = {**env, "HARNESS_ABILITIES_PATH": str(root)}
+    assert rc(["validate", "loose"], e) == OK
+
+    assert rc(["open", "loose", "--scope", "s1", "--run", "l1"], e) == OK
+    assert rc(["close-run", "--run", "l1", "--result", "whatever-string",
+               "--force-steps", "--force-obligations"], e) == OK
+    assert _rows(env, "SELECT result FROM run WHERE run_id='l1'")[0]["result"] == "whatever-string"
+
+    d2 = root / "loose2"
+    d2.mkdir()
+    (d2 / "flow.yaml").write_text((d / "flow.yaml").read_text().replace("loose", "loose2"),
+                                  encoding="utf-8")
+    assert rc(["open", "loose2", "--scope", "s2", "--run", "l2"], e) == OK
+    assert rc(["close-run", "--run", "l2", "--force-steps", "--force-obligations"], e) == OK
+    assert _rows(env, "SELECT result FROM run WHERE run_id='l2'")[0]["result"] == "completed"
+
+
+@pytest.mark.parametrize("block,fragment", [
+    ("results: [completed, abandoned]", "must be a mapping"),
+    ("results:\n  values: []\n  default: x", "non-empty list"),
+    ("results:\n  values: [a, a]\n  default: a", "repeats a value"),
+    ("results:\n  values: [a, b]", "needs a 'default'"),
+    ("results:\n  values: [a, b]\n  default: c", "is not in values"),
+    ("results:\n  values: [a]\n  default: a\n  fallback: b", "unsupported key"),
+], ids=lambda x: x[:26])
+def test_a_results_declaration_is_checked_at_load_time(env, block, fragment):
+    """Every refusal the parse writes, exercised. A bare list is refused on purpose: it would make
+    the list's ORDER decide the default, which is a rule nobody can see in the yaml."""
+    d = _spec(env, "zzz_res", f"""
+{block}
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+""")
+    try:
+        out = run(["validate", "zzz_res"], env)
+        assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+        assert fragment in out.stderr, out.stderr
+    finally:
+        _rm(d)

@@ -364,6 +364,10 @@ class Flow:
     # Declared variants: {"values": (...), "default": str, "fact": str | None}. Empty when the
     # ability has one shape.
     variant_spec: dict
+    # How this flow may END. Empty means it never said, and then the engine keeps its own
+    # fallback — the state every flow was in: `--result` took any string at all, so `done` /
+    # `completed` and `abort` / `aborted` coexisted as four words for two things.
+    result_spec: dict
     facts_providers: tuple[str, ...]
     facts_owner: dict   # fact name -> the provider that supplies it
     facts_schema: dict
@@ -540,13 +544,17 @@ STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "compl
              "output",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget"}
-TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards",
+TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "version", "ability", "title", "scope_kind", "phases", "steps", "guards", "results",
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
 STAGE_KEYS = {"id", "guide"}
 PROSE_KEYS = {"root", "topics_dir", "anchor_pattern"}
 FACTS_KEYS = {"provider", "providers"}
 VARIANT_KEYS = {"values", "default", "fact"}
+# HOW A RUN MAY END. Same shape as `variants` on purpose — values plus an explicit default —
+# because the alternative was making a list's ORDER semantic, and order that carries meaning is
+# a rule nobody can see in the yaml.
+RESULT_KEYS = {"values", "default"}
 GUARD_KEYS = {"step", "matches"}
 GUARD_MATCH_KEYS = {"tool", "field", "pattern"}
 # What a step may declare about the content it HANDS BACK. No `from_path`: a flow's own files
@@ -835,6 +843,31 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             raise FlowError(f"{path}: variants.default {default!r} is not in values {values}")
         variant_spec = {"values": values, "default": default,
                         "fact": str(var_raw["fact"]) if var_raw.get("fact") else None}
+
+    res_raw = raw.get("results") or {}
+    if not isinstance(res_raw, dict):
+        raise FlowError(
+            f"{path}: 'results' must be a mapping with 'values' and 'default' — a bare list "
+            f"would make its ORDER decide the default, which is a rule nobody can see")
+    result_spec: dict = {}
+    if res_raw:
+        reject(res_raw, RESULT_KEYS, "the 'results' block", path)
+        rvals = res_raw.get("values")
+        if not isinstance(rvals, list) or not rvals:
+            raise FlowError(f"{path}: results.values must be a non-empty list")
+        rvalues = tuple(_require_plain_id(v, "results.values entry", path) for v in rvals)
+        if len(set(rvalues)) != len(rvalues):
+            raise FlowError(f"{path}: results.values repeats a value: {rvalues}")
+        rdefault = res_raw.get("default")
+        if rdefault is None:
+            raise FlowError(
+                f"{path}: results needs a 'default' — a run closed without naming an outcome has "
+                f"to record SOMETHING, and letting the engine pick would put a word this flow "
+                f"never chose into its own history")
+        rdefault = str(rdefault)
+        if rdefault not in rvalues:
+            raise FlowError(f"{path}: results.default {rdefault!r} is not in values {rvalues}")
+        result_spec = {"values": rvalues, "default": rdefault}
 
     phases_raw = _require(raw, "phases", path, list)
     if not phases_raw:
@@ -1386,6 +1419,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         config_defaults=config_defaults,
         exclusive_groups=tuple(groups),
         variant_spec=variant_spec,
+        result_spec=result_spec,
         facts_providers=facts_providers,
         facts_owner=owner,
         facts_schema=facts_schema,
@@ -1449,6 +1483,7 @@ ENGINE_CAPABILITIES: dict = {
     "optional_steps": lambda f: any(st.optional for st in f.steps.values()),
     "ability_deps": lambda f: bool(f.requires),
     "outputs": lambda f: any(st.output for st in f.steps.values()),
+    "results": lambda f: bool(f.result_spec),
 }
 
 
