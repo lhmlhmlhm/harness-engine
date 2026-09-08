@@ -35,19 +35,55 @@ from . import conditions, facts, hooks as hookmod, predicates, proof, prose, sto
 
 OK, USAGE, BAD_SPEC, REFUSED, BLOCKED, INTERNAL = 0, 1, 2, 3, 4, 5
 
+# The one table. Published in `adapter-contract` and used to name a code in a JSON refusal,
+# so those two cannot come to disagree about what a 3 means.
+_EXIT_NAMES = {OK: "OK", USAGE: "USAGE", BAD_SPEC: "BAD_SPEC",
+               REFUSED: "REFUSED", BLOCKED: "BLOCKED", INTERNAL: "INTERNAL"}
+
 # Named rather than inlined: `brief` reports it, and a literal in two places is a
 # second source that drifts.
 ACTOR_ENV = "HARNESS_ACTOR"
 
 
+# What the process has said on stderr, and whether stdout already carries an answer.
+# Module state, reset by main() — see _answer_in_json_too for why it has to exist at all.
+_SAID: list[str] = []
+_ANSWERED = False
+
+
 def _err(msg: str) -> None:
-    sys.stderr.write(msg.rstrip() + "\n")
+    text = msg.rstrip()
+    sys.stderr.write(text + "\n")
+    # Kept, not just printed, so a refusal can be answered in the format the caller asked
+    # for WITHOUT each refusal site remembering to do it. There are 26 of them across the
+    # write commands, plus three shared helpers that refuse on their behalf — a rule that
+    # says "every new refusal must also emit JSON" is a rule that gets forgotten once and
+    # then reads, to a JSON caller, as an empty answer.
+    _SAID.append(text)
 
 
 # ------------------------------------------------------------------ helpers
 
 def _rowdicts(rows) -> list[dict]:
     return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+def _add_json(p) -> None:
+    """Declare --json once. It was the same sentence pasted at eight call sites."""
+    p.add_argument("--json", action="store_true",
+                   help="emit the same answer as JSON — one data structure, two renderings")
+
+
+def _sayer(args):
+    """`print`, or a no-op when the caller asked for JSON.
+
+    Prose and JSON share stdout, so a command that prints both hands back something no parser
+    can read. Returning the function rather than checking a flag at each print keeps the
+    decision in one place per command instead of one place per line.
+    """
+    if getattr(args, "json", False):
+        return lambda *a, **k: None
+    return print
 
 
 def _emit(args, data: dict, render) -> int:
@@ -63,8 +99,15 @@ def _emit(args, data: dict, render) -> int:
     owed. `next` in particular exists to state a step's requirements AS DATA, and it was
     stating them as columns.
     """
+    global _ANSWERED
     if getattr(args, "json", False):
+        fn = getattr(args, "fn", None)
+        # Named here, once, and derived from the handler — so every envelope (answer and
+        # refusal alike) says which command produced it without ten literals to keep in step.
+        if "command" not in data and fn is not None:
+            data = {"command": fn.__name__[4:].replace("_", "-"), **data}
         print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        _ANSWERED = True
         return OK
     render(data)
     return OK
@@ -545,6 +588,7 @@ def _record_unadjudicated(scope_kind: str, scope_key: str, action: str,
 
 
 def cmd_open(args) -> int:
+    say = _sayer(args)
     f = _load_flow_or_exit(args.ability)
     run_id = args.run or f"{args.ability}-{uuid.uuid4().hex[:12]}"
     conn = store.connect()
@@ -632,20 +676,37 @@ def cmd_open(args) -> int:
                  f"opened. One outgoing lease per run per scope.")
             return REFUSED
         if grantor is not None:
-            print(f"   leased {f.scope_kind}={args.scope} from {grantor['run_id']}"
-                  f" at its step {args.leased_at}")
+            say(f"   leased {f.scope_kind}={args.scope} from {grantor['run_id']}"
+                f" at its step {args.leased_at}")
+        n_out = None
         if variant:
             n_out = sum(1 for x in f.steps if not f.applicable(x, variant))
-            print(f"   variant {variant}  ({source}) — {n_out} step(s) not applicable")
+            say(f"   variant {variant}  ({source}) — {n_out} step(s) not applicable")
         first = f.order[0] if f.order else None
         if first:
             store.touch_run(conn, run_id, current_step=first)
     finally:
         conn.close()
-    print(f"✅ opened {run_id}  ability={args.ability}  {f.scope_kind}={args.scope}")
+    say(f"✅ opened {run_id}  ability={args.ability}  {f.scope_kind}={args.scope}")
     if f.order:
-        print(f"   first step: {f.order[0]}  ({f.step(f.order[0]).title})")
-    return OK
+        say(f"   first step: {f.order[0]}  ({f.step(f.order[0]).title})")
+    return _emit(args, {
+        "run": run_id,
+        "ability": args.ability,
+        # THE FIELD THIS COMMAND MOST NEEDED A MACHINE FORM FOR. Omit --run and the engine
+        # invents the id; until now the only way to learn it was to read the prose back.
+        "run_id_generated": args.run is None,
+        "scope_kind": f.scope_kind,
+        "scope": args.scope,
+        "title": args.title,
+        # Which shape this run was pinned to AND on whose authority — a derived variant and
+        # an explicit one are the same word with different standing.
+        "variant": None if not variant else {
+            "value": variant, "source": source, "steps_not_applicable": n_out},
+        "lease": None if grantor is None else {
+            "grantor_run": grantor["run_id"], "granted_at_step": args.leased_at},
+        "first_step": None if not first else {"id": first, "title": f.step(first).title},
+    }, lambda _d: None)
 
 
 def cmd_status(args) -> int:
@@ -776,8 +837,9 @@ def cmd_next(args) -> int:
         pending = [sid for sid in f.order
                    if sid not in done and f.applicable(sid, row["variant"])]
         if not pending:
-            print("✅ all steps closed")
-            return OK
+            return _emit(args, {"run": row["run_id"], "step": None, "remaining": [],
+                                "all_closed": True},
+                         lambda _d: print("✅ all steps closed"))
         sid = pending[0]
         s = f.step(sid)
         blocked = [d for d in s.deps if d not in done]
@@ -910,13 +972,31 @@ def cmd_enter(args) -> int:
         store.log_step(conn, row["run_id"], s.id, "entered",
                        "forced past open deps" if (missing and args.force_deps) else None)
         store.touch_run(conn, row["run_id"], current_step=s.id)
-        print(f"▶ entered {s.id} ({s.title})")
+        quiet = bool(getattr(args, "json", False))
+        _sayer(args)(f"▶ entered {s.id} ({s.title})")
         # phase_start fires when the phase's FIRST step is entered — i.e. no step of this
         # phase had been entered or closed before now.
         phase_ids = {x.id for x in f.steps_in_phase(s.phase)}
-        if not (phase_ids & (prior | entered_before)):
-            return _fire(conn, f, row, "phase_start", s.phase)[0]
-        return OK
+        phase_started = not (phase_ids & (prior | entered_before))
+        rc, fired = OK, []
+        if phase_started:
+            rc, fired = _fire(conn, f, row, "phase_start", s.phase, quiet=quiet)
+        _emit(args, {
+            "run": row["run_id"], "step": s.id, "title": s.title, "phase": s.phase,
+            "entered": True,
+            "attempts_before": attempts,
+            "forced_past_deps": bool(missing and args.force_deps),
+            # Which deps were left open, not just that some were. A forced entry is a
+            # breach worth naming precisely.
+            "deps_forced": missing if (missing and args.force_deps) else [],
+            # The TRIGGER firing and a HOOK matching are different events: a phase can start
+            # with no hook attached, and reporting only `fired_hooks` would make the two
+            # indistinguishable.
+            "phase_start_fired": phase_started,
+            "fired_hooks": fired,
+            "hooks_blocked": rc != OK,
+        }, lambda _d: None)
+        return rc
     finally:
         conn.close()
 
@@ -1091,12 +1171,26 @@ def cmd_gate(args) -> int:
                 conn, row["run_id"], s.id, "unwitnessed_gate",
                 f"recorded via witness '{proof_doc.get('witness')}' with no independent proof",
             )
-        flag = "" if proof_doc.get("witnessed") else "  ⚠️ UNWITNESSED (recorded as a violation)"
-        print(f"✅ gate {s.id} = {args.decision}"
-              f"  (witness={proof_doc.get('witness')}){flag}")
+        unwitnessed = not proof_doc.get("witnessed")
+        flag = "  ⚠️ UNWITNESSED (recorded as a violation)" if unwitnessed else ""
+        quiet = bool(getattr(args, "json", False))
+        _sayer(args)(f"✅ gate {s.id} = {args.decision}"
+                     f"  (witness={proof_doc.get('witness')}){flag}")
+        rc, fired = OK, []
         if args.decision != "decline":
-            return _fire(conn, f, row, "gate_recorded", s.id)[0]
-        return OK
+            rc, fired = _fire(conn, f, row, "gate_recorded", s.id, quiet=quiet)
+        _emit(args, {
+            "run": row["run_id"], "step": s.id, "decision": args.decision,
+            "witness": proof_doc.get("witness"),
+            # RECORDED IS NOT THE SAME AS VOUCHED FOR. The default witness degrades rather
+            # than refusing, so a caller reading only "gate recorded" would not learn that
+            # this one passed with nobody attesting to it.
+            "witnessed": not unwitnessed,
+            "violation_recorded": unwitnessed,
+            "fired_hooks": fired,
+            "hooks_blocked": rc != OK,
+        }, lambda _d: None)
+        return rc
     finally:
         conn.close()
 
@@ -1458,9 +1552,17 @@ def cmd_summarize(args) -> int:
             duration_s=args.duration, metrics_json=json.dumps(metrics, ensure_ascii=False),
             note=args.note,
         )
-        print(f"✅ summarized phase '{args.phase}': {len(closed)} closed, {len(skips)} skipped"
-              + (f", {len(metrics)} metric(s)" if metrics else ""))
-        return OK
+        _sayer(args)(
+            f"✅ summarized phase '{args.phase}': {len(closed)} closed, {len(skips)} skipped"
+            + (f", {len(metrics)} metric(s)" if metrics else ""))
+        return _emit(args, {
+            "run": row["run_id"], "phase": args.phase,
+            "closed": closed, "skipped": skips,
+            "metrics": metrics, "duration_s": args.duration, "note": args.note,
+            # A phase with no declared goal and a phase whose goal was checked and met both
+            # summarise successfully; only this distinguishes them.
+            "goal": {"declared": applicable, "met": (ok if applicable else None)},
+        }, lambda _d: None)
     finally:
         conn.close()
 
@@ -1492,8 +1594,10 @@ def cmd_skip(args) -> int:
             )
             return REFUSED
         store.log_step(conn, row["run_id"], s.id, "skipped", args.reason)
-        print(f"⏭  skipped {s.id} ({s.title})" + (f" — {args.reason}" if args.reason else ""))
-        return OK
+        _sayer(args)(f"⏭  skipped {s.id} ({s.title})"
+                     + (f" — {args.reason}" if args.reason else ""))
+        return _emit(args, {"run": row["run_id"], "step": s.id, "title": s.title,
+                            "skipped": True, "reason": args.reason}, lambda _d: None)
     finally:
         conn.close()
 
@@ -1770,14 +1874,25 @@ def cmd_discharge(args) -> int:
                 f"    open: {', '.join(open_ids) or '(none)'}"
             )
             return USAGE
+        say = _sayer(args)
         if ob["discharged_at"]:
-            print(f"⃝ obligation {args.hook} was already discharged at {ob['discharged_at']}")
-            return OK
+            say(f"⃝ obligation {args.hook} was already discharged at {ob['discharged_at']}")
+            # Not an error, and not a fresh discharge either. A caller that cannot tell the
+            # two apart would count this call as having done something.
+            return _emit(args, {
+                "run": row["run_id"], "hook": args.hook, "discharged_now": False,
+                "already_discharged_at": ob["discharged_at"],
+                "open_remaining": [r["hook_id"] for r in
+                                   store.open_obligations(conn, row["run_id"])],
+            }, lambda _d: None)
         store.discharge_obligation(conn, row["run_id"], args.hook, args.evidence)
-        left = len(store.open_obligations(conn, row["run_id"]))
-        print(f"✅ discharged {args.hook}"
-              + (f"  ({left} obligation(s) still open)" if left else "  (none left)"))
-        return OK
+        left = [r["hook_id"] for r in store.open_obligations(conn, row["run_id"])]
+        say(f"✅ discharged {args.hook}"
+            + (f"  ({len(left)} obligation(s) still open)" if left else "  (none left)"))
+        return _emit(args, {
+            "run": row["run_id"], "hook": args.hook, "discharged_now": True,
+            "already_discharged_at": None, "open_remaining": left,
+        }, lambda _d: None)
     finally:
         conn.close()
 
@@ -1821,8 +1936,14 @@ def cmd_evidence(args) -> int:
         f = _flow_for_run(conn, row)
         f.step(args.step)  # validate the id exists
         store.add_evidence(conn, row["run_id"], args.step, args.kind, args.value)
-        print(f"✅ evidence recorded: {args.step} kind={args.kind}")
-        return OK
+        _sayer(args)(f"✅ evidence recorded: {args.step} kind={args.kind}")
+        return _emit(args, {
+            "run": row["run_id"], "step": args.step, "kind": args.kind,
+            # HOW MANY ROWS OF THIS KIND NOW EXIST AT THIS STEP. A `min_count` criterion is
+            # counted in exactly these rows, so a driver working towards one had to either
+            # keep its own tally or ask `next` again to find out where it stood.
+            "rows_now": len(store.find_evidence(conn, row["run_id"], args.step, args.kind)),
+        }, lambda _d: None)
     finally:
         conn.close()
 
@@ -1845,10 +1966,21 @@ def cmd_config(args) -> int:
                          (json.dumps(meta, ensure_ascii=False), store.now_iso(), row["run_id"]))
             conn.commit()
         merged = {**f.config_defaults, **cfg}
+        say = _sayer(args)
         for k in sorted(merged):
             src = "run" if k in cfg else "flow-default"
-            print(f"{k} = {merged[k]!r}   [{src}]")
-        return OK
+            say(f"{k} = {merged[k]!r}   [{src}]")
+        return _emit(args, {
+            "run": row["run_id"],
+            # Set by THIS call, so a caller can confirm what it just changed rather than
+            # diffing the whole merged view against what it remembers.
+            "set": {k.split("=", 1)[0].strip(): _coerce(k.split("=", 1)[1].strip())
+                    for k in (args.set or [])},
+            # Value AND provenance per key: a run override and a flow default read the same
+            # once merged, and only one of them is this run's own decision.
+            "config": {k: {"value": merged[k], "source": "run" if k in cfg
+                           else "flow-default"} for k in sorted(merged)},
+        }, lambda _d: None)
     finally:
         conn.close()
 
@@ -1933,6 +2065,46 @@ NOT_A_TOOL: dict[str, str] = {
 }
 
 
+# WHY THESE TWO TABLES EXIST AT ALL. `--json` is a promise that stdout carries the answer, and
+# the failing path is where a caller most needs it. Every command therefore either has the flag
+# or appears below WITH A REASON — because a command that simply never got one is
+# indistinguishable, from the outside, from a command that was decided against. A test asserts
+# the three sets partition the parser, so a new subcommand cannot join the silent side by
+# omission: it will not be classified, and that fails.
+
+PROSE_ONLY: dict[str, str] = {
+    "adapter-contract":
+        "emits JSON as its whole output already; a --json flag would be a second name for the "
+        "only thing it does.",
+    "brief":
+        "the driving contract is prose FOR a driver to read. Fields describing it would be a "
+        "summary of the document, standing next to the document.",
+    "show":
+        "prints a section of a guide verbatim. Wrapping prose in a field does not make it "
+        "machine-readable, it makes it prose in a field.",
+    "validate":
+        "the exit code IS the answer and that is what a build step reads. A payload beside it "
+        "invites parsing the payload instead, and then two things say whether a spec is valid.",
+    "guard-tool":
+        "its caller is a hook that decides on the exit code. The text is written into the "
+        "agent's context to be READ, so structuring it would serve nobody in the path.",
+    "init":
+        "one-time setup whose output is a human confirmation of where the store landed.",
+    "purge-run":
+        "deletes a closed run's rows; the count is a human confirmation, not an answer.",
+}
+
+# NOT a design decision — an absence, named so it stays visible. Both are read commands whose
+# verdict is exactly the kind of thing a non-shell caller wants as data.
+NO_JSON_YET: dict[str, str] = {
+    "assert-goal":
+        "would answer {declared, met, why}; nothing structural is in the way.",
+    "guard":
+        "would answer {allowed, blocked_by, chain}. Its ALLOW path prints nothing at all today, "
+        "so an envelope is new output rather than a second rendering of existing output.",
+}
+
+
 def _arg_shape(action) -> dict:
     """One argparse action as a language-neutral parameter description.
 
@@ -1990,10 +2162,12 @@ def _tool_surface() -> dict:
     return {
         "tools": tools,
         "not_a_tool": NOT_A_TOOL,
+        # So an adapter can tell "no machine form by decision" from "no machine form yet"
+        # without inferring it from the absence of a flag.
+        "prose_only": PROSE_ONLY,
+        "no_json_yet": NO_JSON_YET,
         # So an adapter needs no second copy of the one table that IS the contract.
-        "exit_codes": {str(v): k for k, v in
-                       (("OK", OK), ("USAGE", USAGE), ("BAD_SPEC", BAD_SPEC),
-                        ("REFUSED", REFUSED), ("BLOCKED", BLOCKED), ("INTERNAL", INTERNAL))},
+        "exit_codes": {str(k): v for k, v in _EXIT_NAMES.items()},
         "result_shape": {
             "note": "An exit code is the PRODUCT, not a failure. A tool result must carry the "
                     "code as data and must not be flagged as an error for 3 or 4 — a runtime "
@@ -2364,7 +2538,7 @@ def cmd_close_run(args) -> int:
         spec = f.result_spec
         if spec:
             if args.result is None:
-                result = spec["default"]
+                result, result_source = spec["default"], "flow_default"
             elif args.result not in spec["values"]:
                 _err(f"⛔ '{args.result}' is not one of the results "
                      f"'{row['ability']}' declares.\n"
@@ -2373,12 +2547,15 @@ def cmd_close_run(args) -> int:
                      f"    history would end up holding several words for one ending.")
                 return USAGE
             else:
-                result = args.result
+                result, result_source = args.result, "explicit"
         else:
             # The flow never said. Keep the engine's old fallback rather than inventing a
             # vocabulary on its behalf — and `harness abilities` reports which flows are in
             # this state, so the silence is visible.
             result = args.result if args.result is not None else "completed"
+            # Which of the three produced this word, because they do not carry equal weight:
+            # only `flow_default` was chosen by the flow's own author.
+            result_source = "explicit" if args.result is not None else "engine_fallback"
         done = store.closed_steps(conn, row["run_id"])
         # Optional steps and untaken exclusive branches are not owed. Demanding them is
         # what made the transcribed 111-step flow impossible to close.
@@ -2429,13 +2606,26 @@ def cmd_close_run(args) -> int:
                 severity="breach")
         freed = store.release_leases_touching(conn, row["run_id"], "run_closed")
         store.close_run(conn, row["run_id"], result)
-        print(f"✅ closed run {row['run_id']} → {result}")
+        say = _sayer(args)
+        say(f"✅ closed run {row['run_id']} → {result}")
         if freed["held"] or freed["granted"]:
-            print(f"   leases released: {freed['held']} held, {freed['granted']} granted")
+            say(f"   leases released: {freed['held']} held, {freed['granted']} granted")
         if outgoing:
-            print(f"   ⚠️  {len(outgoing)} delegation(s) were still outstanding "
-                  f"(recorded as '{LEASE_OUTSTANDING}')")
-        return OK
+            say(f"   ⚠️  {len(outgoing)} delegation(s) were still outstanding "
+                f"(recorded as '{LEASE_OUTSTANDING}')")
+        return _emit(args, {
+            "run": row["run_id"], "result": result, "result_source": result_source,
+            "closed": True,
+            # WHAT WAS WAIVED TO GET HERE. A clean close and a forced one both print a tick;
+            # these are the fields that tell them apart without reading the violation ledger.
+            "forced_steps": missing if missing else [],
+            "forced_obligations": [r["hook_id"] for r in owed] if owed else [],
+            "leases_released": {"held": freed["held"], "granted": freed["granted"]},
+            "outstanding_delegations": [
+                {"scope_kind": x["scope_kind"], "scope": x["scope_key"],
+                 "holder_run": x["holder_run_id"], "granted_at_step": x["granted_at_step"]}
+                for x in outgoing],
+        }, lambda _d: None)
     finally:
         conn.close()
 
@@ -2480,7 +2670,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", help="create the engine's store").set_defaults(fn=cmd_init)
     ab = sub.add_parser("abilities", help="list installed abilities")
-    ab.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(ab)
     ab.set_defaults(fn=cmd_abilities)
     rq = sub.add_parser("require", help="show/declare where a flow is mandatory on this machine")
     rq.add_argument("--add", metavar="ABILITY", help="declare this ability mandatory")
@@ -2488,15 +2678,15 @@ def build_parser() -> argparse.ArgumentParser:
     rq.add_argument("--scope-key", help="the scope the requirement applies to")
     rq.add_argument("--strict", action="store_true",
                     help="refuse rather than allow when the flow cannot be read")
-    rq.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(rq)
     rq.set_defaults(fn=cmd_require)
     tr = sub.add_parser("trust", help="review/approve extension files this install imports")
     tr.add_argument("ability", nargs="?", help="approve this ability's providers.py")
     tr.add_argument("--forget", metavar="ABILITY", help="drop a recorded approval")
-    tr.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(tr)
     tr.set_defaults(fn=cmd_trust)
     lz = sub.add_parser("leases", help="show delegated scopes")
-    lz.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(lz)
     lz.set_defaults(fn=cmd_leases)
     br = sub.add_parser("brief", help="print the driving contract for this installation")
     br.add_argument("--portable", action="store_true",
@@ -2510,7 +2700,7 @@ def build_parser() -> argparse.ArgumentParser:
     hi.add_argument("--ability")
     hi.add_argument("--actors", action="store_true",
                     help="per-actor rollup instead of a run list")
-    hi.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(hi)
     hi.set_defaults(fn=cmd_history)
 
     sub.add_parser("adapter-contract",
@@ -2533,18 +2723,17 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--leased-at", metavar="STEP",
                    help="the step of --leased-from at which it delegated")
     o.add_argument("--variant", help="pick the flow variant explicitly (overrides derivation)")
+    _add_json(o)
     o.set_defaults(fn=cmd_open)
 
     s = sub.add_parser("status", help="show a run, or all open runs")
     s.add_argument("--run")
-    s.add_argument("--json", action="store_true",
-                       help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(s)
     s.set_defaults(fn=cmd_status)
 
     n = sub.add_parser("next", help="show the next step and its directive")
     n.add_argument("--run", required=True)
-    n.add_argument("--json", action="store_true",
-                       help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(n)
     n.set_defaults(fn=cmd_next)
 
     e = sub.add_parser("enter", help="enter a step")
@@ -2552,12 +2741,13 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--step", required=True)
     e.add_argument("--force-deps", action="store_true",
                    help="enter despite unclosed dependencies (logged as forced)")
+    _add_json(e)
     e.set_defaults(fn=cmd_enter)
 
     c = sub.add_parser("close-step", help="close a step (exit 3 if incomplete)")
     c.add_argument("--run", required=True)
     c.add_argument("--step", required=True)
-    c.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(c)
     c.set_defaults(fn=cmd_close_step)
 
     g = sub.add_parser("gate", help="record a gate decision (exit 3 if unproven)")
@@ -2565,6 +2755,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--step", required=True)
     g.add_argument("--decision", required=True, choices=["affirm", "decline", "preauth"])
     g.add_argument("--evidence")
+    _add_json(g)
     g.set_defaults(fn=cmd_gate)
 
     gu = sub.add_parser("guard", help="may this action proceed? exit 4 = block")
@@ -2590,12 +2781,13 @@ def build_parser() -> argparse.ArgumentParser:
     dc.add_argument("--run", required=True)
     dc.add_argument("--hook", required=True)
     dc.add_argument("--evidence")
+    _add_json(dc)
     dc.set_defaults(fn=cmd_discharge)
 
     ob = sub.add_parser("obligations", help="list this run's obligations")
     ob.add_argument("--run", required=True)
     ob.add_argument("-v", "--verbose", action="store_true")
-    ob.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(ob)
     ob.set_defaults(fn=cmd_obligations)
 
     sw = sub.add_parser("show", help="print a step's guide section, or one of its topics")
@@ -2615,12 +2807,14 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--metric", action="append", metavar="KEY=VALUE")
     sm.add_argument("--duration", type=int)
     sm.add_argument("--note")
+    _add_json(sm)
     sm.set_defaults(fn=cmd_summarize)
 
     sk = sub.add_parser("skip", help="record that an OPTIONAL step will not run")
     sk.add_argument("--run", required=True)
     sk.add_argument("--step", required=True)
     sk.add_argument("--reason")
+    _add_json(sk)
     sk.set_defaults(fn=cmd_skip)
 
     ev = sub.add_parser("evidence", help="record evidence backing a completion predicate")
@@ -2628,17 +2822,19 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--step", required=True)
     ev.add_argument("--kind", required=True)
     ev.add_argument("--value")
+    _add_json(ev)
     ev.set_defaults(fn=cmd_evidence)
 
     cf = sub.add_parser("config", help="show or set this run's config")
     cf.add_argument("--run", required=True)
     cf.add_argument("--set", action="append", metavar="KEY=VALUE")
+    _add_json(cf)
     cf.set_defaults(fn=cmd_config)
 
     ad = sub.add_parser("audit", help="list unwitnessed gates and violations")
     ad.add_argument("--recurring", action="store_true",
                     help="group ACROSS runs: what keeps going wrong here, with populations")
-    ad.add_argument("--json", action="store_true", help="emit the same answer as JSON — one data structure, two renderings")
+    _add_json(ad)
     ad.set_defaults(fn=cmd_audit)
 
     cr = sub.add_parser("close-run", help="close a run (exit 3 if steps remain)")
@@ -2655,9 +2851,57 @@ def build_parser() -> argparse.ArgumentParser:
                     help="close despite required steps still open (recorded as a breach)")
     cr.add_argument("--force-obligations", action="store_true",
                     help="close despite undischarged obligations (recorded as a breach)")
+    _add_json(cr)
     cr.set_defaults(fn=cmd_close_run)
 
     return p
+
+
+def _answer_in_json_too(args, rc: int) -> int:
+    """A caller that asked for JSON is answered in JSON on the FAILING path too.
+
+    WHY THIS IS A BACKSTOP AND NOT A RULE. Adding `--json` to a command means promising that
+    stdout carries the answer. The failing path is where that promise matters most and where it
+    is easiest to break: the write commands refuse from 26 sites, and three shared helpers
+    (`_run_or_exit`, `_load_flow_or_exit`, `_scope_taken`) refuse on their behalf, so a per-site
+    rule would have had to be remembered in places the command's own author does not edit. A
+    caller then reads an empty stdout and concludes success, or falls back to parsing the prose
+    the flag existed to avoid.
+
+    So it hangs off `_err`, which is already the single funnel every refusal passes through to
+    say anything at all. A refusal that says nothing produces no envelope — and there is nothing
+    to report about it either.
+
+    The SENTENCE rides as prose, deliberately. It names what is missing and the command that
+    supplies it; re-encoding it into fields would be a second copy of the same message, free to
+    drift from the one stderr prints. Sites with a machine-relevant DISTINCTION emit their own
+    envelope with a `refused_because` token first, and this never fires for them.
+
+    One case cannot be served: a malformed invocation is rejected by argparse before anything
+    knows `--json` was on the command line. It stays prose, and that is honest — the request to
+    be answered in JSON was itself part of what did not parse.
+    """
+    if args is None or _ANSWERED or not getattr(args, "json", False):
+        return rc
+    if rc == OK:
+        # A COMMAND THAT TOOK --json AND SAID NOTHING IS A DEFECT HERE, NOT BAD INPUT.
+        # The backstop below can speak for a refusal because `_err` collected the sentence;
+        # there is no equivalent for a success — the answer simply was not built. Exit 5 exists
+        # for exactly this: `next --json` on a finished run printed prose for as long as the
+        # flag existed, because no path exercised it, and nothing anywhere said so.
+        _err("⛔ INTERNAL: this command accepts --json but produced no machine answer on a\n"
+             "    successful path. That is a defect in the engine: the flag promises stdout\n"
+             "    carries the answer, and on this path it does not.")
+        return INTERNAL
+    fn = getattr(args, "fn", None)
+    print(json.dumps({
+        # Derived from the handler, not declared a second time next to the subparser.
+        "command": (fn.__name__[4:].replace("_", "-") if fn is not None else None),
+        "code": rc,
+        "code_name": _EXIT_NAMES.get(rc, "?"),
+        "why": "\n".join(_SAID),
+    }, indent=2, ensure_ascii=False))
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2678,12 +2922,16 @@ def main(argv: list[str] | None = None) -> int:
     cannot escape as a bare 1 either. `KeyboardInterrupt` is a BaseException and deliberately
     passes straight through: the user interrupting is not an engine fault.
     """
+    global _ANSWERED
+    _SAID.clear()
+    _ANSWERED = False
+    args = None
     try:
         args = build_parser().parse_args(argv)
-        return args.fn(args)
+        rc = args.fn(args)
     except store.StoreUnusable as exc:
         _err(f"⛔ {exc}")
-        return USAGE
+        rc = USAGE
     except flowmod.FlowError as exc:
         # Handled here and not only per call site: discovering WHAT IS INSTALLED can now
         # fail — a misconfigured root, or one name present in two roots — and that happens
@@ -2691,16 +2939,17 @@ def main(argv: list[str] | None = None) -> int:
         # Without this, the honest refusal those checks raise reaches the user as a
         # traceback, which reads as an engine bug rather than as their configuration.
         _err(f"⛔ {exc}")
-        return BAD_SPEC
+        rc = BAD_SPEC
     except SystemExit as exc:  # raised by the _or_exit helpers, and by argparse
-        return int(exc.code or 0)
+        rc = int(exc.code or 0)
     except Exception:
         traceback.print_exc()
         _err("⛔ INTERNAL: the engine failed in a way it does not account for.\n"
              "    This is a defect here, not a problem with your input — the traceback above\n"
              "    is the whole report. Exit 5 is reserved for it so that nothing has to tell\n"
              "    a crash apart from a refusal by reading text.")
-        return INTERNAL
+        rc = INTERNAL
+    return _answer_in_json_too(args, rc)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   393 个测试
+└── tests/                   406 个测试
 ```
 
 ## 快速开始
@@ -591,18 +591,67 @@ driver 会去开一张单然后卡住，而正确动作是这台机器的主人�
 **加载标记在检查之后才置位。** 先置位会让一次被拒的 import 把该 ability 记成「已加载」，同一进程里的
 第二次尝试就直接放行——**一个响过一次就不再响的守卫**。这条也有变异钉住。
 
-### 读命令都能用 JSON 作答
+### 读和写都能用 JSON 作答
 
 ```sh
 harness next --run <id> --json      # requirements 是真数据，不是列
 harness status --json               # 含每个共享 scope 能不能被裁决
-harness history --json / --actors --json / audit --json / leases --json
-harness obligations --run <id> --json / abilities --json
+harness open <ability> --scope <k> --json   # 省略 --run 时，生成的 id 作为字段回来
+harness evidence ... --json         # rows_now：这一步这个 kind 现在有几行（min_count 就数它）
+harness gate ... --json             # witnessed 与 violation_recorded 分开报
+harness close-run --run <id> --json # result_source：flow_default / explicit / engine_fallback
 ```
 
 退出码本来就是契约，但**细节此前只有人类散文**。不是 shell 的东西——第二个运行时的适配器、一个
 面板、一个监控——只能拿正则去啃格式化文本。而 `next` 的整个卖点是「把这一步要求什么**以数据形式**
 说出来」，它此前说成了列。
+
+而读侧补齐之后剩下一个更别扭的不对称：**driver 可以不解析文本就知道一步「要求什么」，却必须解析
+文本才能知道自己「做了什么」**——包括 `open` 刚刚生成的那个 run id。
+
+#### 拒绝不会沉默，而这是结构性的不是纪律性的
+
+`--json` 是一个承诺：**stdout 承载答案**。而最需要它的是失败那条路——9 个写命令从 **26 处**拒绝，
+另有三个共享助手（`_run_or_exit` / `_load_flow_or_exit` / `_scope_taken`）**代它们**拒绝，位于命令
+作者根本不会编辑的函数里。「每加一处拒绝都要记得同时 emit JSON」这种规则，忘一次之后对 JSON 调用方
+读起来就是**一个空答案**——而空 stdout 最自然的解读是「成功了」。
+
+所以它挂在 `_err` 上——那本来就是所有拒绝**为了说出任何话**都必经的唯一漏斗：
+
+```
+{ "command": "close-run", "code": 3, "code_name": "REFUSED",
+  "why": "⛔ REFUSED: 5 step(s) still open: A1, B1, B2, D1, D2\n    Pass --force-steps ..." }
+```
+
+那句话**故意以散文形式**留在 `why` 里：它是「缺什么 + 补它的命令」，重编码成字段等于同一条消息的
+第二份副本，随时可以和 stderr 打印的那份漂开。有**机器可用的区分**的站点（如 `close-step` 的
+`deps_open` / `criterion_unmet`）自己先 emit 带 token 的信封，backstop 对它们不触发（有变异钉住
+「不会盖掉更精确的那一份」）。
+
+**唯一服务不到的情形**：命令行本身写坏时 argparse 在任何东西读到 `--json` 之前就退出了。它留在散文，
+而这是诚实的——「请用 JSON 回答我」这个请求本身就是没解析成功的那部分。
+
+#### 成功侧的沉默是 exit 5，不是安静的 0
+
+`_err` 让 backstop 能替一次拒绝说话；成功没有对应物，因为**答案根本没被构造出来**。所以一个接受了
+`--json` 却在成功路径上什么都没产出的命令，现在报 **INTERNAL（5）**——这个 CLI 给「这是我们自己的
+缺陷」保留的码。
+
+这不是假设：**`next --json` 在「全部步骤已关」那条路上一直打印散文**，从这个 flag 存在的第一天起，
+因为没有任何测试走过那条路，也没有任何东西说过。它是被这轮那个「只读 JSON 的 driver」测试撞出来的。
+
+#### 每个命令都被分类，缺口是具名的
+
+`PROSE_ONLY`（7 条，各带理由）与 `NO_JSON_YET`（2 条）**分区整个解析器**，有测试断言这一点。于是
+一个新命令**无法靠遗漏**加入沉默阵营——它不会被分类，而那会红。
+
+分类也在 `adapter-contract` 里发布，因为「按决定没有机器形态」和「还没有机器形态」对适配器不是同一
+件事：
+
+| | 命令 | |
+|---|---|---|
+| `PROSE_ONLY` | `brief` `show` `validate` `adapter-contract` `guard-tool` `init` `purge-run` | 各有理由，如「退出码就是答案，旁边再放一份 payload 会引人去解析 payload」 |
+| `NO_JSON_YET` | `assert-goal` `guard` | **不是设计决定，是缺口**。`guard` 的 allow 路径今天什么都不打印，所以那是新输出而不是既有输出的第二种渲染 |
 
 实现是**一份数据两种渲染**（`_emit`）：另建一份机器形态等于把同一个查询实现两遍，而其中一个先长出
 新字段的那一刻它们就漂了。
@@ -971,7 +1020,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 393 passed
+python3 -m pytest tests/ -q      # 406 passed
 ```
 
 分两类：

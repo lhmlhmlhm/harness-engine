@@ -7855,3 +7855,314 @@ steps:
         assert fragment in out.stderr, out.stderr
     finally:
         _rm(d)
+
+
+# ------------------------------------------------------------------ a machine form for writes
+#
+# The read commands answered as data; the write commands answered in prose. So a driver could
+# learn what a step REQUIRED without parsing text, and then had to parse text to learn what
+# happened when it acted — including, on `open`, the id of the run it had just started.
+
+
+def _subcommand_json_flags() -> dict[str, bool]:
+    """Which subcommands accept --json, read off the parser rather than listed here."""
+    import argparse as _ap
+    sys.path.insert(0, str(REPO))
+    from engine.harness import build_parser
+    subs = [a for a in build_parser()._actions
+            if isinstance(a, _ap._SubParsersAction)][0]
+    return {name: any(getattr(a, "option_strings", None) and "--json" in a.option_strings
+                      for a in sub._actions)
+            for name, sub in subs.choices.items()}
+
+
+def _one_json(out):
+    """Exactly one JSON document on stdout, with no prose around it.
+
+    The property is NOT "there is JSON somewhere in the output". Prose and JSON share stdout, so
+    a command that emits both hands back something no parser can read — and a caller that
+    managed to find a document in it would be reading a coincidence. `json.loads` refuses
+    trailing content, which is the assertion.
+    """
+    assert out.stdout.strip(), f"nothing on stdout; stderr was: {out.stderr}"
+    return json.loads(out.stdout)
+
+
+def test_the_json_classification_partitions_the_parser():
+    """Every subcommand either accepts --json or is declared as not having one, WITH a reason.
+
+    Without this, a new command that simply never got a machine form is indistinguishable from
+    one that was decided against — and the way a promise like "stdout carries the answer" decays
+    is one unclassified command at a time.
+    """
+    sys.path.insert(0, str(REPO))
+    from engine.harness import PROSE_ONLY, NO_JSON_YET
+    flags = _subcommand_json_flags()
+    declared = set(PROSE_ONLY) | set(NO_JSON_YET)
+    silent = {n for n, has in flags.items() if not has}
+
+    assert silent - declared == set(), \
+        f"subcommand(s) with no --json and no declared reason: {sorted(silent - declared)}"
+    assert declared - silent == set(), \
+        f"declared as prose-only but actually accepts --json: {sorted(declared - silent)}"
+    assert not (set(PROSE_ONLY) & set(NO_JSON_YET)), "a command is either decided or pending"
+    # A reason that says nothing is the same as no reason.
+    for table in (PROSE_ONLY, NO_JSON_YET):
+        for name, why in table.items():
+            assert len(why) > 40, (name, why)
+
+
+def _drive(env, run_id, tr, ability="authoring", scope="d/j"):
+    """Drive a run using ONLY the JSON forms, reading each step's requirements as data.
+
+    Written this way on purpose: if the driving loop had to read prose it would be evidence
+    against the thing being tested.
+    """
+    d = _one_json(run(["open", ability, "--scope", scope, "--run", run_id, "--json"], env))
+    assert d["command"] == "open"
+    for _ in range(30):
+        nx = _one_json(run(["next", "--run", run_id, "--json"], env))
+        step = nx.get("step")
+        if not step:
+            break
+        run(["enter", "--run", run_id, "--step", step], env)
+        for req in nx.get("requirements") or []:
+            if req.get("what") == "evidence":
+                for i in range(req.get("min_count") or 1):
+                    run(["evidence", "--run", run_id, "--step", step,
+                         "--kind", req["kind"], "--value", req.get("match") or f"v{i}"], env)
+            elif req.get("what") == "gate":
+                run(["gate", "--run", run_id, "--step", step, "--decision", "affirm",
+                     "--evidence", "a person said so"], env,
+                    transcript=tr, witness="transcript")
+        if not _one_json(run(["close-step", "--run", run_id, "--step", step,
+                              "--json"], env)).get("closed"):
+            return step
+    return None
+
+
+def test_every_write_command_answers_in_json_and_only_in_json(env, tmp_path):
+    """All nine, driven end to end without a single line of prose being parsed."""
+    tr = transcript_with(tmp_path, 9)
+
+    # open — and the generated id comes back as a field, which is why this one mattered most.
+    d = _one_json(run(["open", "authoring", "--scope", "d/e", "--json"], env))
+    assert d["run_id_generated"] is True and d["run"].startswith("authoring-")
+    rid = d["run"]
+
+    first = d["first_step"]["id"]
+    d = _one_json(run(["enter", "--run", rid, "--step", first, "--json"], env))
+    assert d["command"] == "enter" and d["entered"] is True
+
+    d = _one_json(run(["evidence", "--run", rid, "--step", first,
+                       "--kind", "k", "--value", "v", "--json"], env))
+    assert d["command"] == "evidence" and d["rows_now"] == 1
+
+    d = _one_json(run(["config", "--run", rid, "--set", "zz=true", "--json"], env))
+    assert d["set"] == {"zz": True} and d["config"]["zz"]["source"] == "run"
+
+    # The rest need a run that has actually progressed.
+    stuck = _drive(env, "w9", tr)
+    assert stuck is None, f"the JSON-only driver could not get past {stuck}"
+
+    # A FRESH run, because the driver already recorded w9's gate and a second one in the same
+    # human turn is refused by the witness cursor — that refusal is a different mechanism.
+    run(["open", "authoring", "--scope", "d/e-gate", "--run", "wg"], env)
+    run(["enter", "--run", "wg", "--step", "D2"], env)
+    d = _one_json(run(["gate", "--run", "wg", "--step", "D2", "--decision", "affirm",
+                       "--evidence", "a person said so", "--json"], env,
+                      transcript=tr, witness="transcript"))
+    assert d["command"] == "gate" and d["witnessed"] is True
+
+    d = _one_json(run(["summarize", "--run", "w9", "--phase", "gather",
+                       "--metric", "n=3", "--json"], env))
+    assert d["command"] == "summarize" and d["metrics"] == {"n": 3}
+
+    for ph in ("shape", "review"):
+        run(["summarize", "--run", "w9", "--phase", ph], env)
+    obs = _one_json(run(["obligations", "--run", "w9", "--json"], env))
+    owed = [o["hook_id"] for o in (obs if isinstance(obs, list) else obs["obligations"])
+            if not o.get("discharged_at")]
+    for h in owed:
+        d = _one_json(run(["discharge", "--run", "w9", "--hook", h,
+                           "--evidence", "done", "--json"], env))
+        assert d["command"] == "discharge" and d["discharged_now"] is True
+
+    d = _one_json(run(["close-run", "--run", "w9", "--json"], env))
+    assert d["command"] == "close-run" and d["closed"] is True
+
+    # skip lives on a flow that declares an optional step.
+    run(["open", "plan", "--scope", "slug-j", "--run", "pj"], env)
+    d = _one_json(run(["skip", "--run", "pj", "--step", "D03",
+                       "--reason", "not needed", "--json"], env))
+    assert d["command"] == "skip" and d["skipped"] is True and d["reason"] == "not needed"
+
+
+def test_a_refusal_raised_by_a_shared_helper_still_answers_in_json(env):
+    """The path a per-site rule would have missed.
+
+    `_run_or_exit` refuses on behalf of every write command, from a function their authors do
+    not edit. A caller reading an empty stdout here would conclude the write succeeded.
+    """
+    out = run(["evidence", "--run", "nope", "--step", "A1",
+               "--kind", "k", "--value", "v", "--json"], env)
+    assert out.returncode == USAGE
+    d = _one_json(out)
+    assert d["command"] == "evidence"
+    assert d["code"] == USAGE and d["code_name"] == "USAGE"
+    assert "no run" in d["why"], d
+    # stderr stays the human channel; the two are not alternatives.
+    assert "no run" in out.stderr
+
+
+def test_the_backstop_does_not_answer_over_a_site_that_already_did(env, tmp_path):
+    """One document, not two — and the site's own token survives.
+
+    `close-step` classifies its refusals (`criterion_unmet`), which is strictly more than the
+    backstop can say. If the backstop fired anyway there would be two JSON documents on stdout
+    and the more precise one would be the one a parser never reached.
+    """
+    run(["open", "delivery", "--scope", str(tmp_path / "r"), "--run", "b1"], env)
+    out = run(["close-step", "--run", "b1", "--step", "C01", "--json"], env)
+    assert out.returncode == REFUSED
+    d = _one_json(out)                      # would raise on a second document
+    assert d["refused_because"] == "criterion_unmet"
+    assert "code_name" not in d, "the backstop overwrote a classified refusal"
+
+
+def test_evidence_reports_how_many_rows_of_that_kind_now_exist(env):
+    """A `min_count` criterion counts exactly these rows, so the count is what a driver needs.
+
+    Without it the choice was to keep a private tally — which drifts from the ledger the moment
+    anything else writes — or to call `next` again after every single row.
+    """
+    run(["open", "authoring", "--scope", "d/c", "--run", "c1"], env)
+    run(["enter", "--run", "c1", "--step", "A1"], env)
+    seen = []
+    for i in range(3):
+        seen.append(_one_json(run(["evidence", "--run", "c1", "--step", "A1",
+                                   "--kind", "section", "--value", f"v{i}",
+                                   "--json"], env))["rows_now"])
+    assert seen == [1, 2, 3], seen
+    # Counted per kind and per step, not run-wide.
+    other = _one_json(run(["evidence", "--run", "c1", "--step", "A1",
+                           "--kind", "elsewhere", "--value", "x", "--json"], env))
+    assert other["rows_now"] == 1, other
+
+
+def test_gate_reports_recorded_and_vouched_for_separately(env, tmp_path):
+    """The default witness DEGRADES rather than refusing, so "recorded" does not mean "attested".
+
+    A caller reading only a success would not learn that this gate passed with nobody vouching
+    for it — which is the whole reason the engine also writes a violation.
+    """
+    tr = transcript_with(tmp_path, 4)
+    run(["open", "authoring", "--scope", "d/g1", "--run", "g1"], env)
+    run(["enter", "--run", "g1", "--step", "D2"], env)
+    ok = _one_json(run(["gate", "--run", "g1", "--step", "D2", "--decision", "affirm",
+                        "--evidence", "said so", "--json"], env,
+                       transcript=tr, witness="transcript"))
+    assert (ok["witnessed"], ok["violation_recorded"]) == (True, False)
+
+    run(["open", "authoring", "--scope", "d/g2", "--run", "g2"], env)
+    run(["enter", "--run", "g2", "--step", "D2"], env)
+    bad = _one_json(run(["gate", "--run", "g2", "--step", "D2", "--decision", "affirm",
+                         "--evidence", "nobody saw", "--json"], env))
+    assert bad["witness"] == "manual"
+    assert (bad["witnessed"], bad["violation_recorded"]) == (False, True)
+    assert _rows(env, "SELECT 1 FROM violation WHERE run_id='g2' AND code='unwitnessed_gate'")
+
+
+@pytest.mark.parametrize("declares,flag,expect_result,expect_source", [
+    (True, None, "completed", "flow_default"),
+    (True, "abandoned", "abandoned", "explicit"),
+    (False, None, "completed", "engine_fallback"),
+    (False, "whatever", "whatever", "explicit"),
+])
+def test_close_run_names_where_the_result_came_from(env, declares, flag,
+                                                   expect_result, expect_source):
+    """`completed` can arrive three ways and only one of them is the flow author's choice.
+
+    A run closed on the engine's fallback and one closed on a declared default hold the same
+    word, and telling them apart is how `abilities --json` reporting an undeclared flow stays
+    actionable rather than trivia.
+    """
+    name = "zzz_src"
+    body = ("results:\n  values: [completed, abandoned]\n  default: completed\n"
+            if declares else "")
+    d = _spec(env, name, f"""
+{body}phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+""")
+    try:
+        run(["open", name, "--scope", "s1", "--run", "r1"], env)
+        args = ["close-run", "--run", "r1", "--force-steps", "--json"]
+        if flag is not None:
+            args += ["--result", flag]
+        got = _one_json(run(args, env))
+        assert (got["result"], got["result_source"]) == (expect_result, expect_source), got
+        assert got["forced_steps"] == ["W01"], "a waived step is named, not just counted"
+    finally:
+        _rm(d)
+
+
+def test_discharge_tells_a_fresh_discharge_from_a_repeat(env, tmp_path):
+    """Both exit 0. Only the field says whether this call did anything."""
+    tr = transcript_with(tmp_path, 9)
+    assert _drive(env, "d1", tr) is None
+    for ph in ("gather", "shape", "review"):
+        run(["summarize", "--run", "d1", "--phase", ph], env)
+    obs = _one_json(run(["obligations", "--run", "d1", "--json"], env))
+    owed = [o["hook_id"] for o in (obs if isinstance(obs, list) else obs["obligations"])
+            if not o.get("discharged_at")]
+    assert owed, "this flow raises an obligation; without one the test proves nothing"
+    h = owed[0]
+
+    first = _one_json(run(["discharge", "--run", "d1", "--hook", h,
+                           "--evidence", "answered", "--json"], env))
+    assert first["discharged_now"] is True and first["already_discharged_at"] is None
+
+    again = _one_json(run(["discharge", "--run", "d1", "--hook", h,
+                           "--evidence", "answered twice", "--json"], env))
+    assert again["discharged_now"] is False
+    assert again["already_discharged_at"], again
+
+
+def test_a_json_command_that_answers_nothing_is_an_engine_defect(env, monkeypatch, capsys):
+    """The SUCCESS half of the promise, pinned on its own rather than via the one path that broke.
+
+    `_err` is what lets the backstop speak for a refusal; a success has no equivalent, because
+    the answer was never built at all. So the silence is exit 5 — this CLI's code for its own
+    defect — and not a quiet zero. It is not hypothetical: `next --json` printed prose on a
+    finished run for as long as the flag had existed, and nothing anywhere said so.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import harness as h
+
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    monkeypatch.setattr(h, "cmd_status", lambda _args: h.OK)   # returns OK, emits nothing
+
+    assert h.main(["status", "--json"]) == INTERNAL
+    # Without --json the same command is simply a quiet success; the defect is the broken
+    # promise, not the silence.
+    assert h.main(["status"]) == h.OK
+    err = capsys.readouterr().err
+    assert "no machine answer" in err, err
+
+
+def test_a_malformed_invocation_stays_prose_and_says_so(env):
+    """The one case that cannot be served, asserted so it is a known shape and not a surprise.
+
+    argparse rejects the command line before anything can read `--json` off it. Answering in
+    prose is honest: the request to be answered in JSON was part of what did not parse.
+    """
+    out = run(["gate", "--run", "x", "--json"], env)
+    assert out.returncode == USAGE
+    assert out.stdout.strip() == "", "a payload here would have to be invented"
+    assert "required" in out.stderr

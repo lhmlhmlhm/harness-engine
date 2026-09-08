@@ -96,6 +96,15 @@ JUDGMENT: tuple[tuple[str, str, str], ...] = (
         "inside a single turn is detected as forged and refused — and every refusal is kept.",
     ),
     (
+        "Read the answer, do not parse the prose",
+        "Pass --json on the commands you drive with and branch on the fields. The text beside "
+        "it is for a person reading over your shoulder.",
+        "A REFUSAL answers as data too — so the path that decides what you do next needs no "
+        "parsing either. Wording is not a contract and changes without notice; the fields and "
+        "the exit code are. Setup and the commands whose whole output is prose have no --json, "
+        "and `--help` says which those are.",
+    ),
+    (
         "Quote the human, do not summarise them",
         "Put their own words in the evidence.",
         "A summary silently changes meaning: a conditional yes becomes an unconditional one, "
