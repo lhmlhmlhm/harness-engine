@@ -30,31 +30,46 @@ harness-engine/
 └── tests/                   434 个测试
 ```
 
-## 快速开始
+## 上手
+
+分三层：**必须的三步**、**看你的 flow 才需要的两步**、**runtime 接线**。
+第三层不属于引擎，但漏了它引擎就只是一个没人调用的 CLI。
+
+### 一 · 必须的三步
 
 ```sh
-./bin/harness init                                   # 建库
-./bin/harness abilities                              # 看装了哪些能力
-./bin/harness open delivery --scope /path/to/repo     # 开一个 run
-./bin/harness next --run <id>                         # 下一步 + 它的 directive
-./bin/harness close-step --run <id> --step C01         # 关一步（不满足则 exit 3）
+pip install harness-engine                            # ① 装出一个 `harness` 命令
+export HARNESS_ABILITIES_PATH=/path/to/your/flows     # ② 指出你自己的 flow 树在哪
+harness init                                          # ③ 建库（幂等，安全重复）
 ```
 
-### 安装
+做完这三步就能驱动了：
 
 ```sh
-pip install harness-engine        # 装出一个 `harness` 命令
-export HARNESS_ABILITIES_PATH=/path/to/your/flows
-harness init
+harness abilities                                     # 装了什么，以及每个的 when:
+harness open <your-ability> --scope <key> --run <id>  # 开一个 run
+harness next --run <id>                               # 下一步，以及它要求什么
+harness evidence --run <id> --step <s> --kind <k> --value <v>
+harness close-step --run <id> --step <s>              # 判据不满足则 exit 3
 ```
 
-**装出来的东西里没有任何 flow，这是刻意的。** `abilities/` 不进包：树里那两条是测试夹具
-（`role: fixture`），而消费方的 flow 是消费方的——把任何一边塞进包里，就是往一个「核心主张是自己
-不含领域」的基座里放进一个领域。所以全新安装会如实说「一个都没装」，并等你指出自己的树在哪。
+**②不能省，因为装出来的东西里没有任何 flow，这是刻意的。** `abilities/` 不进包：树里那两条是
+测试夹具（`role: fixture`），而消费方的 flow 是消费方的——把任何一边塞进包里，就是往一个
+「核心主张是自己不含领域」的基座里放进一个领域。所以全新安装会如实说「一个都没装」，并等你指出
+自己的树在哪。
 
-**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 253 个测试在 3.10.16 上跑过并全绿，
-所以下限写 3.10。它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
-声明一个未经测试的下限，和引擎在别处拒绝的「不可证伪声称」是同一件事。
+**上手的工作量不在这三条命令上，在把你的 flow 写到能载入。** 引擎不替你猜，而是逐条说缺什么：
+
+```
+❌ notes: INVALID — …/flow.yaml: no usable `when:`
+          (needs at least 20 characters saying when to reach for this ability)
+❌ notes: INVALID — …/flow.yaml: exercises 'results' without declaring it in 'uses'
+✅ notes  (写一份笔记)   scope=notebook  steps=2 (2 required, 0 optional)
+```
+
+前两条都是真实的第一次尝试。**路由必须由 flow 自己声明**（`when:`），而**用了哪个机制必须在
+`uses:` 里承认**（双向核对）——这两条都在载入期致命，因为一个说不清何时该用的 ability 和一个
+悄悄用了未声明机制的 ability，都会在**别的地方**才暴露。
 
 三个环境变量，全部在**调用时**解析：
 
@@ -63,6 +78,88 @@ harness init
 | `HARNESS_ABILITIES_PATH` | flow 的根，`os.pathsep` 分隔，**替换**默认而非并集 |
 | `HARNESS_STATE_DIR` | 状态库的位置 |
 | `HARNESS_ACTOR` | 记进 run 的调用方标识，**仅供诊断，绝不参与隔离** |
+
+### 二 · 两个条件步：看你的 flow 有什么，不是每次上手都要做
+
+#### `harness trust` —— 只有 flow 带 `providers.py` 时，而且**必须做**
+
+带扩展代码的 flow **在批准之前一律 INVALID**，因为批准的是「要以引擎权限运行的代码」，那是机器
+所有者的决定，不是引擎能替他做的：
+
+```
+❌ cr-reviewer: INVALID — …/cr-reviewer/providers.py
+
+$ harness trust                                    # 批准【之前】先能审
+⚠️  cr-reviewer      unknown   sha256:93852218f0c320fa…
+     …/cr-reviewer/providers.py
+     imports (advisory): __future__, engine, pathlib, subprocess, sys
+1 file(s) will refuse to load. Approve one with: harness trust <ability>
+
+$ harness trust cr-reviewer
+✅ cr-reviewer  steps=9  gated=1  guards=1
+```
+
+批准是**按内容**钉定的：那个文件改一个字节，批准就失效并重新询问。所以它防漂移，不是沙箱。
+
+#### `harness require --add` —— 只有 flow **有受守动作**、且你想强制「必须先开 run」时
+
+这一步**不属于上手**。它的正确时机是：你已经用了一段时间、确认某个 scope 的流程真的必须走。
+而它对很多 flow **根本无从下手**——它拦的是**受守动作**：
+
+| flow 的形状 | 受守动作 | 声明强制有意义吗 |
+|---|---|---|
+| 只产出文档 / 只做分析 / 只读 | 0 | ❌ 无从下手。跳过一个 run 的代价是「没有记录」，不是「一个不可逆动作没被把关」 |
+| 会提交、发评审、关任务、删工作树 | ≥1 | ✅ 这是它唯一的用武之地 |
+
+**空声明时行为与这个机制存在之前逐字节相同**，这条有测试和变异钉住：
+
+```
+$ harness require                                  # 全新机器
+(nothing is declared mandatory here)
+With nothing declared the guard enforces the gates inside an open run and allows
+everything when nothing is open — exactly as it did before this existed.
+```
+
+**不自动，而且刻意不自动。** 让引擎推断「这里该强制」，等于替机器所有者做一个改变所有人提交行为
+的决定。
+
+### 三 · runtime 接线：不在引擎里，但漏了之后**看起来一切正常**
+
+引擎只是一个 CLI。让 agent 主动调它、并且在它不配合时仍然被约束，需要 runtime 侧三件事：
+
+| 要接的 | 怎么接 | 不接的后果 |
+|---|---|---|
+| **驱动契约进上下文** | `harness brief --write` 的输出作为 agent 的常驻 resource | agent 不知道有这套东西 |
+| **拦截面** | runtime 的 pre-tool hook 调 `harness guard-tool`，把它的 exit 4 翻成 runtime 的「阻断」 | **门完全不生效**——这是唯一不依赖 agent 配合的机制 |
+| **证人** | `HARNESS_WITNESS=transcript` + `HARNESS_TRANSCRIPT=<会话转录路径>` | 「人确认过」退化成 agent 自签：记一条 violation 然后**放过** |
+
+后两条最容易漏，**因为漏了之后一切看起来正常**——没有报错、没有警告，只是保证不在了。
+
+两件配套的事实：
+
+- **hook 必须覆盖哪些工具是可以问出来的**，不用猜：`harness brief` 会把它渲染出来（由已装 flow
+  的 `guards.<action>.matches` 推导）。**一个不在 runtime matcher 列表里的工具永远不会被检查，
+  而那个失效是静默的。**
+- **写适配器不用重新想「什么算正确」**：`harness adapter-contract` 以数据形式发布 io 契约、
+  译码用例、韧性用例，以及命令面（每条命令的参数/类型/必填/退出码表）。参考实现在
+  `integrations/kiro-pretooluse.py`——它**只做翻译**：把 stdin 上的事件转成 `guard-tool` 的参数、
+  把 exit 4 转成 runtime 的阻断码，其余什么都不做。「什么命令算一次提交」这类知识住在各 flow 的
+  `guards.<action>.matches` 里，所以适配器永不学习任何工具调用的含义——**每个新 runtime 只需重写
+  这一层，而判断逻辑白拿。**
+
+### 上手自检
+
+```sh
+harness abilities            # 每条都 ✅ ？（❌ 会说是 when:/uses:/trust 哪一个）
+harness trust                # 还有 unknown 的扩展文件吗？
+harness require              # 这里声明了什么强制（通常应当是「什么都没有」）
+harness brief                # 契约生成得出来吗；里面的 hook 工具清单接上了吗
+harness validate             # 全部 spec 合法？exit 2 = 不合法（CI 就读这个码）
+```
+
+**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 253 个测试在 3.10.16 上跑过并全绿，
+所以下限写 3.10。它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
+声明一个未经测试的下限，和引擎在别处拒绝的「不可证伪声称」是同一件事。
 
 #### 状态库的默认位置在引擎之外
 
@@ -993,7 +1090,7 @@ gate」会被发现（第二个看到的游标已经消费掉那次回复了）�
 
 **为什么不只报「非 attest 的有几步」**：一条流程可以 100% 非 attest，同时几乎全是自陈。
 `record-exists` 强制了一个显式记录动作、留下可审计的内容行，这比 `attest` 强，
-但它**不是机器裁决**——把两者合报成「machine-checked: 101/101」是真话，
+但它**不是机器裁决**——把两者合报成「machine-checked: 102/102」是真话，
 而它听起来比实际意思强得多。
 
 ### 升级 record-exists 的纪律：值必须来自散文
@@ -1085,11 +1182,13 @@ python3 -m pytest tests/ -q      # 434 passed
 ## 对照结论：真实流程转写的结果
 
 `abilities/shipcheck-asis/flow.yaml` 是一条**成熟真实流程**的忠实转写——从
-`state_machine.py` 的 `CANONICAL_STEPS` 注册表程序化导出（**111 步 / 8 层 / 24 stage**），
+`state_machine.py` 的 `CANONICAL_STEPS` 注册表程序化导出（导出时源注册表报 **111 步 / 8 层 /
+24 stage**；**今天这份 spec 里是 102 步**——8 层与 24 stage 仍然吻合，9 步的差额没有被核对过，
+所以这里把「当时」与「现在」分开写而不是挑一个数字填上），
 gate 取自 `LAYER_MANDATORY_GATE` + `LIFECYCLE_TRANSITION_GATES`，deps 取自
 `STEP_PRECONDITIONS` + `step-manifest.yaml` 的 score-emit 链。手写 111 步必错，所以没手写。
 
-它**通过校验并能跑**，这一点本身有意义：spec 语言在 111 步的规模上不塌。但结论是
+它**通过校验并能跑**，这一点本身有意义：spec 语言在 102 步的规模上不塌。但结论是
 **结构能表达，控制流不能。**
 
 ### 引擎赢的地方（两条，都是实测）
@@ -1128,7 +1227,7 @@ gate 取自 `LAYER_MANDATORY_GATE` + `LIFECYCLE_TRANSITION_GATES`，deps 取自
 
 ### 四个控制流原语（v2 已实现）
 
-v1 的四个缺口都补上了，那条 111 步的真实流程现在**能真正跑到关闭**：
+v1 的四个缺口都补上了，那条 102 步的真实流程现在**能真正跑到关闭**：
 
 ```
 驱动结果：closed=82  skipped=29  gated=6  人类发言=4
@@ -1601,7 +1700,7 @@ $ harness init                    # 再跑一次
 
 **那是分类错误。** 它们不承载工作，它们是**机制测试的夹具**——5 步和 10 步是最便宜的夹具，
 gate / witness / preauth / guard / scope 歧义 / close-run / forced-close / purge 这些机制测试
-（共 24 个测试函数）都跑在它们上面，替代方案是跑 101 步的真实流程。一个夹具需要的是小、稳、
+（共 24 个测试函数）都跑在它们上面，替代方案是跑 102 步的真实流程。一个夹具需要的是小、稳、
 覆盖机制，**不是强判据**；而 `authoring` 那处 `attest` 是全仓唯一还在演示「最弱下限」的地方，
 把它读成缺口恰好读反了。
 

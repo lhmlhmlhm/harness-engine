@@ -15,7 +15,7 @@ harness brief --write             # 或者单独刷新它
 ```
 
 它按**这套安装**产出：真实存在的子命令、真实的退出码、以及**已装 flow 实际用到的机制**——
-没有 variants 的安装不会被讲 variants。约 200 行，其中不可派生的只有 6 条判断规则。
+没有 variants 的安装不会被讲 variants。229 行，其中不可派生的只有 7 条判断规则。
 
 **有两份副本，指错会给 agent 一条跑不通的路径：**
 
@@ -40,7 +40,7 @@ harness brief --write             # 或者单独刷新它
 反复跑的命令。一份没人重新生成的生成物，就是一份多几个步骤的手写文件——而一份过期的契约会
 **静默地给 agent 错的指令**，那正是「改成生成」要消掉的失效，不是把它搬个地方。
 
-⚠️ **不要**把 `flow.yaml` 或 `prose/` 放进 `resources`。转写后的交付流程是 35 KB spec + 1,338 行
+⚠️ **不要**把 `flow.yaml` 或 `prose/` 放进 `resources`。转写后的交付流程是 62 KB spec + 1,338 行
 散文；预载它们会把渐进披露整套设计废掉——那套设计的意义就是 agent **不**预载，而是每步问
 `harness next`，拿到 directive（约 2 行）+ 指针，需要时才 `harness show`。
 
@@ -129,6 +129,21 @@ open run 时放行（fail-open 是铁律，它跑在每个会话的每次工具�
 一个可比对的 scope，于是没有 run 时那里会被拒绝而不是放行。空清单时行为与从前逐字节相同，而它
 **防遗漏不防颠覆**：能删掉清单的人能关掉它，区别在于删除是一次动作、省略不是。
 
+声明有**两个来源，能力相同，区别只在谁承担配置**：
+
+| 来源 | 形状 | 代价 |
+|---|---|---|
+| 机器记录 | `harness require --add <ability> --scope-key <key>`，条目里可以写 `~`（比较时展开） | 不碰任何仓库；换机器要么重跑命令、要么把记录文件拷过去 |
+| 目录声明 | 目录里放一个 `.harness-required`，列出 ability 名——**文件里没有路径**，scope 就是持有它的那个目录 | 跟着仓库走（可签进 git，改动进 code review）；代价是往仓库里加一个文件 |
+
+**最近者胜**，所以一个空的 `.harness-required` 是一次刻意的本地豁免。两者都只对**有受守动作**的
+flow 有意义：一条只产出文档的 flow 没有受守动作，声明它不会有任何效果。
+
+一条被明确划下的边界：目录发现**从调用方所在处向上走**，不从 payload 里的路径开始——从 payload
+定位一份声明需要一条「哪些子串是路径」的规则，而引擎在别处正因同一个理由拒绝这种猜测。后果是
+一次从树外发出、指名树内目标的调用**找不到 marker**；机器记录覆盖这一格，因为它的条目直接指名
+目录。
+
 ### 「没什么要守」与「我看不见要守什么」不许长得一样
 
 `guard-tool` 会遍历**所有** open run 去判断这次调用是否被守。一个 flow **读不出来**的 run 曾经被
@@ -196,7 +211,7 @@ echo '{"tool_name":"shell","tool_input":{"command":"git status"}}' \
 |---|---|
 | 有 `⚠️ no harness.db` | 两侧 `HARNESS_STATE_DIR` 不一致 |
 | 有 `⚠️ NOT enforced: N open runs` | 同一 scope 多个 open run 且**没有声明委派**，引擎拒绝猜（`harness status` 会直接说这个 scope 能不能被裁决；`harness leases` 看委派） |
-| 无任何输出 | scope 不覆盖 cwd（检查 ability 的 `scope_match`），或该工具无匹配规则 |
+| 无任何输出 | scope 不覆盖 cwd（检查 ability 的 `scope_match`——若动作作用于 cwd 之外的目录，需要 `path_prefix_or_payload`），或该工具无匹配规则 |
 | hook 根本没被调用 | agent 的 `matcher` 没覆盖这个工具名（用上面那条 `harness brief` 取清单） |
 
 ## 为什么适配器只有一份，而不是每个 ability 一个
