@@ -1,0 +1,232 @@
+# ability: cr-audit —— 一段时间内自己 commit / CR 的事后复盘
+#
+# 【它和 cr-reviewer / cr-to-task / shipcheck-asis 的分界】
+#   cr-reviewer     评审【别人】的一个 CR，scope 是那一个 CR
+#   cr-to-task      把【已做完】的工作整理成任务，产出是 task，不判断对错
+#   shipcheck-asis  交付【自己】的改动，产出是代码 + CR
+#   cr-audit（本条）回看【自己已经合入】的一批 commit，判断改得对不对、有没有更好的做法
+#
+# 【为什么它有 0 个 guard】它不提交、不发评审、不关任务 —— 只读快照、只产出一份报告。
+# 所以 required-flows 对它无从下手，而那是对的：跳过它的代价是「没有复盘记录」，
+# 不是「一个不可逆动作没被把关」。
+#
+# 【引擎能真正裁决的是什么，以及不能裁决什么】
+# 引擎调不了 MCP（provider 是子进程），所以数据必须由 agent 取回来、记成 evidence。
+# 于是能被机器裁决的只有【账本内部的一致性】，而这恰好是最容易被含糊掉的那一条：
+#
+#   ✅ 能裁决  逐条判断的条数 >= 取回来的 commit 条数        （counts_at_least）
+#   ✅ 能裁决  取到的天数 >= 窗口里应该有的天数
+#   ❌ 不能裁决 取回来的 commit 是否就是快照里的【全部】
+#
+# 第三条是真实边界，写在这里而不是留给人撞见：如果 agent 少记了 4 条 commit，
+# 它也会少判 4 条，两边一致地少 —— 判据抓的是「记了 24 判了 20」，不是「一共 24 只记了 20」。
+# 收窄它的办法是 A03 要求逐日核对条数，而那一步的诚实形态是 attest：引擎手上没有独立的
+# 第二个来源可以反驳它。
+#
+# 【那两条计数判据为什么在 phase goal 上，而不在 step 上】
+# 这是第一版写错的地方，记在这里因为它是引擎一条不显眼但要紧的性质：
+#
+#   step 的 completion   evidence_scope = 该 step 自己   → 只看本步骤记的行
+#   phase 的 goal        evidence_scope = None          → 看整个 run
+#
+# `commit` 记在 A03，`verdict` 记在 J01。把「verdict 条数 >= commit 条数」写成 J01 的
+# step 判据，它在 J01 上看到的是 0 和 0 —— **永远空过**，而且空过时还会如实说自己是空的，
+# 于是那条判据看起来在，实际什么都不管。两侧不在同一个 step 的比较，位置只能是 phase goal。
+#
+# 而 phase goal 又恰好是「这一层做完了没有」的正确问法，并且它在关 run 的必经路上：
+# report 的 goal 要求其余 phase 都被 summarize，summarize 又要求那一层的 goal 达成。
+
+version: 2
+ability: cr-audit
+title: CR 复盘（按 package 分组，逐条判断）
+scope_kind: audit_window
+
+results:
+  values: [completed, abandoned]
+  default: completed
+
+uses: [phase_goals, prose, results, outputs]
+
+# 散文分层：每个 phase 一份 guide，每个 step 在里面有自己的小节。
+# root 必须在这个 ability 目录内 —— 一个 `cp -r abilities/<name>` 之后还能用的单元，
+# 才算真的可插拔。
+prose:
+  root: prose/
+  anchor_pattern: '^#{1,6}\s+Step:\s+{step_id}\b'
+
+when: |
+  要回看一段时间内自己（或指定 login）已经合入的 commit / CR，按 package 分组，
+  从全局视角逐条判断改得对不对、有没有更好的做法、哪里该优化，并产出一份报告。
+  这是**事后复盘**，不改一行代码。
+  评审别人的一个 CR 走 cr-reviewer；把已做的工作整理成任务走 cr-to-task；
+  交付自己的新改动走 shipcheck-asis。
+
+# 谁、多长的窗口。默认值在这里，单次可覆盖：
+#   harness config --run <id> --set login=someone --set days=1
+#
+# days 默认 7 而不是 1，是量出来的：单日快照经常为空（本地仓库的工作不进 GitFarm），
+# 而一个总是空手而归的默认值会让人以为机制没在工作。
+config:
+  login: langhaom
+  days: 7
+
+phases:
+  - id: gather
+    title: 取数与分组
+    guide: gather.md
+    # 「窗口被覆盖了」= 取到的天数 >= 应取的天数。两侧分别记在 A02 和 A01，
+    # 所以只能在这里比 —— 见头部注释。
+    goal:
+      type: all_checks
+      checks:
+        - {type: phase_steps_closed}
+        - {type: counts_at_least, kind_a: day_snapshot, kind_b: day_requested}
+
+  - id: judge
+    title: 逐条判断
+    guide: judge.md
+    # 这条流程存在的理由，就是下面第二个 check。
+    goal:
+      type: all_checks
+      checks:
+        - {type: phase_steps_closed}
+        - {type: counts_at_least, kind_a: verdict, kind_b: commit}
+        - {type: counts_at_least, kind_a: cross_verdict, kind_b: cross_package_link}
+
+  - id: report
+    title: 出报告
+    guide: report.md
+    # 把上面两层的 goal 放到关 run 的必经路上：close-run 要求每个 phase 都被 summarize，
+    # 而 summarize 一个 phase 要求它的 goal 达成。少了这一条，前两层的判据就在旁边而不在路上。
+    goal:
+      type: all_checks
+      checks:
+        - {type: phase_steps_closed}
+        - {type: phases_summarized, exclude: [report]}
+
+steps:
+  - id: A01
+    phase: gather
+    title: 确认窗口（谁、哪几天）
+    completion:
+      type: all_checks
+      checks:
+        - {type: evidence, kind: window}
+        - {type: evidence, kind: day_requested}
+    directive: |
+      产出：本次的 login 与日期列表 —— 先读 `harness config --run <id>`，不要凭记忆
+      完成：window 记一条（login + 起止日期），并为窗口里的**每一天**记一条 day_requested
+      为什么逐日记：下一步的判据是「取到的天数 >= 应取的天数」，而「应取几天」只有这里知道
+
+  - id: A02
+    phase: gather
+    title: 逐日取快照
+    deps: [A01]
+    completion:
+      # 只检查本步骤记下的东西 —— 「够不够覆盖窗口」是 phase goal 的事。
+      # min_count: 1 是刻意的：没有它，一条 day_snapshot 都不记也能关掉这一步。
+      type: evidence_all_in
+      kind: day_snapshot
+      values: [has_commits, empty, no_snapshot]
+      min_count: 1
+    directive: |
+      产出：每天一条 day_snapshot，取值只能是 has_commits / empty / no_snapshot
+      完成：至少一条，且取值都在那三个之内。**「每一天都有」是这一层的 phase goal 在管**——
+            `harness assert-goal --run <id> --phase gather` 随时可问
+      **empty 与 no_snapshot 是两件事**：前者是「那天没提交」，后者是「那天没有采集」——
+      合成一个会让「没干活」和「没数据」长得一样，而它们的后续处置不同
+
+  - id: A03
+    phase: gather
+    title: 把每条 commit 落成一行
+    deps: [A02]
+    completion:
+      type: attest
+    directive: |
+      产出：每条 commit 一条 evidence kind=commit，值里带 package_name + subject + CR 链接
+      完成：**逐日核对条数** —— 每天记下的 commit 行数与那天快照里的条数相等
+      这一步是 attest 而不是判据，因为引擎手上没有第二个来源可以反驳它。
+      漏记的代价是后面所有判断都在一个变小了的集合上进行，而两边会一致地变小
+
+  - id: A04
+    phase: gather
+    title: 按 package 分组
+    deps: [A03]
+    completion:
+      type: evidence
+      kind: package_group
+    directive: |
+      产出：每个出现过的 package 一条 package_group，值里带该包的 commit 条数
+      完成：每个包都有一条，条数加起来等于 commit 行数
+
+  - id: A05
+    phase: gather
+    title: 找出跨包关联
+    deps: [A04]
+    completion:
+      type: attest
+    directive: |
+      产出：每一组相互关联的包一条 cross_package_link（如前端 + BFF），值里说清关联依据
+      完成：依据只用**可核对的东西** —— 同一个 CR 链接、commit body 里点名了另一个包/另一个 CR、
+            同一天同一个功能。没有关联就记零条并在 attest 里说明
+      不要凭「听起来相关」建立关联：一个编出来的关联会让下一步产出一个编出来的判断
+
+  - id: J01
+    phase: judge
+    title: 逐条判断
+    deps: [A05]
+    completion:
+      # attest，而不是那条计数判据 —— verdict 与 commit 不在同一个 step 上，
+      # 写在这里它只会看到 0 和 0 并空过。真正的判据在 judge 的 phase goal 上。
+      type: attest
+    directive: |
+      产出：每条 commit 一条 verdict，三问都要答：
+            ① 改得对不对（有没有把问题真的解决，有没有引入新的）
+            ② 有没有更好的做法（同样的问题是否有更小/更直接的改法）
+            ③ 哪里该优化（可读性、重复、测试、命名、遗漏的边界）
+      完成：这一步自陈判完了；**真正的判据是这一层的 phase goal**——verdict 条数 >= commit 条数，
+            少一条 `harness summarize --phase judge` 就会拒绝并说差几条
+      **一次只处理一个 package**：一天的 commit 带完整 body 可能有 20K+ tokens，
+      整批读进来会把上下文吃掉，而每个 verdict 只需要它自己那一条
+
+  - id: J02
+    phase: judge
+    title: 跨包一致性判断
+    deps: [J01]
+    completion:
+      type: attest
+    directive: |
+      产出：每组关联一条 cross_verdict —— 两侧改动是否一致、有没有一侧改了另一侧没跟上、
+            部署顺序有没有隐患
+      完成：同上，条数由 phase goal 裁决（cross_verdict >= cross_package_link）
+      没有关联时这一步空过，而引擎会明说那是空的 —— 空过和「判过且都没问题」不是一回事
+
+  - id: R01
+    phase: report
+    title: 产出报告
+    deps: [J02]
+    completion:
+      type: all_checks
+      checks:
+        - {type: evidence, kind: report_path}
+        - {type: evidence, kind: report_summary}
+    output:
+      from_evidence: report_path
+      select: {anchor: "需要跟进"}
+      max_bytes: 4096
+    directive: |
+      产出：一份 markdown 报告，路径记成 report_path；再记一条 report_summary（三行以内）
+      报告结构：窗口与覆盖情况 → 按 package 分组的逐条判断 → 跨包一致性 → **需要跟进**
+      完成：两条都记下了
+      「需要跟进」必须是一个独立小节，因为关掉这一步时引擎会把那一节原文交回来 ——
+      如果没有需要跟进的，就在那一节里写一句「没有」，而不是删掉它
+
+  - id: R02
+    phase: report
+    title: 收尾
+    deps: [R01]
+    completion:
+      type: no_open_violations
+    directive: |
+      产出：把报告位置和「有几条需要跟进」告诉用户
+      完成：没有未处理的 violation。有的话先说清是什么，不要静默关掉这个 run

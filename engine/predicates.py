@@ -452,6 +452,47 @@ def _fields_agree(conn, run_id, step, spec) -> tuple[bool, str]:
     return True, f"both sides agree on {va!r}"
 
 
+@predicate("counts_at_least", requires=("kind_a", "kind_b"))
+def _counts_at_least(conn, run_id, step, spec) -> tuple[bool, str]:
+    """Done when at least as many rows of `kind_a` were recorded as of `kind_b`.
+
+    WHY COUNTING TWO SETS IS NOT THE SAME AS COUNTING ONE. `evidence` with `min_count` needs the
+    number written into the spec, so it can only express a demand fixed at the time the spec was written. The
+    demand this expresses is not: "one judgement for every subject", where the number of subjects
+    is DISCOVERED during the run. A flow that gathers N things and then reports on them can be
+    refused for reporting on N-1 — which is the difference between a criterion and a request.
+
+    Both sides come from the LEDGER, and that is what makes it a criterion at all. The subjects
+    are rows the run recorded while gathering; the judgements are rows it recorded while working.
+    A claim like "I reviewed all of them" cannot be checked, but "there are 24 of one and 20 of
+    the other" can.
+
+    A VACUOUS PASS IS REPORTED AS ONE. Zero of zero satisfies the inequality, and it must: a
+    window with nothing in it is a legitimate outcome, not a failure. But "0 of 0" reading as
+    plain success is the shape this engine keeps being corrected for, so the sentence says it was
+    empty. What guards against an empty pass being MISTAKEN for coverage is a separate criterion
+    on the gathering step — which is where that question belongs, because this predicate cannot
+    know how much there was supposed to be.
+
+    Generic by construction: the engine counts two sets of rows and knows what neither contains.
+    """
+    ka, kb = str(spec["kind_a"]), str(spec["kind_b"])
+    a = store.find_evidence(conn, run_id, step.evidence_scope, ka)
+    b = store.find_evidence(conn, run_id, step.evidence_scope, kb)
+    na, nb = len(a), len(b)
+    if na < nb:
+        return False, (
+            f"{na} '{ka}' row(s) for {nb} '{kb}' row(s) — {nb - na} short.\n"
+            f"    Record one '{ka}' per '{kb}'; the shortfall is what is left undone."
+        )
+    if nb == 0:
+        # Said out loud rather than folded into the success sentence below: a reader seeing
+        # "satisfied" needs to know whether anything was actually measured.
+        return True, (f"{na} '{ka}' for 0 '{kb}' — VACUOUS: there was nothing to cover. "
+                      f"Whether there SHOULD have been is not this criterion's question.")
+    return True, f"{na} '{ka}' row(s) covering {nb} '{kb}' row(s)"
+
+
 @predicate("evidence_matches_variant", requires=("kind",))
 def _evidence_matches_variant(conn, run_id, step, spec) -> tuple[bool, str]:
     """Done when the LATEST recorded value of `kind` equals the variant this run was opened as.

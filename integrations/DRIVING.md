@@ -135,6 +135,7 @@ runtime hosting you.
 
 ## What is installed, and when to reach for it
 
+- **`cr-audit`** — 要回看一段时间内自己（或指定 login）已经合入的 commit / CR，按 package 分组，
 - **`cr-reviewer`** — 用户给出一个评审链接/编号，或说「review 一下这个」「有哪些评审等我看」「帮我看看这个 CR」。
 - **`cr-to-task`** — 用户给出一个迭代链接/编号或一段时间范围，说「把我这个迭代的 CR 整理成 task」
 - **`plan`** — 要为**还没开始做**的事出一份结构化方案。产出是一份待推送的方案文档，不是代码。

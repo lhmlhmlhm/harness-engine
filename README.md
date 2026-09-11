@@ -26,9 +26,59 @@ harness-engine/
 │   └── harness.py           CLI
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
-│   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   465 个测试
+│   ├── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
+│   └── cr-audit/flow.yaml   已合入 commit 的事后复盘（9 步 / 0 guard / 判据在 phase goal 上）
+└── tests/                   476 个测试
 ```
+
+## 一条判据的数字可以在 run 里被发现，而不必写进 spec
+
+`evidence` 的 `min_count` 是写在 spec 里的字面量，所以它只能表达「在写 spec 那一刻就定下来的数量」。
+而有一类要求不是那种形状：**「每个对象一条判断」，而对象有几个是跑起来之后才知道的**。
+
+```yaml
+completion: {type: counts_at_least, kind_a: verdict, kind_b: commit}
+```
+
+两侧都来自**账本**，这才是它成为判据而不是请求的原因：对象是这个 run 收集时记下的行，判断是它工作时
+记下的行。「我全部看过了」无法核对，「一边 24 条一边 20 条」可以。
+
+```
+⛔ 2 'verdict' row(s) for 5 'commit' row(s) — 3 short.
+    Record one 'verdict' per 'commit'; the shortfall is what is left undone.
+```
+
+**空过会被说成空过。** 0 比 0 满足这个不等式，而且必须满足 —— 一个什么都没有的窗口是正常结论不是
+失败。但「满足」在 0/0 和 24/24 上读起来一样，正是这个引擎反复被纠正的形状，所以句子会说它是空的：
+
+```
+✔ 0 'verdict' for 0 'commit' — VACUOUS: there was nothing to cover.
+  Whether there SHOULD have been is not this criterion's question.
+```
+
+而「本来该有多少」由收集那一层的判据管 —— 那才是知道窗口有多宽的地方。这个谓词不猜它。
+
+**它和 `fields_agree` 的区别正是它存在的理由。** 后者比两个**值**相等；如果让 agent 记
+`subject_count=24` 和 `verdict_count=24`，它满足的是一个自己写下的等式。而这里每一行**就是**一个
+对象、一条判断，数字是「做了什么」的性质，不是「怎么说」的性质。有测试专门钉住这一点：记两行各自
+声称 24，判据只数到 **1**。
+
+### 而这条判据的位置是我第一版写错的地方
+
+引擎有一条不显眼但要紧的性质：
+
+```
+step 的 completion   evidence_scope = 该 step 自己   → 只看本步骤记的行
+phase 的 goal        evidence_scope = None          → 看整个 run
+```
+
+`commit` 记在一步、`verdict` 记在另一步。把这条判据写成后者的 **step** 判据，它看到的是 0 和 0 ——
+**永远空过**，而且空过时还如实说自己是空的，于是判据看起来在、实际什么都不管。**两侧不在同一个 step
+的比较，位置只能是 phase goal。**
+
+而 phase goal 恰好是「这一层做完了没有」的正确问法，并且它在关 run 的必经路上：一个 phase 的 goal
+里写 `phases_summarized`，`close-run` 就要求其余 phase 都被 summarize，而 summarize 一个 phase 要求
+它的 goal 达成。少了那一条，前面几层的判据就在旁边而不在路上。
 
 ## 手写文档也有守卫了，而可推导的那部分改成生成
 
@@ -1257,7 +1307,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 465 passed
+python3 -m pytest tests/ -q      # 476 passed
 ```
 
 分两类：

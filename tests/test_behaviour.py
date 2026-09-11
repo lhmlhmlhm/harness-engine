@@ -9030,3 +9030,155 @@ def test_the_cursor_still_refuses_a_second_gate_in_one_turn_under_a_declared_pat
     with pytest.raises(proof.NoWitness) as e:
         _vouch(tmp_path, t, cursor={"human_turns": 2}, **env)
     assert "no new human turn since the last gate" in str(e.value)
+
+
+# ------------------------------------------------------------------ one judgement per subject,
+# ------------------------------------------------------------------ where the count is discovered
+
+_CNT_SPEC = """
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    title: Judge each subject
+    completion: {type: counts_at_least, kind_a: verdict, kind_b: subject}
+    directive: Record one verdict per subject.
+  - id: W02
+    phase: p1
+    title: A second step, to pin the scope
+    completion: {type: attest}
+    directive: Anything.
+"""
+
+
+def _cnt_run(env, run, subjects, verdicts, step="W01"):
+    for i in range(subjects):
+        rc(["evidence", "--run", run, "--step", step, "--kind", "subject",
+            "--value", f"s{i}"], env)
+    for i in range(verdicts):
+        rc(["evidence", "--run", run, "--step", step, "--kind", "verdict",
+            "--value", f"v{i}"], env)
+
+
+@pytest.mark.parametrize("subjects,verdicts,closes,fragment", [
+    (0, 0, True, "VACUOUS"),
+    (3, 2, False, "1 short"),
+    (3, 3, True, "covering 3"),
+    (3, 5, True, "covering 3"),
+    (1, 0, False, "1 short"),
+])
+def test_a_count_demand_can_be_discovered_rather_than_written_into_the_spec(
+        env, subjects, verdicts, closes, fragment):
+    """`min_count` fixes the number at authoring time; this one learns it from the run.
+
+    "One judgement for every subject" cannot be spelled with a literal, because how many subjects
+    there are is discovered while gathering. A flow that finds 24 and reports on 20 is refused —
+    which is the difference between a criterion and a request.
+    """
+    d = _spec(env, "zzz_cnt", _CNT_SPEC)
+    try:
+        assert rc(["open", "zzz_cnt", "--scope", "s1", "--run", "n1"], env) == OK
+        _cnt_run(env, "n1", subjects, verdicts)
+        out = run(["close-step", "--run", "n1", "--step", "W01", "--json"], env)
+        got = _one_json(out)
+        assert got["closed"] is closes, out.stderr
+        why = got.get("why") or ""
+        assert fragment in why, why
+        if not closes:
+            assert str(subjects) in why and str(verdicts) in why, \
+                f"the refusal names neither count: {why}"
+    finally:
+        _rm(d)
+
+
+def test_an_empty_pass_says_it_was_empty(env):
+    """Zero of zero satisfies the inequality and must — a window with nothing in it is a real
+    outcome, not a failure. But "satisfied" reading the same for 0/0 as for 24/24 is the shape
+    this engine keeps being corrected for, so the sentence distinguishes them.
+
+    What it deliberately does NOT do is guess whether there should have been something. That
+    question belongs to the gathering step, which knows how wide the window was.
+    """
+    d = _spec(env, "zzz_cnt2", _CNT_SPEC)
+    try:
+        rc(["open", "zzz_cnt2", "--scope", "s1", "--run", "e1"], env)
+        empty = _one_json(run(["close-step", "--run", "e1", "--step", "W01", "--json"], env))
+        assert empty["closed"] is True
+        assert "VACUOUS" in empty["why"] and "nothing to cover" in empty["why"], empty
+
+        rc(["open", "zzz_cnt2", "--scope", "s2", "--run", "e2"], env)
+        _cnt_run(env, "e2", 2, 2)
+        real = _one_json(run(["close-step", "--run", "e2", "--step", "W01", "--json"], env))
+        assert real["closed"] is True
+        assert "VACUOUS" not in real["why"], \
+            "a real pass is indistinguishable from an empty one"
+    finally:
+        _rm(d)
+
+
+def test_the_counts_come_from_the_LEDGER_and_not_from_a_claim(env):
+    """The whole reason this is not `fields_agree` on two numbers.
+
+    An agent that recorded `subject_count=24` and `verdict_count=24` would satisfy an equality
+    between two values it wrote itself. Here each row IS one subject and one judgement, so the
+    numbers are a property of what was done rather than of what was said about it.
+    """
+    d = _spec(env, "zzz_cnt3", _CNT_SPEC)
+    try:
+        rc(["open", "zzz_cnt3", "--scope", "s1", "--run", "l1"], env)
+        # One row per side, each CLAIMING a big number. The claim is worth exactly one row.
+        rc(["evidence", "--run", "l1", "--step", "W01", "--kind", "subject",
+            "--value", "24 subjects were found"], env)
+        rc(["evidence", "--run", "l1", "--step", "W01", "--kind", "verdict",
+            "--value", "all 24 were judged"], env)
+        got = _one_json(run(["close-step", "--run", "l1", "--step", "W01", "--json"], env))
+        assert got["closed"] is True and "covering 1" in got["why"], got
+        # ...and it counted ONE, not twenty-four: the value is opaque to the count.
+        assert "24" not in got["why"].split("—")[0], \
+            "the predicate read a number out of a value instead of counting rows"
+    finally:
+        _rm(d)
+
+
+def test_rows_recorded_against_another_step_do_not_count(env):
+    """Scoped like every other evidence predicate. Counting run-wide would let judgements from an
+    unrelated step satisfy this one, and the step is the unit a criterion belongs to."""
+    d = _spec(env, "zzz_cnt4", _CNT_SPEC)
+    try:
+        rc(["open", "zzz_cnt4", "--scope", "s1", "--run", "s1r"], env)
+        _cnt_run(env, "s1r", 2, 0)                      # two subjects on W01
+        _cnt_run(env, "s1r", 0, 2, step="W02")          # two verdicts on W02
+        got = _one_json(run(["close-step", "--run", "s1r", "--step", "W01", "--json"], env))
+        assert got["closed"] is False, "another step's rows satisfied this step's criterion"
+        assert "2 short" in got["why"], got["why"]
+    finally:
+        _rm(d)
+
+
+@pytest.mark.parametrize("block,fragment", [
+    ("completion: {type: counts_at_least, kind_a: verdict}", "kind_b"),
+    ("completion: {type: counts_at_least, kind_b: subject}", "kind_a"),
+    ("completion: {type: counts_at_least, kind_a: v, kind_b: s, min_count: 2}",
+     "unsupported key"),
+], ids=["no kind_b", "no kind_a", "unknown key"])
+def test_the_new_predicates_spec_is_a_closed_set_like_every_other(env, block, fragment):
+    """A typo here would weaken the criterion in silence, which is fatal everywhere else in a
+    spec and must be here too."""
+    d = _spec(env, "zzz_cnt5", f"""
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    {block}
+    directive: Do it.
+""")
+    try:
+        out = run(["validate", "zzz_cnt5"], env)
+        assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+        assert fragment in out.stderr, out.stderr
+    finally:
+        _rm(d)
