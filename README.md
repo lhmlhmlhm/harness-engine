@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   413 个测试
+└── tests/                   426 个测试
 ```
 
 ## 快速开始
@@ -1066,7 +1066,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 413 passed
+python3 -m pytest tests/ -q      # 426 passed
 ```
 
 分两类：
@@ -1285,6 +1285,41 @@ per-run 缓存会在长流程里过期——开头读到的「改了哪些文件
     not: ✘
       ✔ evidence_kinds contains 'open_question'   (actual: '[2 item(s)]')
 ```
+
+### 一个位置 scope 可以按「调用自己指名的目标」判定
+
+`path_prefix` 只问**调用方在哪**，而一次工具调用可以作用于它所在之外的目录。实测：
+
+```
+scope = /s，run 已开
+  cwd=/s/pkg   git commit -m y                  →  拦住（原有行为）
+  cwd=/other   git -C /s/pkg commit -m y        →  【修之前放行】
+  cwd=/other   git -C /elsewhere commit -m y    →  放行（目标不是这个 scope 的）
+```
+
+第四种 `scope_match` 模式 `path_prefix_or_payload` 把这个洞关掉：cwd 在 scope 内**或**
+调用的 payload 里指名了 scope 内的路径，都算这个 run 拥有这个动作。
+
+**加宽是逐 ability 的声明，绝不做默认** —— 这条规则是 `scope_covers` 自己的文档定的：
+
+> A false positive here is worse than a miss, and not symmetrically: being told to satisfy a
+> gate that belongs to somebody else's work leaves **forging that gate** as the only way forward.
+
+代价是诚实的、可测的：一个只是**被提到**的 scope 也会命中（commit message 里引了别的 repo 的
+路径）。两件事把它收窄：
+
+- **动作模式匹配是第一道过滤** —— `echo /s/pkg` 不是受守动作，即使提到也放行（有测试钉住，因为
+  这正是误拦面的边界）
+- **不声明的 flow 逐字节不变**，默认仍是最窄的 `exact`
+
+两个生产 ability 声明了它（`shipcheck-asis` repo / `push` workspace）；`cr-reviewer` 与
+`cr-to-task` 是 `in_payload`（一个 CR 或一个迭代不是一个位置），不受影响。
+
+**两种 payload 模式共用一份搜索实现。** 两份实现会漂，而漂移是隐形的：两个模式由不同 ability
+使用，分歧表现为其中一个悄悄匹配得更少。有测试同时对两个模式断言同一批边界。
+
+payload 那一侧**刻意不解析符号链接**（而两个目录会）：payload 是散文，猜哪些子串是路径本身就是
+一次猜测。所以符号链接写法在那一侧**漏**而不是**拦** —— 按上面那条不对称，漏是安全方向。
 
 ### scope 租约 —— 两条流程共用一个 scope 时，谁拥有这个动作
 

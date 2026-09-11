@@ -33,7 +33,7 @@ uses: [facts, gates, guards, hooks, obligations, optional_steps, phase_goals, pr
 when: |
   手上有一份方案文档要推成任务，或要收尾一条已推送的方案（关任务 / 归档）。
   ux 变体只负责派单——设计流程本身由 ux-agent 执行，推完不要自己接着做设计。
-scope_match: path_prefix
+scope_match: path_prefix_or_payload
 
 variants:
   # 单一事实源是源系统的 registry；这里只声明引擎需要知道的两件事：有哪些值、默认是谁。

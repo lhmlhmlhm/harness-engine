@@ -449,6 +449,24 @@ class Flow:
     def default_variant(self) -> str | None:
         return self.variant_spec.get("default")
 
+    @staticmethod
+    def _payload_names(scope_key: str, payload: dict | None) -> bool:
+        """Does the CALL ITSELF name this scope?
+
+        No early-out for an empty payload: `{}` serialises to a string the scope key cannot
+        appear in, so the search already answers "not mine". A guard clause there looked
+        defensive and could not change any outcome — the same inert-but-declared shape this
+        engine exists to remove.
+
+        Whole-token, so a scope of `CR-123` does not claim `CR-1234`. `/` is not a token
+        character, so a path scope of `/a/b` DOES name `/a/b/c` — which is what makes this
+        usable for a location scope whose action carries its own target.
+        """
+        import json as _json
+        hay = _json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+        return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(str(scope_key))}"
+                         rf"(?![A-Za-z0-9_-])", hay) is not None
+
     def scope_covers(self, scope_key: str, where: str, payload: dict | None = None) -> bool:
         """Does a run scoped to `scope_key` own an action happening at `where`?
 
@@ -469,17 +487,25 @@ class Flow:
         forward. That is why widening this is a per-ability declaration and never a default.
         """
         if self.scope_match == "in_payload":
-            # No early-out for an empty payload: `{}` serialises to a string the scope key
-            # cannot appear in, so the search below already answers "not mine". A guard clause
-            # there looked defensive and could not change any outcome — which is the same
-            # inert-but-declared shape this engine exists to remove, so it is not written.
-            import json as _json
-            hay = _json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
-            # Whole-token, so a scope of `CR-123` does not claim `CR-1234`.
-            return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(str(scope_key))}"
-                             rf"(?![A-Za-z0-9_-])", hay) is not None
+            return self._payload_names(scope_key, payload)
         if self.scope_match == "exact":
             return scope_key == where
+        # A LOCATION SCOPE WHOSE ACTION NAMES ITS OWN TARGET. `path_prefix` alone asks only
+        # where the CALLER is, and a tool call can act on a directory that is not there —
+        # `git -C <path> commit` was measured going through untouched while the same commit
+        # made from inside the scope was refused. Widening it is a per-ability DECLARATION and
+        # never a default, for the reason stated above: a scope that is merely MENTIONED (a
+        # commit message quoting a path) matches too, and being told to satisfy a gate that
+        # belongs to somebody else's work leaves forging that gate as the way forward.
+        #
+        # The payload side compares the scope key LITERALLY — it does not resolve symlinks the
+        # way the two directories below are resolved, because the payload is prose and the
+        # paths in it are not addressable without guessing which substrings are paths. A
+        # symlinked spelling in a command therefore MISSES rather than blocks, which is the
+        # safe direction for the asymmetry above.
+        if (self.scope_match == "path_prefix_or_payload"
+                and self._payload_names(scope_key, payload)):
+            return True
         # BOTH SIDES ARE RESOLVED, and skipping that is a silent miss rather than a loud one.
         # A runtime reports where it is by asking the OS, which answers with symlinks already
         # followed; a scope was recorded as whatever the opener typed. On a machine where a
@@ -562,7 +588,8 @@ GUARD_MATCH_KEYS = {"tool", "field", "pattern"}
 # does not exist until the run does.
 OUTPUT_KEYS = {"from_evidence", "select", "max_bytes"}
 SELECT_KEYS = {"anchor", "lines", "regex"}
-SCOPE_MATCH_MODES = ("exact", "path_prefix", "in_payload")
+SCOPE_MATCH_MODES = ("exact", "path_prefix", "in_payload",
+                     "path_prefix_or_payload")
 
 
 def _require_plain_id(value, where: str, path: Path) -> str:

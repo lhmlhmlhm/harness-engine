@@ -8404,3 +8404,161 @@ def test_the_pending_table_is_empty_and_still_exists(env):
     sys.path.insert(0, str(REPO))
     from engine.harness import NO_JSON_YET
     assert NO_JSON_YET == {}
+
+
+# ------------------------------------------------------------------ a location scope whose
+# ------------------------------------------------------------------ action names its own target
+
+_SM_SPEC = """
+scope_kind: repo
+scope_match: {mode}
+guards:
+  deploy: {{step: G01, matches: [{{tool: shell, field: command, pattern: 'deploy-thing'}}]}}
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: G01
+    phase: p1
+    gate: affirm
+    title: The gate that guards deploying
+    directive: Confirm.
+"""
+
+
+def _covers(mode, scope_key, where, payload):
+    """Ask the comparison directly. Loading a spec per case would test the loader, not this."""
+    sys.path.insert(0, str(REPO))
+    from engine import flow as _f
+
+    class _Probe:
+        _payload_names = staticmethod(_f.Flow._payload_names)
+        scope_covers = _f.Flow.scope_covers
+
+        def __init__(self, m):
+            self.scope_match = m
+
+    return _Probe(mode).scope_covers(scope_key, where, payload)
+
+
+@pytest.mark.parametrize("where,command,prefix_only,or_payload,why", [
+    ("/s/pkg", "git commit -m y",                  True,  True,
+     "the caller is inside the scope and the command names nothing — the original case"),
+    ("/other", "git -C /s/pkg commit -m y",        False, True,
+     "THE HOLE: the caller is outside, and the command names a target inside"),
+    ("/other", "git -C /elsewhere commit -m y",    False, False,
+     "a target that is not this scope's must not be claimed"),
+    ("/other", "git commit -m 'see /s/README'",    False, True,
+     "KNOWN AND ACCEPTED: a scope merely MENTIONED matches too"),
+    ("/sX",    "git commit -m y",                  False, False,
+     "a sibling sharing a prefix is not inside — compared by path component"),
+])
+def test_a_location_scope_can_be_widened_to_the_target_the_call_names(
+        where, command, prefix_only, or_payload, why):
+    """`path_prefix` asks only where the CALLER is; a tool call can act somewhere else.
+
+    Both columns are asserted in one table on purpose: the value of the new mode is exactly the
+    DIFFERENCE between them, and a table that only pinned the new column would still pass if the
+    old one had been widened to match — which is the change this must not become (see the test
+    below).
+    """
+    payload = {"command": command}
+    assert _covers("path_prefix", "/s", where, payload) is prefix_only, why
+    assert _covers("path_prefix_or_payload", "/s", where, payload) is or_payload, why
+
+
+def test_widening_is_a_declaration_and_never_a_default():
+    """The rule the comparison's own docstring sets, pinned.
+
+    A false positive here is worse than a miss and not symmetrically: being told to satisfy a
+    gate that belongs to somebody else's work leaves FORGING that gate as the way forward. So a
+    flow that did not ask for this keeps the narrow comparison, and the default stays narrowest.
+    """
+    sys.path.insert(0, str(REPO))
+    from engine import flow as _f
+
+    named = {"command": "git -C /s/pkg commit"}
+    assert _covers("path_prefix", "/s", "/other", named) is False, \
+        "an undeclared flow was widened"
+    assert _covers("exact", "/s", "/other", named) is False
+    # And the default a spec gets when it says nothing at all.
+    d = _spec({}, "zzz_sm_def", """
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+""")
+    try:
+        assert _f.load("zzz_sm_def").scope_match == "exact"
+    finally:
+        _rm(d)
+
+
+def test_the_two_payload_modes_share_one_search():
+    """`in_payload` and the widened mode must agree on what "the call names it" means.
+
+    Two implementations of one question drift, and the drift would be invisible: each mode is
+    exercised by different abilities, so a divergence shows up as one of them quietly matching
+    less than the other.
+    """
+    for mode in ("in_payload", "path_prefix_or_payload"):
+        # Whole-token: a scope of CR-123 does not claim CR-1234.
+        assert _covers(mode, "CR-123", "/anywhere", {"crId": "CR-123"}) is True, mode
+        assert _covers(mode, "CR-123", "/anywhere", {"crId": "CR-1234"}) is False, mode
+        # `/` is not a token character, which is what makes a path scope name its children.
+        assert _covers(mode, "/a/b", "/anywhere", {"command": "x /a/b/c"}) is True, mode
+        assert _covers(mode, "/a/b", "/anywhere", {"command": "x /a/bc"}) is False, mode
+
+
+def test_an_unknown_scope_match_mode_is_fatal_and_lists_the_legal_ones(env):
+    """The closed set, so a typo cannot silently pick a comparison nobody chose."""
+    d = _spec(env, "zzz_sm_bad", """
+scope_match: path_prefix_or_paylod
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: W01
+    phase: p1
+    directive: Do it.
+""")
+    try:
+        out = run(["validate", "zzz_sm_bad"], env)
+        assert out.returncode == BAD_SPEC, out.stdout + out.stderr
+        assert "scope_match must be one of" in out.stderr
+        assert "path_prefix_or_payload" in out.stderr, "the legal modes are not listed"
+    finally:
+        _rm(d)
+
+
+@pytest.mark.parametrize("cwd_in_scope,command,code,why", [
+    (False, "deploy-thing", OK,
+     "outside, and the command names no directory — ownership is not answerable"),
+    (False, "deploy-thing --at {scope}/pkg", BLOCKED,
+     "outside, but the command names a target inside the scope"),
+    (False, "deploy-thing --at /tmp/unrelated-xyz", OK,
+     "outside, naming a target that is not this scope's"),
+    (True, "deploy-thing", BLOCKED,
+     "inside — the behaviour that already worked, unchanged"),
+    (False, "echo {scope}/pkg", OK,
+     "MENTIONS the scope but is not a guarded action: the pattern is the first filter, which "
+     "is what bounds the false positive the mode accepts"),
+])
+def test_the_widened_mode_reaches_guard_tool(env, tmp_path, cwd_in_scope, command, code, why):
+    """End to end through the hook's own entry point, not just the comparison."""
+    scope = tmp_path / "scoped"
+    (scope / "pkg").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    d = _spec(env, "zzz_sm_e2e", _SM_SPEC.format(mode="path_prefix_or_payload"))
+    try:
+        assert rc(["open", "zzz_sm_e2e", "--scope", str(scope), "--run", "e1"], env) == OK
+        got = rc(["guard-tool", "--tool", "shell",
+                  "--input-json", json.dumps({"command": command.format(scope=scope)}),
+                  "--cwd", str(scope if cwd_in_scope else outside)], env)
+        assert got == code, why
+    finally:
+        _rm(d)

@@ -30,7 +30,7 @@ when: |
 # 本 ability 的 scope 就是一个代码库位置，所以运行时在其子目录里发生的动作属于本 run。
 # 默认是 exact —— 放宽是**每个 ability 显式声明**的，因为误判比漏判更糟：
 # 被要求去满足一个不属于自己工作的门，会让伪造那个门成为唯一出路。
-scope_match: path_prefix
+scope_match: path_prefix_or_payload
 prose:
   root: prose/
   topics_dir: topics
