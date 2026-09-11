@@ -1950,9 +1950,17 @@ def cmd_require(args) -> int:
         try:
             f = _load_flow_or_exit(entry["ability"])
             kind, match, readable = f.scope_kind, f.scope_match, True
+            # WHETHER IT REACHES HERE, not merely whether it is written down. The machine record
+            # is machine-WIDE, so listing it under a heading that says "applying at <dir>" claimed
+            # something false in every directory the entries do not cover — asked from an
+            # unrelated repository it reported two requirements as if they bound this work. Both
+            # facts are kept: an entry is still shown (someone asking what they declared must see
+            # all of it) and now says whether it covers the place being asked from.
+            covers = f.scope_covers(entry["scope_key"], here, {})
         except SystemExit:
-            kind, match, readable = None, None, False
-        rows.append({**entry, "scope_kind": kind, "scope_match": match, "readable": readable})
+            kind, match, readable, covers = None, None, False, None
+        rows.append({**entry, "scope_kind": kind, "scope_match": match, "readable": readable,
+                     "covers_cwd": covers})
     if args.json:
         return _emit(args, {"record": str(policy.path()), "cwd": here,
                             "marker": policy.MARKER, "problems": list(problems),
@@ -1966,13 +1974,18 @@ def cmd_require(args) -> int:
         print("With nothing declared the guard enforces the gates inside an open run and allows")
         print("everything when nothing is open — exactly as it did before this existed.")
         return OK
-    print(f"applying at {here}")
+    n_here = sum(1 for r in rows if r["covers_cwd"])
+    print(f"asked from {here}")
+    print(f"  {n_here} of {len(rows)} declared requirement(s) reach this directory")
     for r in rows:
         mark = "⛔" if r["strict"] else "•"
-        print(f"{mark} {r['ability']:<16} {r['scope_kind'] or '?'}={r['scope_key']}"
+        reach = "HERE " if r["covers_cwd"] else ("  ?  " if r["covers_cwd"] is None else "     ")
+        print(f"{reach}{mark} {r['ability']:<16} {r['scope_kind'] or '?'}={r['scope_key']}"
               + ("  (strict)" if r["strict"] else "")
               + ("" if r["readable"] else "  ⚠️  its flow cannot be read from here"))
-        print(f"    from {r['source']}")
+        print(f"      from {r['source']}")
+    print("\n`HERE` marks the ones that bind work in this directory. The rest are declared on "
+          "this\nmachine but scoped elsewhere.")
     print("\nThere is no recorded way to skip one of these yet: a one-off exception means "
           "removing\nthe declaration, which is a change to a file rather than a logged decision.")
     return OK

@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   453 个测试
+└── tests/                   454 个测试
 ```
 
 ## 手写文档也有守卫了，而可推导的那部分改成生成
@@ -1184,7 +1184,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 453 passed
+python3 -m pytest tests/ -q      # 454 passed
 ```
 
 分两类：

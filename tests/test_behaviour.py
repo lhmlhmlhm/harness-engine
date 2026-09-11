@@ -8819,3 +8819,45 @@ def test_the_remedy_named_matches_where_the_requirement_lives(env, tmp_path):
         assert "editing that file" not in err
     finally:
         _rm(d)
+
+def test_require_says_which_declarations_reach_where_it_was_asked_from(env, tmp_path):
+    """The machine record is machine-WIDE, so a heading saying "applying at <dir>" was false in
+    every directory its entries do not cover.
+
+    Asked from an unrelated repository it reported two requirements as though they bound the work
+    there. Both facts have to survive: somebody asking what they declared must still see all of
+    it, and somebody asking what binds them HERE must be able to tell. So nothing is filtered out
+    and each row says whether it reaches the place being asked from.
+    """
+    inside = tmp_path / "scoped" / "deep"
+    inside.mkdir(parents=True)
+    outside = tmp_path / "unrelated"
+    outside.mkdir()
+    d = _spec(env, "zzz_reach", _MK_SPEC)
+    try:
+        assert rc(["require", "--add", "zzz_reach", "--scope-key",
+                   str(tmp_path / "scoped")], env) == OK
+        assert rc(["require", "--add", "zzz_reach", "--scope-key", "/elsewhere/nope"], env) == OK
+
+        def ask(cwd):
+            out = subprocess.run([sys.executable, str(HARNESS), "require", "--json"],
+                                 capture_output=True, text=True, cwd=str(cwd),
+                                 env={**os.environ, **env})
+            assert out.returncode == OK, out.stderr
+            return json.loads(out.stdout)
+
+        got = ask(inside)
+        reach = {r["scope_key"]: r["covers_cwd"] for r in got["required"]}
+        assert reach == {str(tmp_path / "scoped"): True, "/elsewhere/nope": False}, reach
+
+        got = ask(outside)
+        assert all(r["covers_cwd"] is False for r in got["required"]), got
+        # And the text form must not claim otherwise.
+        text = subprocess.run([sys.executable, str(HARNESS), "require"],
+                              capture_output=True, text=True, cwd=str(outside),
+                              env={**os.environ, **env}).stdout
+        assert "0 of 2" in text, text
+        assert "HERE" in text, "the legend vanished, so a reader cannot decode the marker"
+        assert "\nHERE" not in text, "a row was marked as reaching a directory it does not"
+    finally:
+        _rm(d)
