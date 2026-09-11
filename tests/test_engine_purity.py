@@ -283,6 +283,65 @@ def test_condition_operators_are_all_domain_free():
             )
 
 
+def _declared_scope_kinds() -> list[str]:
+    """Every installed ability's `scope_kind`, read from disk.
+
+    Derived rather than listed for the reason the roster above states: a hardcoded list goes
+    stale silently, and a stale guard is worse than none because it reads as coverage.
+    """
+    import yaml
+    out = set()
+    for spec in sorted(ABILITIES_DIR.glob("*/flow.yaml")):
+        d = yaml.safe_load(spec.read_text(encoding="utf-8")) or {}
+        k = str(d.get("scope_kind") or "").strip()
+        if k:
+            out.add(k)
+    return sorted(out)
+
+
+def test_scope_kinds_are_an_abilitys_word_and_never_the_engine_s():
+    """`scope_kind` is a FREE STRING: the engine validates that it is non-empty and nothing else.
+
+    That is what keeps one engine usable by a flow about a repository, a flow about a review, and a
+    flow about a notebook — none of those words is in here. It holds today (measured: zero
+    occurrences), and nothing was keeping it that way: the roster guard above derives ability
+    NAMES from disk, but a `scope_kind` VALUE is a different string, and none of the shipped values
+    appears in FORBIDDEN_TOKENS. A future `if scope_kind == "..."` would have passed every test in
+    this file.
+
+    Banned in the QUOTED LITERAL form only, and that is a measured decision rather than a weak
+    one. The identifier form was tried and is unusable here: one installed kind is two characters
+    (`cr`), so `_cr` fires on `obligation_created` — four innocent hits on the first run. A noisy
+    detector earns an allowlist, an allowlist grows, and a grown allowlist is the coupling coming
+    back in; this file says so about the tool names for the same reason.
+        
+    The quoted form is also the one that MEANS the coupling. `if scope_kind == "..."`,
+    `HANDLERS = {"...": ...}` and `KIND = "..."` are all caught; what is not caught is a prefix
+    test on a fragment, which is pathological rather than tempting.
+    """
+    kinds = _declared_scope_kinds()
+    assert len(kinds) >= 3, (
+        f"only {kinds} installed — this guard needs several UNLIKE scope kinds to mean anything, "
+        f"the same way the vocabulary test below needs two unlike abilities"
+    )
+    hits = []
+    for path, text in _engine_sources():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for kind in kinds:
+                for form in (f'"{kind}"', f"'{kind}'"):
+                    if form in line:
+                        hits.append(f"{path.name}:{lineno} {form}")
+    assert not hits, (
+        "an ability's scope_kind appears in engine code:\n  "
+        + "\n  ".join(hits)
+        + "\n\nThe engine must not know what kind of thing a scope IS. A run is scoped to "
+          "(scope_kind, scope_key)\nand both are opaque to it — that is what lets one engine "
+          "serve a flow about a repository and\na flow about a review. If a mechanism needs to "
+          "vary by the kind of scope, the flow declares\nit (see scope_match), it is not branched "
+          "on here."
+    )
+
+
 def test_abilities_carry_the_vocabulary():
     """The mirror of the above: vocabulary must actually live in the specs.
 
