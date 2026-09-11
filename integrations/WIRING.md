@@ -6,6 +6,31 @@
 它此前复述过，然后如实漂了：写着一个已经搬走的状态库位置、一张少一档的退出码表、一条只在
 一台机器上成立的路径。**所以下面每处「查一下」都是一条命令，不是一段抄下来的话。**
 
+而这条规则此前只是**一句声明**，于是又被违反了四次——一个契约行数、一个规则条数、一个 spec
+体积、两个用例条数，写下时全都是对的。现在它有两样东西托着：下面这张表是**生成的**（改了不
+重生成就会有测试变红），而这份文档提到的每个命令、flag、路径、环境变量与常量都有一条测试去
+核对它真的存在。
+
+<!-- BEGIN GENERATED — python3 integrations/render-wiring.py --write -->
+
+| 本安装实测 | | 谁产出它 |
+|---|---|---|
+| 驱动契约（`--portable`） | 229 行 | `harness brief --portable` |
+| 其中不可派生的判断规则 | 7 条 | `brief.JUDGMENT` |
+| 只在用到时才渲染的小节 | 10 个 | `brief._CONDITIONAL` |
+| 最大的一条 flow | `shipcheck-asis`，102 步 | `harness abilities` |
+| 它的 spec 与散文 | 62 KB + 1338 行 | 磁盘 |
+| 一步的 directive（中位数） | 2 行 | 同上 |
+| 适配器用例 translation | 5 条 | `harness adapter-contract` |
+| 适配器用例 resilience | 5 条 | 同上 |
+| 适配器用例 end_to_end | 7 条 | 同上 |
+| 状态库默认位置 | `$XDG_STATE_HOME/harness-engine`（未设时 `~/.local/state/harness-engine`） | `harness init` 会打印实际路径 |
+
+<!-- END GENERATED -->
+
+判断留在散文里，因为它不可派生：为什么 hook 是唯一的强制点、为什么隔离轴是 scope 而不是 agent、
+为什么 fail-open 是铁律。那些东西不该进代码，也不会因为一次重构而变旧。
+
 ## 1. 驱动契约 —— 生成，不要手写
 
 ```sh
@@ -15,7 +40,7 @@ harness brief --write             # 或者单独刷新它
 ```
 
 它按**这套安装**产出：真实存在的子命令、真实的退出码、以及**已装 flow 实际用到的机制**——
-没有 variants 的安装不会被讲 variants。229 行，其中不可派生的只有 7 条判断规则。
+没有 variants 的安装不会被讲 variants。它的规模与其中「不可派生」的比例见上面那张生成表。
 
 **有两份副本，指错会给 agent 一条跑不通的路径：**
 
@@ -40,9 +65,10 @@ harness brief --write             # 或者单独刷新它
 反复跑的命令。一份没人重新生成的生成物，就是一份多几个步骤的手写文件——而一份过期的契约会
 **静默地给 agent 错的指令**，那正是「改成生成」要消掉的失效，不是把它搬个地方。
 
-⚠️ **不要**把 `flow.yaml` 或 `prose/` 放进 `resources`。转写后的交付流程是 62 KB spec + 1,338 行
-散文；预载它们会把渐进披露整套设计废掉——那套设计的意义就是 agent **不**预载，而是每步问
-`harness next`，拿到 directive（约 2 行）+ 指针，需要时才 `harness show`。
+⚠️ **不要**把 `flow.yaml` 或 `prose/` 放进 `resources`。一条成熟流程的 spec 与散文合起来是
+几十 KB 量级（上表有本安装的实测值）；预载它们会把渐进披露整套设计废掉——那套设计的意义就是
+agent **不**预载，而是每步问 `harness next`，拿到 directive（上表的中位数行数）+ 指针，需要时
+才 `harness show`。
 
 ## 2. hook —— 唯一的强制点
 
@@ -78,8 +104,8 @@ harness brief | sed -n '/Tools the runtime hook must cover/,$p'
 harness adapter-contract          # JSON：I/O 契约 + translation + resilience + end_to_end
 ```
 
-- `translation` —— 引擎退出码 → 你的 allow/block，5 条。**只有 BLOCKED 变成拦，其余全放行。**
-- `resilience` —— 输入不是 JSON、引擎不存在、调用超时、适配器自己崩：5 条，全部放行，其中
+- `translation` —— 引擎退出码 → 你的 allow/block。**只有 BLOCKED 变成拦，其余全放行。**
+- `resilience` —— 输入不是 JSON、引擎不存在、调用超时、适配器自己崩：全部放行，其中
   「引擎不存在」还必须**在 stderr 说出来**（「查不到该查什么」和「没什么要查」不能长得一样）。
 - `end_to_end` —— 派生自已装 flow 的真实 action / gate 步骤 / 工具 / 正则。**载荷要你自己
   构造**：一个匹配任意正则的字符串没法从正则反推出来，而一个「碰巧不匹配」的假载荷会通过
