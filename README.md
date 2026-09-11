@@ -27,7 +27,7 @@ harness-engine/
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
 │   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
 │   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-└── tests/                   454 个测试
+└── tests/                   464 个测试
 ```
 
 ## 手写文档也有守卫了，而可推导的那部分改成生成
@@ -152,9 +152,59 @@ everything when nothing is open — exactly as it did before this existed.
 |---|---|---|
 | **驱动契约进上下文** | `harness brief --write` 的输出作为 agent 的常驻 resource | agent 不知道有这套东西 |
 | **拦截面** | runtime 的 pre-tool hook 调 `harness guard-tool`，把它的 exit 4 翻成 runtime 的「阻断」 | **门完全不生效**——这是唯一不依赖 agent 配合的机制 |
-| **证人** | `HARNESS_WITNESS=transcript` + `HARNESS_TRANSCRIPT=<会话转录路径>` | 「人确认过」退化成 agent 自签：记一条 violation 然后**放过** |
+| **证人** | 四个变量，见下 | 「人确认过」退化成 agent 自签：记一条 violation 然后**放过** |
 
 后两条最容易漏，**因为漏了之后一切看起来正常**——没有报错、没有警告，只是保证不在了。
+
+#### 证人要四个变量，而其中两个是「你的转录长什么样」
+
+```sh
+HARNESS_WITNESS=transcript
+HARNESS_TRANSCRIPT=<这一次会话的转录文件>
+HARNESS_TRANSCRIPT_ROLE_PATH=<哪个字段说出「这一条是谁说的」>    # 点号路径，如 kind 或 data.role
+HARNESS_TRANSCRIPT_HUMAN=<该字段里哪些值意味着一个人>            # 逗号分隔，如 Prompt
+```
+
+**后两个的默认值对一个真实 runtime 是错的，这是实测出来的。** 引擎默认在 `role` / `author` /
+`from` 三个字段名里找，人类值认 `user` / `human`。而一个真实 runtime 每行都是
+`{kind, data, version}`：角色在 `kind` 上，人类回合拼作 `Prompt`。用默认去读那份转录会数到
+**0 个人类回合**，于是**每一道门都被拒**——而且会一边拒一边说「这份转录里根本没有人类回合」，
+那句话对解析是真的，对会话是假的。
+
+**修法不是让引擎学会那个 runtime 的拼法**，而是用同一条缝：**知识从外面声明，引擎只施加它**。
+这和 `guards.<action>.matches` 把「什么命令算一次提交」放在 flow 里、适配器永不学习工具含义是
+同一个形状。第三个 runtime 用第三种拼法时，引擎同样不用改。有一条测试直接断言引擎源码里**没有
+任何 runtime 的拼法被硬编码**。
+
+**两种失败被分开说，因为它们的修法不同：**
+
+```
+声明的路径找不到该字段  →  "no record names a side … This is 'I cannot see who spoke',
+                            NOT 'nobody spoke'"，并报出用了哪条路径
+找到了但没有值意味着人  →  "N record(s) name a side, and none of them means a person"，
+                            并报出【实际出现的值】—— 那就是全部的修法线索：
+                            Values present: 'AssistantMessage'×268, 'ToolResults'×250, 'Prompt'×18
+```
+
+那份诊断**有上限**（最多 5 个值、每个 24 字符）：一条写错的路径可能指向**内容**，而把一段会话
+无界地倒进日志，比它要解释的那个问题更糟。
+
+#### 这段声明该住在哪里：不在引擎里，也不在 agent 手上
+
+```
+❌ 引擎里          转录路径是某个 runtime 的磁盘布局，而 proof.py 的文档正是禁止它知道
+❌ agent 的配置    kiro-cli 的 agent JSON 没有顶层 env（env 只存在于 mcpServers 内部）
+❌ 静态 plist      路径要 $KIRO_SESSION_ID，而它在会话产生之前不存在
+❌ brief 教的 alias  那条 alias 是【agent 自己】用不用的 —— 一个被约束者可以拒绝的证人不算证人
+✅ PATH 上的一个 shim  在调用时才展开会话 id，且不在 agent 的逐次控制之内
+```
+
+shim 只在**转录文件真的存在**时才声明 transcript 模式。指向一个不存在的路径会让每道门以「那不是
+一个文件」被拒，读起来像机制坏了而不是不在；什么都不声明时引擎回落到自己的默认，**而那个降级会被
+记成一条 violation**，于是「没接证人」出现在 `harness audit` 里而不是无声通过。
+
+agent 仍然可以绕过它——直接调引擎自己的 `bin/harness`。那是**颠覆而不是遗漏**（与 required-flows
+记录划的是同一条线），而且是一次可见的动作，不是一次静默的缺失。
 
 两件配套的事实：
 
@@ -1184,7 +1234,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 454 passed
+python3 -m pytest tests/ -q      # 464 passed
 ```
 
 分两类：

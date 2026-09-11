@@ -130,6 +130,32 @@ open run、静默全放行。适配器会显式检查并报警而不是静默放
 
 三个环境变量的完整清单由 `harness brief` 的 Environment 一节给出。
 
+## 证人：四个变量，其中两个描述你的转录长什么样
+
+gate 的「人确认过」由 `HARNESS_WITNESS=transcript` 强制，而它要数出人类回合，就得知道你的转录
+把「这一条是谁说的」写在哪：
+
+```sh
+HARNESS_WITNESS=transcript
+HARNESS_TRANSCRIPT=<这一次会话的转录文件>
+HARNESS_TRANSCRIPT_ROLE_PATH=<点号路径，如 kind 或 data.role>
+HARNESS_TRANSCRIPT_HUMAN=<逗号分隔，如 Prompt>
+```
+
+**默认值（字段名 `role`/`author`/`from`，人类值 `user`/`human`）对一个真实 runtime 是错的**，
+实测过：它每行都是 `{kind, data, version}`，角色在 `kind`，人类回合拼作 `Prompt`。用默认去读会数到
+0 个人类回合，于是每道门都被拒——一边拒一边说「这份转录里根本没有人类回合」，那句话对解析为真、
+对会话为假。所以两种失败被分开报，因为修法不同：**找不到那个字段**会说出用了哪条路径，
+**找到了但没有值意味着人**会报出实际出现的值（有上限：一条写错的路径可能指向内容）。
+
+引擎不学任何 runtime 的拼法——同 `guards.<action>.matches`：知识在外面声明，引擎只施加。
+
+**这段声明不能放在引擎里**（转录路径是你的磁盘布局），**也不能只放在 agent 手上**（一个被约束者
+可以拒绝的证人不算证人）。`HARNESS_TRANSCRIPT` 通常还需要一个只在会话开始后才存在的 id，所以静态
+配置也表达不了。可行的位置是**一个在 PATH 上的包装脚本**：它在调用时展开 id、声明这四个变量、再
+`exec` 引擎。只在转录文件真的存在时才声明——否则引擎回落到自己的默认，而**那个降级会被记成一条
+violation**，于是缺失出现在 `harness audit` 里而不是无声通过。
+
 ## 两个面，而不是一个
 
 | 面 | 谁发起 | 形态 | 性质 |

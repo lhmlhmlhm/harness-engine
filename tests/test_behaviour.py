@@ -8861,3 +8861,172 @@ def test_require_says_which_declarations_reach_where_it_was_asked_from(env, tmp_
         assert "\nHERE" not in text, "a row was marked as reaching a directory it does not"
     finally:
         _rm(d)
+
+
+# ------------------------------------------------------------------ where a transcript names the
+# ------------------------------------------------------------------ side, declared not assumed
+
+def _kiro_shaped(tmp_path, n_human: int, n_other: int = 3) -> Path:
+    """A transcript in the shape a REAL runtime was measured to write.
+
+    Every record is `{kind, data, version}`; the side lives in `kind` and a human turn is spelled
+    `Prompt`. Under the engine's default field names this file names no side at all — which is the
+    case the declaration exists for, so the fixture is that shape rather than a convenient one.
+    """
+    p = tmp_path / f"kiro-{n_human}.jsonl"
+    lines = []
+    for i in range(n_human):
+        lines.append(json.dumps({"kind": "Prompt", "version": 1,
+                                 "data": {"content": f"turn {i}", "message_id": i}}))
+        lines.append(json.dumps({"kind": "AssistantMessage", "version": 1,
+                                 "data": {"content": "ok", "message_id": i}}))
+    for i in range(n_other):
+        lines.append(json.dumps({"kind": "ToolResults", "version": 1,
+                                 "data": {"content": "", "results": [], "message_id": i}}))
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def _vouch(tmp_path, transcript, cursor=None, **env):
+    """Call the witness in-process with a controlled environment."""
+    import importlib
+    sys.path.insert(0, str(REPO))
+    keep = {k: os.environ.get(k) for k in
+            ("HARNESS_WITNESS", "HARNESS_TRANSCRIPT",
+             "HARNESS_TRANSCRIPT_ROLE_PATH", "HARNESS_TRANSCRIPT_HUMAN")}
+    try:
+        for k in keep:
+            os.environ.pop(k, None)
+        os.environ["HARNESS_WITNESS"] = "transcript"
+        os.environ["HARNESS_TRANSCRIPT"] = str(transcript)
+        os.environ.update({k: v for k, v in env.items() if v is not None})
+        proof = importlib.import_module("engine.proof")
+        return proof.vouch(cursor=cursor)
+    finally:
+        for k, v in keep.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def _refusal(tmp_path, transcript, **env) -> str:
+    sys.path.insert(0, str(REPO))
+    from engine import proof
+    with pytest.raises(proof.NoWitness) as e:
+        _vouch(tmp_path, transcript, **env)
+    return str(e.value)
+
+
+def test_a_declared_role_path_finds_a_side_the_defaults_cannot(tmp_path):
+    """The measured case: a real runtime that spells the side somewhere else entirely.
+
+    Without a declaration this transcript is unreadable to the witness, so every gate is refused —
+    while a real session sits there with human turns in it.
+    """
+    t = _kiro_shaped(tmp_path, 4)
+    got = _vouch(tmp_path, t,
+                 HARNESS_TRANSCRIPT_ROLE_PATH="kind", HARNESS_TRANSCRIPT_HUMAN="Prompt")
+    assert (got["witnessed"], got["human_turns"]) == (True, 4), got
+    # What was APPLIED rides in the proof: read back later, it says how the count was arrived at
+    # instead of leaving it to be guessed from a past process's environment.
+    assert got["role_path"] == "kind" and got["human_values"] == ["prompt"]
+
+
+def test_the_engine_learns_no_runtime_spelling_of_its_own(tmp_path):
+    """The declaration is the whole mechanism — nothing is special-cased inside the witness.
+
+    Pinned because the tempting fix was a branch for the runtime that was measured, and one such
+    branch is how a base that claims to know no runtime ends up knowing one.
+    """
+    t = _kiro_shaped(tmp_path, 2)
+    assert _vouch(tmp_path, t, HARNESS_TRANSCRIPT_ROLE_PATH="kind",
+                  HARNESS_TRANSCRIPT_HUMAN="Prompt")["human_turns"] == 2
+    # A third spelling needs no engine change either.
+    p = tmp_path / "third.jsonl"
+    p.write_text("\n".join(json.dumps({"envelope": {"speaker": s}})
+                           for s in ("HUMAN", "BOT", "HUMAN")) + "\n", encoding="utf-8")
+    got = _vouch(tmp_path, p, HARNESS_TRANSCRIPT_ROLE_PATH="envelope.speaker",
+                 HARNESS_TRANSCRIPT_HUMAN="human")
+    assert got["human_turns"] == 2, got
+    src = (REPO / "engine" / "proof.py").read_text(encoding="utf-8")
+    for spelling in ("Prompt", "AssistantMessage", "kind"):
+        assert f'"{spelling}"' not in src and f"'{spelling}'" not in src, \
+            f"{spelling!r} is hardcoded in the witness; it should only ever be declared"
+
+
+def test_cannot_see_who_spoke_is_a_different_refusal_from_nobody_spoke(tmp_path):
+    """The pair this engine keeps being corrected for conflating.
+
+    A wrong path refuses EVERY gate. Told "no human turns", the reader looks at the session — which
+    is fine — and concludes the mechanism is broken. Told which path was used, they fix the path.
+    """
+    t = _kiro_shaped(tmp_path, 4)
+
+    # Field never found. The path asserted on is deliberately NOT one the message suggests as an
+    # example: asserting on `data.role` passed even when the reported path was replaced by a
+    # constant, because the hint text at the end of the same message contains it. A guard
+    # satisfied by static prose is a guard asserting nothing.
+    msg = _refusal(tmp_path, t, HARNESS_TRANSCRIPT_ROLE_PATH="envelope.who")
+    assert "names a side" in msg and "cannot see who spoke" in msg
+    looked = [l for l in msg.splitlines() if "Looked at:" in l]
+    assert looked and "envelope.who" in looked[0], \
+        f"the refusal does not name the path it used: {msg}"
+
+    # Field found, but no value in it means a person — a different sentence, and it must name the
+    # values that ARE there, because that is the entire remedy.
+    msg = _refusal(tmp_path, t, HARNESS_TRANSCRIPT_ROLE_PATH="kind")
+    assert "none of them means a person" in msg
+    assert "'Prompt'" in msg and "AssistantMessage" in msg, msg
+    assert "HARNESS_TRANSCRIPT_HUMAN" in msg, "the remedy is not named"
+    assert "cannot see who spoke" not in msg, "the two refusals collapsed into one"
+
+
+def test_the_diagnostic_does_not_echo_an_unbounded_slice_of_a_session(tmp_path):
+    """A mis-declared path can point at CONTENT.
+
+    Reporting what it found is what makes the refusal actionable, and reporting all of it would be
+    a worse failure than the one being explained — this runs on somebody's real session.
+    """
+    p = tmp_path / "wide.jsonl"
+    p.write_text("\n".join(json.dumps({"role": f"secret-{i}-" + "x" * 200})
+                           for i in range(50)) + "\n", encoding="utf-8")
+    msg = _refusal(tmp_path, p, HARNESS_TRANSCRIPT_HUMAN="nobody")
+    assert "x" * 60 not in msg, "an unbounded value was echoed into the refusal"
+    assert msg.count("secret-") <= 5, f"more than five distinct values were echoed:\n{msg}"
+
+
+def test_the_defaults_still_work_for_a_transcript_that_needs_no_declaration(tmp_path):
+    """Backward compatibility, asserted rather than assumed: the declaration is an ADDITION."""
+    t = transcript_with(tmp_path, 3)
+    got = _vouch(tmp_path, t)
+    assert (got["witnessed"], got["human_turns"]) == (True, 3), got
+    assert got["role_path"] == ["role", "author", "from"]
+
+
+@pytest.mark.parametrize("dotted,why", [
+    ("data.0.role", "no list indexing — a path needing it is a parser, not a declaration"),
+    ("data.*.role", "no wildcards, same reason"),
+    ("data", "a path landing on a dict is not a value"),
+    ("nope", "a segment that is not there"),
+])
+def test_a_path_that_does_not_resolve_is_not_found_rather_than_a_crash(tmp_path, dotted, why):
+    """`_dig` runs against every record of somebody's live session; an exception here would take
+    down a gate with a traceback instead of a refusal that says what to fix."""
+    t = _kiro_shaped(tmp_path, 2)
+    msg = _refusal(tmp_path, t, HARNESS_TRANSCRIPT_ROLE_PATH=dotted)
+    assert "names a side" in msg, why
+
+
+def test_the_cursor_still_refuses_a_second_gate_in_one_turn_under_a_declared_path(tmp_path):
+    """The property the witness exists for, verified on the declared path rather than assumed to
+    have survived it."""
+    t = _kiro_shaped(tmp_path, 2)
+    env = {"HARNESS_TRANSCRIPT_ROLE_PATH": "kind", "HARNESS_TRANSCRIPT_HUMAN": "Prompt"}
+    first = _vouch(tmp_path, t, **env)
+    assert first["human_turns"] == 2
+    msg = _refusal(tmp_path, t, **env) if False else None
+    sys.path.insert(0, str(REPO))
+    from engine import proof
+    with pytest.raises(proof.NoWitness) as e:
+        _vouch(tmp_path, t, cursor={"human_turns": 2}, **env)
+    assert "no new human turn since the last gate" in str(e.value)
