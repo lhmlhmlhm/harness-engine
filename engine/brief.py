@@ -31,6 +31,10 @@ machinery it will never meet, and it makes the paragraphs that DO apply harder t
 """
 from __future__ import annotations
 
+# The marker's NAME, not a copy of it: this file prints it, and a second spelling of it
+# would be the kind of copy every other surface here has already been de-duplicated into.
+from . import policy
+
 # Exit codes, keyed by NAME rather than by number. The numbers live with the CLI; this holds
 # what each one MEANS. A test asserts the two sets of names match exactly, so adding a code
 # without describing it — the drift that happened — fails the build instead of shipping.
@@ -128,7 +132,9 @@ JUDGMENT: tuple[tuple[str, str, str], ...] = (
         "When a task will change files or make an external effect, open a run FIRST.",
         "The runtime guard allows every action while no run is open — it runs before every tool "
         "call and must never brick a machine. The one exception is a scope someone has declared "
-        "to REQUIRE a flow: there it refuses and names the run to open. Everywhere else "
+        "to REQUIRE a flow — in a record on the machine, or in a `.harness-required` file in the "
+        "directory tree you are working in: there it refuses and names the run to open. "
+        "Everywhere else "
         "skipping this is not blocked, and afterwards nothing distinguishes a flow that was "
         "followed from one that was never started.",
     ),
@@ -281,7 +287,13 @@ def render(
         a("## Where a flow is MANDATORY here")
         a("")
         a("For these scopes the guard does NOT allow an action while no run is open — it refuses")
-        a("and names the run to open. Declared by whoever owns this machine, not by you.")
+        a("and names the run to open. Not declared by you, and not yours to remove.")
+        a("")
+        a(f"This list is the machine's own record. A DIRECTORY can declare it too, by holding a")
+        a(f"`{policy.MARKER}` file — including one committed to a repository, which is why this")
+        a("list being short does not mean nothing is required where you are working. Ask:")
+        a("")
+        a(_fence(["harness require        # what applies at the current directory"]))
         a("")
         a(_fence([f"{e['ability']}  {e['scope_key']}"
                   + ("   (strict)" if e.get("strict") else "") for e in required]))

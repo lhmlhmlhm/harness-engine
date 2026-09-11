@@ -7,6 +7,7 @@ disappears and only these assertions notice.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import sqlite3
@@ -6933,7 +6934,7 @@ def test_an_empty_policy_changes_nothing_at_all(env, tmp_path):
     listing = run(["require"], env)
     assert listing.returncode == OK
     assert "nothing is declared mandatory" in listing.stdout
-    assert "exactly as it did before this file existed" in listing.stdout
+    assert "exactly as it did before this existed" in listing.stdout
 
 
 def test_a_declared_requirement_refuses_a_guarded_action_with_no_run(env, tmp_path):
@@ -7084,12 +7085,24 @@ def test_the_contract_stops_saying_nothing_forces_a_run_once_something_does(env,
     local = run(["brief"], env).stdout
     assert "## Where a flow is MANDATORY here" in local
     assert str(work) in local and "priv" in local
-    assert "Declared by whoever owns this machine, not by you." in local
+    # The CLAIM, not the sentence that used to carry it: this is not the driver's to remove.
+    assert "not yours to remove" in local
+    # And the claim that makes a SHORT list safe to read: a directory can declare it too, so
+    # this section being empty is not the same as nothing being required where you are working.
+    sys.path.insert(0, str(REPO))
+    from engine.policy import MARKER
+    flat = local.replace("`", "")
+    assert MARKER in flat, "the local section does not name the in-tree declaration at all"
+    assert "does not mean nothing is required where you are working" in flat, flat[-900:]
 
     portable = run(["brief", "--portable"], env).stdout
     assert "MANDATORY here" not in portable, \
         "the portable copy carried one machine's policy; the byte-identical guard would break"
     assert str(work) not in portable
+    # But the MECHANISM belongs in the portable copy: it is an engine feature, not machine state,
+    # and a driver reading only that copy would otherwise not know where to look.
+    assert MARKER in portable.replace("`", ""), \
+        "the portable contract never mentions the in-tree declaration"
 
     # And the checked-in copy still matches what --portable emits, with a policy in place.
     checked_in = (REPO / "integrations" / "DRIVING.md").read_text(encoding="utf-8")
@@ -8560,5 +8573,249 @@ def test_the_widened_mode_reaches_guard_tool(env, tmp_path, cwd_in_scope, comman
                   "--input-json", json.dumps({"command": command.format(scope=scope)}),
                   "--cwd", str(scope if cwd_in_scope else outside)], env)
         assert got == code, why
+    finally:
+        _rm(d)
+
+
+# ------------------------------------------------------------------ a requirement a directory
+# ------------------------------------------------------------------ declares, with no paths in it
+
+def _marker(d, text):
+    sys.path.insert(0, str(REPO))
+    from engine.policy import MARKER
+    (d / MARKER).write_text(text, encoding="utf-8")
+    return d / MARKER
+
+
+def _discover(start):
+    sys.path.insert(0, str(REPO))
+    from engine import policy
+    return policy.discover(str(start))
+
+
+def _shape(entries, root):
+    return [(e["ability"], str(e["scope_key"]).replace(str(Path(root).resolve()), "<r>"),
+             e["strict"]) for e in entries]
+
+
+_MK_SPEC = """
+scope_kind: repo
+scope_match: path_prefix_or_payload
+guards:
+  deploy: {step: G01, matches: [{tool: shell, field: command, pattern: 'deploy-thing'}]}
+phases:
+  - id: p1
+    title: P1
+steps:
+  - id: G01
+    phase: p1
+    gate: affirm
+    title: The gate that guards deploying
+    directive: Confirm.
+"""
+
+
+def test_the_same_marker_bytes_mean_the_same_thing_in_two_places(tmp_path):
+    """THE POINT OF THE WHOLE MECHANISM, asserted as the property rather than the plumbing.
+
+    The machine-local record holds ABSOLUTE paths, so it cannot travel: another machine spells the
+    checkout differently and a renamed parent turns an entry into one that matches nothing, for
+    ever, in silence. A marker names no path at all — the scope is the directory holding it — so
+    the identical bytes describe the identical requirement wherever the tree is put.
+    """
+    a, b = tmp_path / "here", tmp_path / "somewhere" / "else"
+    for root in (a, b):
+        (root / "src" / "Pkg").mkdir(parents=True)
+        _marker(root, "shipcheck-asis\n")
+
+    ea, _ = _discover(a / "src" / "Pkg")
+    eb, _ = _discover(b / "src" / "Pkg")
+
+    assert _shape(ea, a) == _shape(eb, b) == [("shipcheck-asis", "<r>", False)]
+    # And the file itself contains nothing machine-specific — which is what makes that true.
+    text = (a / ".harness-required").read_text(encoding="utf-8")
+    assert "/" not in text and str(tmp_path) not in text
+
+
+def test_the_nearest_declaration_wins_and_an_empty_one_is_an_exemption(tmp_path):
+    """A repository's own marker is its authors'; a parent's is the machine owner's.
+
+    When both speak the more specific one knows what it is talking about — and that has to include
+    saying "not here", or the only way to opt a subtree out is editing somebody else's committed
+    file.
+    """
+    root = tmp_path / "ws"
+    deep = root / "pkg" / "src"
+    deep.mkdir(parents=True)
+    _marker(root, "# the machine owner's\nshipcheck-asis\n")
+    assert _shape(_discover(deep)[0], root) == [("shipcheck-asis", "<r>", False)]
+
+    _marker(root / "pkg", "push strict\n")
+    assert _shape(_discover(deep)[0], root) == [("push", "<r>/pkg", True)]
+
+    _marker(root / "pkg", "# nothing is required in this subtree\n")
+    assert _discover(deep)[0] == (), "an empty nearest marker did not exempt the subtree"
+
+
+def test_a_marker_written_in_the_machine_records_format_is_reported_not_guessed(tmp_path):
+    """`<ability> <path>` in a marker names a directory the writer did not mean.
+
+    Taking the first token and ignoring the rest would apply the requirement to the marker's own
+    directory while the line says otherwise — a silent reinterpretation of a declaration, which is
+    the failure mode this engine spends its refusals on.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    _marker(root, "shipcheck-asis\t/somewhere/else\n")
+    entries, problems = _discover(root)
+    assert entries == (), "the line was applied anyway"
+    assert problems and "names nothing" in problems[0]
+    assert "/somewhere/else" in problems[0], "the report does not show what was ignored"
+
+
+def test_a_marker_that_cannot_be_read_is_reported_and_still_allows(env, tmp_path):
+    """"A declaration I cannot read" is not "no declaration", and must not look like it.
+
+    Allowing is the iron rule for anything in front of every tool call. Saying so is the part that
+    was missing everywhere this engine has since been corrected.
+    """
+    root = tmp_path / "ws"
+    root.mkdir()
+    m = _marker(root, "shipcheck-asis\n")
+    m.chmod(0o000)
+    try:
+        m.read_text(encoding="utf-8")
+        pytest.skip("this process can read a 0o000 file; the unreadable path is not exercisable")
+    except OSError:
+        pass
+    try:
+        entries, problems = _discover(root)
+        assert entries == ()
+        assert problems and "cannot be read" in problems[0]
+        # And through the real entry point: allowed, with the reason on stderr.
+        out = run(["guard-tool", "--tool", "shell",
+                   "--input-json", json.dumps({"command": "git commit -m x"}),
+                   "--cwd", str(root)], env)
+        assert out.returncode == OK
+        assert "cannot be read" in out.stderr, out.stderr
+    finally:
+        m.chmod(0o644)
+
+
+def test_a_declared_requirement_refuses_until_a_run_is_open_and_then_hands_over(env, tmp_path):
+    """The two questions in sequence, and the messages must not be interchangeable.
+
+    Without a run the refusal is "open one"; with a run open the FIRST question takes over and the
+    refusal becomes "record the gate". A driver told the wrong one of those goes in a circle.
+    """
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    d = _spec(env, "zzz_mk", _MK_SPEC)
+    try:
+        _marker(root, "zzz_mk\n")
+        call = ["guard-tool", "--tool", "shell",
+                "--input-json", json.dumps({"command": "deploy-thing"}),
+                "--cwd", str(root / "src")]
+
+        out = run(call, env)
+        assert out.returncode == BLOCKED
+        assert "no run of it is open here" in out.stderr
+        assert "harness open zzz_mk --scope" in out.stderr
+        # WHICH declaration, because with two possible sources "where do I change this" has two
+        # answers and this message is the only place a driver learns which.
+        assert str(root / ".harness-required") in out.stderr, out.stderr
+
+        assert rc(["open", "zzz_mk", "--scope", str(root), "--run", "m1"], env) == OK
+        out = run(call, env)
+        assert out.returncode == BLOCKED
+        assert "requires gate 'G01'" in out.stderr
+        assert "no run of it is open here" not in out.stderr, \
+            "the second question answered over the first"
+    finally:
+        _rm(d)
+
+
+def test_discovery_starts_where_the_caller_is_and_that_bound_is_declared(env, tmp_path):
+    """A call from OUTSIDE the tree finds no marker — asserted so it is a known shape.
+
+    Locating a marker from a path inside the payload would need a rule for which substrings are
+    paths, which this engine declines for the same reason it declines widening a scope comparison
+    by default. The machine record covers that case instead, because its entry names the directory
+    outright — so the gap has an answer rather than being a hole.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    d = _spec(env, "zzz_mkb", _MK_SPEC)
+    try:
+        _marker(root, "zzz_mkb\n")
+        named = json.dumps({"command": f"deploy-thing --at {root}"})
+
+        assert rc(["guard-tool", "--tool", "shell", "--input-json", named,
+                   "--cwd", str(outside)], env) == OK, \
+            "discovery reached outside the tree; the bound above is not the behaviour"
+
+        # The machine record does reach it: the entry names the directory, and the flow declares
+        # the widened comparison, so the call naming its target is claimed.
+        assert rc(["require", "--add", "zzz_mkb", "--scope-key", str(root)], env) == OK
+        assert rc(["guard-tool", "--tool", "shell", "--input-json", named,
+                   "--cwd", str(outside)], env) == BLOCKED
+    finally:
+        _rm(d)
+
+
+def test_require_reports_both_sources_and_where_each_came_from(env, tmp_path):
+    """One view, or "what is required here" has two answers and only one is visible."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    d = _spec(env, "zzz_mkc", _MK_SPEC)
+    try:
+        _marker(root, "zzz_mkc\n")
+        assert rc(["require", "--add", "zzz_mkc", "--scope-key", "/elsewhere/xyz"], env) == OK
+
+        out = subprocess.run([sys.executable, str(HARNESS), "require", "--json"],
+                             capture_output=True, text=True, cwd=str(root),
+                             env={**os.environ, **env})
+        assert out.returncode == OK, out.stderr
+        got = json.loads(out.stdout)
+        srcs = {Path(r["source"]).name for r in got["required"]}
+        assert srcs == {"required-flows", got["marker"]}, got
+        keys = {r["scope_key"] for r in got["required"]}
+        assert "/elsewhere/xyz" in keys and str(Path(root).resolve()) in keys, got
+
+        text = subprocess.run([sys.executable, str(HARNESS), "require"],
+                              capture_output=True, text=True, cwd=str(root),
+                              env={**os.environ, **env}).stdout
+        assert "from " in text and got["marker"] in text, text
+    finally:
+        _rm(d)
+
+def test_the_remedy_named_matches_where_the_requirement_lives(env, tmp_path):
+    """Offering the wrong remedy is worse than offering none.
+
+    `require --remove` edits the machine record. Naming it for a requirement a DIRECTORY declared
+    sends the reader to change a file that does not contain it — the command reports success, the
+    requirement survives, and the reader concludes the mechanism is broken rather than that they
+    were pointed at the wrong file.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    d = _spec(env, "zzz_rem", _MK_SPEC)
+    call = ["guard-tool", "--tool", "shell",
+            "--input-json", json.dumps({"command": "deploy-thing"}), "--cwd", str(root)]
+    try:
+        _marker(root, "zzz_rem\n")
+        err = run(call, env).stderr
+        assert "editing that file" in err, err
+        assert "require --remove" in err, "the reader is not told the machine command is wrong"
+        assert "harness require --remove zzz_rem" not in err, \
+            "a marker requirement was offered the machine record's command"
+
+        (root / ".harness-required").unlink()
+        assert rc(["require", "--add", "zzz_rem", "--scope-key", str(root)], env) == OK
+        err = run(call, env).stderr
+        assert f"harness require --remove zzz_rem --scope-key {root}" in err, err
+        assert "editing that file" not in err
     finally:
         _rm(d)

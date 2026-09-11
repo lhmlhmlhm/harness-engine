@@ -1847,7 +1847,12 @@ def _required_flow_missing(conn, args, payload: dict) -> int:
     branch could not change any outcome. A guard that cannot fire is what this engine spends its
     refusals on elsewhere.
     """
-    for entry in policy.read():
+    declared, problems = policy.discover(args.cwd)
+    for note in problems:
+        # A marker that exists and cannot be applied is reported even though the call is allowed:
+        # "nothing declared here" and "a declaration I could not use" must not look alike.
+        _err(f"⚠️  {note}")
+    for entry in (*policy.read(), *declared):
         try:
             f = flowmod.load(entry["ability"])
         except flowmod.FlowError as exc:
@@ -1881,8 +1886,7 @@ def _required_flow_missing(conn, args, payload: dict) -> int:
                 _err(
                     f"⛔ BLOCKED: this looks like action '{action}' (matched "
                     f"{rule['pattern']!r}), and '{entry['ability']}' is declared MANDATORY for "
-                    f"scope '{entry['scope_key']}' on this machine — but no run of it is open "
-                    f"here.\n"
+                    f"scope '{entry['scope_key']}' — but no run of it is open here.\n"
                     f"    A run is what makes any of this enforceable: without one, gate "
                     f"'{step_id}' and every other criterion is unrecorded and unchecked.\n"
                     f"    Open one first:\n"
@@ -1890,9 +1894,19 @@ def _required_flow_missing(conn, args, payload: dict) -> int:
                     f"{entry['scope_key']} --run <id>\n"
                     f"    Do NOT reword the command to get past this. If this action genuinely "
                     f"does not belong to that flow, the requirement is what is wrong — say so "
-                    f"to whoever owns this machine, and it comes out with:\n"
-                    f"      harness require --remove {entry['ability']} "
-                    f"--scope-key {entry['scope_key']}"
+                    f"to whoever owns it. It is declared in:\n"
+                    f"      {entry['source']}\n"
+                    # THE REMEDY DEPENDS ON THE SOURCE, and naming the wrong one is worse than
+                    # naming none: `require --remove` edits the machine record, so offering it
+                    # for a requirement declared by a directory would send the reader to change a
+                    # file that does not contain it — and the requirement would survive, which
+                    # reads as the command having silently failed.
+                    + (f"    and comes out with:\n"
+                       f"      harness require --remove {entry['ability']} "
+                       f"--scope-key {entry['scope_key']}"
+                       if entry["source"] == str(policy.path()) else
+                       f"    and comes out by editing that file — it is not in the machine's "
+                       f"record, so `harness require --remove` would not touch it.")
                 )
                 return BLOCKED
     return OK
@@ -1926,8 +1940,13 @@ def cmd_require(args) -> int:
         _err(f"no requirement recorded for {ability} at {args.scope_key}")
         return USAGE
 
+    # BOTH SOURCES, or this view answers a different question than the guard does. A directory
+    # marker is discovered from where the asking happens, so this reports the requirements that
+    # apply HERE — which is what "what is mandatory" means to whoever is standing somewhere.
+    here = os.getcwd()
+    found, problems = policy.discover(here)
     rows = []
-    for entry in policy.read():
+    for entry in (*policy.read(), *found):
         try:
             f = _load_flow_or_exit(entry["ability"])
             kind, match, readable = f.scope_kind, f.scope_match, True
@@ -1935,20 +1954,27 @@ def cmd_require(args) -> int:
             kind, match, readable = None, None, False
         rows.append({**entry, "scope_kind": kind, "scope_match": match, "readable": readable})
     if args.json:
-        return _emit(args, {"record": str(policy.path()), "required": rows}, lambda _d: None)
+        return _emit(args, {"record": str(policy.path()), "cwd": here,
+                            "marker": policy.MARKER, "problems": list(problems),
+                            "required": rows}, lambda _d: None)
+    for note in problems:
+        _err(f"⚠️  {note}")
     if not rows:
-        print(f"(nothing is declared mandatory; {policy.path()})")
-        print("With no entries the guard enforces the gates inside an open run and allows")
-        print("everything when nothing is open — exactly as it did before this file existed.")
+        print(f"(nothing is declared mandatory here)")
+        print(f"  machine record : {policy.path()}")
+        print(f"  directory      : no {policy.MARKER} at or above {here}")
+        print("With nothing declared the guard enforces the gates inside an open run and allows")
+        print("everything when nothing is open — exactly as it did before this existed.")
         return OK
-    print(f"record {policy.path()}")
+    print(f"applying at {here}")
     for r in rows:
         mark = "⛔" if r["strict"] else "•"
         print(f"{mark} {r['ability']:<16} {r['scope_kind'] or '?'}={r['scope_key']}"
               + ("  (strict)" if r["strict"] else "")
               + ("" if r["readable"] else "  ⚠️  its flow cannot be read from here"))
+        print(f"    from {r['source']}")
     print("\nThere is no recorded way to skip one of these yet: a one-off exception means "
-          "removing\nthe entry, which is a change to this file rather than a logged decision.")
+          "removing\nthe declaration, which is a change to a file rather than a logged decision.")
     return OK
 
 
