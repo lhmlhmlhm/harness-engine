@@ -25,7 +25,7 @@ results:
 uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, repeatable, results, stages]
 
 when: |
-  任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（101 步），
+  任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（102 步），
   但它的重量正对应交付的不可逆性；轻量改动也走它，只是很多步会被 skip。
 # 本 ability 的 scope 就是一个代码库位置，所以运行时在其子目录里发生的动作属于本 run。
 # 默认是 exact —— 放宽是**每个 ability 显式声明**的，因为误判比漏判更糟：

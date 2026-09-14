@@ -10,7 +10,7 @@
 harness-engine/
 ├── pyproject.toml           打包（唯一外部依赖：PyYAML）
 ├── LICENSE                  MIT
-├── bin/harness              入口（8 行，行为全在 engine/）
+├── bin/harness              入口（几行 argv 转发，行为全在 engine/）
 ├── engine/                  【基座】不含任何能力词汇
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
 │   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
@@ -18,88 +18,72 @@ harness-engine/
 │   ├── trust.py             扩展文件是代码：钉内容、报告、以及它不声称的东西
 │   ├── policy.py            哪里的流程是强制的（防遗漏，不防颠覆）
 │   ├── outputs.py           一步交回什么：读文件的一部分，且刻意不承重
-│   ├── schema.sql           9 表，引擎自己拥有
+│   ├── schema.sql           引擎自己拥有的表
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
 │   ├── flow.py              flow spec 加载 + 校验（= 插件层）
 │   ├── predicates.py        完成谓词注册表（= 扩展点）
 │   ├── proof.py             gate 防伪 witness 注册表
 │   └── harness.py           CLI
 ├── abilities/               【能力】一个 folder 一个能力，纯数据
-│   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（10 步 / 3 guard）
-│   ├── authoring/flow.yaml  role: fixture —— 机制测试夹具（5 步 / 0 guard / 菱形依赖）
-│   └── cr-audit/flow.yaml   已合入 commit 的事后复盘（9 步 / 0 guard / 判据在 phase goal 上）
-└── tests/                   476 个测试
+│   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（guard / hook / 义务那一路）
+│   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（菱形依赖、attest）
+└── tests/
 ```
 
-## 一条判据的数字可以在 run 里被发现，而不必写进 spec
+<!-- BEGIN GENERATED — python3 integrations/render-readme.py --write -->
 
-`evidence` 的 `min_count` 是写在 spec 里的字面量，所以它只能表达「在写 spec 那一刻就定下来的数量」。
-而有一类要求不是那种形状：**「每个对象一条判断」，而对象有几个是跑起来之后才知道的**。
+**这张表是生成的**（`python3 integrations/render-readme.py --write`），且**只含引擎自己的
+事实** —— 没有一行来自 `abilities/` 里装了什么。把 `abilities/` 清空到只剩一个 sample，
+下面每个数字依然成立；这是有测试钉住的，不是习惯。
+
+| 引擎实测 | | 出处 |
+|---|---|---|
+| 基座 | 16 个模块 · 8,992 行 | `engine/*.py` |
+| 入口 | 10 行（行为全在 `engine/`） | `bin/harness` |
+| 引擎自己拥有的表 | 9 张 | `engine/schema.sql` |
+| spec 格式 MAJOR | 2 | `flow.SPEC_MAJOR` |
+| 完成谓词 | 15 个 | `predicates._REGISTRY` |
+| gate 防伪 witness | 2 个 | `proof._WITNESSES` |
+| 运行时事实 provider | 3 个 | `facts._PROVIDERS` |
+| 条件操作符 | 8 个 | `operators._OPERATORS` |
+| 一条 flow 可声明的引擎能力 | 16 项 | `flow.ENGINE_CAPABILITIES` |
+| `scope_match` 模式 | 4 种 | `flow.SCOPE_MATCH_MODES` |
+| `guard` 裁决闭集 | 7 种 | `harness.GUARD_VERDICTS` |
+| 只有散文的命令 | 7 个（各带理由） | `harness.PROSE_ONLY` |
+| 还没有 `--json` 的命令 | 空集（每个写命令都能用 `--json` 作答） | `harness.NO_JSON_YET` |
+| 测试 | 481 个 | `pytest --collect-only` |
+
+<!-- END GENERATED -->
+
+## 一条 flow 长什么样
 
 ```yaml
-completion: {type: counts_at_least, kind_a: verdict, kind_b: commit}
+version: 1
+ability: delivery
+scope_kind: repo            # 这个 run 独占哪个维度
+
+guards:                     # 外部 hook 会问的动作 → 保护它的那一步
+  commit: D02
+
+phases:
+  - id: deliver
+    title: 交付
+
+steps:
+  - id: D02
+    phase: deliver
+    title: 提交前确认
+    deps: [D01]
+    gate: affirm            # none | affirm | preauth:<config-key>
+    completion:
+      type: gate_recorded   # 注册在 predicates.py 的谓词名
+    directive: |
+      🚦 停在这里，把改动摊给人看，然后结束这一轮。
 ```
 
-两侧都来自**账本**，这才是它成为判据而不是请求的原因：对象是这个 run 收集时记下的行，判断是它工作时
-记下的行。「我全部看过了」无法核对，「一边 24 条一边 20 条」可以。
+`step id` / `phase` 名 / `guard` 的动作名 / 喂给模型的 `directive` —— **全部是数据**。
+引擎代码里一个都不出现。
 
-```
-⛔ 2 'verdict' row(s) for 5 'commit' row(s) — 3 short.
-    Record one 'verdict' per 'commit'; the shortfall is what is left undone.
-```
-
-**空过会被说成空过。** 0 比 0 满足这个不等式，而且必须满足 —— 一个什么都没有的窗口是正常结论不是
-失败。但「满足」在 0/0 和 24/24 上读起来一样，正是这个引擎反复被纠正的形状，所以句子会说它是空的：
-
-```
-✔ 0 'verdict' for 0 'commit' — VACUOUS: there was nothing to cover.
-  Whether there SHOULD have been is not this criterion's question.
-```
-
-而「本来该有多少」由收集那一层的判据管 —— 那才是知道窗口有多宽的地方。这个谓词不猜它。
-
-**它和 `fields_agree` 的区别正是它存在的理由。** 后者比两个**值**相等；如果让 agent 记
-`subject_count=24` 和 `verdict_count=24`，它满足的是一个自己写下的等式。而这里每一行**就是**一个
-对象、一条判断，数字是「做了什么」的性质，不是「怎么说」的性质。有测试专门钉住这一点：记两行各自
-声称 24，判据只数到 **1**。
-
-### 而这条判据的位置是我第一版写错的地方
-
-引擎有一条不显眼但要紧的性质：
-
-```
-step 的 completion   evidence_scope = 该 step 自己   → 只看本步骤记的行
-phase 的 goal        evidence_scope = None          → 看整个 run
-```
-
-`commit` 记在一步、`verdict` 记在另一步。把这条判据写成后者的 **step** 判据，它看到的是 0 和 0 ——
-**永远空过**，而且空过时还如实说自己是空的，于是判据看起来在、实际什么都不管。**两侧不在同一个 step
-的比较，位置只能是 phase goal。**
-
-而 phase goal 恰好是「这一层做完了没有」的正确问法，并且它在关 run 的必经路上：一个 phase 的 goal
-里写 `phases_summarized`，`close-run` 就要求其余 phase 都被 summarize，而 summarize 一个 phase 要求
-它的 goal 达成。少了那一条，前面几层的判据就在旁边而不在路上。
-
-## 手写文档也有守卫了，而可推导的那部分改成生成
-
-`integrations/CAPABILITIES.md` 在测试里有断言；`integrations/WIRING.md` 一条都没有——**而漂掉
-四处的正是后者**，四处全是写下时正确的数字。没人看着的那一份就是变旧的那一份。
-
-修法按声明的种类分成两半，而不是给所有声明加断言：
-
-| 声明的种类 | 怎么处理 | 为什么 |
-|---|---|---|
-| **可推导**（条数、体积、默认路径） | **生成**：`integrations/render-wiring.py` 渲染进一个带标记的块，测试断言文件与重新渲染逐字节相同 | 生成的事实**过期就红**；被守的事实只能事后抓到它已经旧了 |
-| **引用**（命令、flag、路径、env、常量、被引用的消息） | 断言它**真的存在** | 一份指名已改名命令的文档读起来像指令，也就按指令失败 |
-| **判断**（为什么 hook 是唯一强制点、为什么隔离轴是 scope） | 留在散文里，不检查 | 不可推导，不该进代码，也不会因重构变旧 |
-
-`WIRING.md` 开头本来就写着自己的规则——「刻意不复述任何引擎事实」——而那条规则此前**只是一句
-声明**，于是被违反了四次。现在它有两样东西托着：那张生成表，以及一条把它提到的每个引用逐个核对
-的测试。
-
-**外部引用以数据形式豁免，连理由一起。** 那份文档引用了源系统的四个常量（转写的来处），它们不在
-本仓库里。豁免表里每条都要写理由，且理由本身有长度断言——**一条没有理由的豁免，就是一条悄悄停止
-生效的检查**。
 
 ## 上手
 
@@ -158,19 +142,33 @@ harness close-step --run <id> --step <s>              # 判据不满足则 exit 
 所有者的决定，不是引擎能替他做的：
 
 ```
-❌ cr-reviewer: INVALID — …/cr-reviewer/providers.py
+$ harness validate delivery                        # 尚未批准
+❌ delivery
+…/delivery/providers.py
+  is code from outside this engine's own tree and has not been approved here.
+  digest:             sha256:0909ef597d5292d8…
+  imports (advisory): __future__, engine, pathlib, subprocess, sys
+  Loading this flow IMPORTS the file, so reading its spec would run it.
+  Review it, then:    harness trust delivery
 
 $ harness trust                                    # 批准【之前】先能审
-⚠️  cr-reviewer      unknown   sha256:93852218f0c320fa…
-     …/cr-reviewer/providers.py
+⚠️  delivery         unknown   sha256:0909ef597d5292d8…
+     …/delivery/providers.py
      imports (advisory): __future__, engine, pathlib, subprocess, sys
 1 file(s) will refuse to load. Approve one with: harness trust <ability>
 
-$ harness trust cr-reviewer
-✅ cr-reviewer  steps=9  gated=1  guards=1
+$ harness trust delivery
+approved delivery
+  …/delivery/providers.py
+  sha256:0909ef597d5292d8ad394d0b0ea3fd1d6a2e54dd6216f031946276903cf3491a
 ```
 
 批准是**按内容**钉定的：那个文件改一个字节，批准就失效并重新询问。所以它防漂移，不是沙箱。
+
+**上面那段的前提，不写出来就复现不了：`abilities/` 必须在引擎自己的树之外。** 树内的扩展文件
+**刻意不钉定、也不能被批准** —— 能改它的人本来就能改引擎，而一份由引擎保管的记录不可能比一个
+能编辑引擎的人活得更久。所以把能力目录放在引擎树里时，`trust` 无事可做，`validate` 直接 ✅；
+上面那段之所以成立，是因为 `HARNESS_ABILITIES_PATH` 指向了别处 —— 而那正是上手第一步要求的装法。
 
 #### `harness require --add` —— 只有 flow **有受守动作**、且你想强制「必须先开 run」时
 
@@ -278,9 +276,20 @@ harness brief                # 契约生成得出来吗；里面的 hook 工具�
 harness validate             # 全部 spec 合法？exit 2 = 不合法（CI 就读这个码）
 ```
 
-**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 253 个测试在 3.10.16 上跑过并全绿，
-所以下限写 3.10。它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
+**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 476 个测试在 **3.10.16** 上跑过并全绿
+（2026-09-11 实测，415 秒，与 3.12 上的 476 一致；`mcp` 需钉 1.x，见下条）。所以下限写 3.10。
+它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
 声明一个未经测试的下限，和引擎在别处拒绝的「不可证伪声称」是同一件事。
+
+**这句话本身没有守卫，所以它带日期。** 测试数会随开发漂移，而「在 3.10 上跑过」这件事无法被
+`pytest` 自证——套件跑在**一个**解释器上，不会顺手验证另一个。既然守卫做不到，就退到第二好的
+办法：把测量时间写进句子，让读者能判断它有多旧。一个不带日期的「跑过并全绿」是无法被证伪的。
+
+**`mcp` 必须钉 1.x。** `integrations/mcp-server.py` 用的是 `@server.list_tools()`，而 `mcp` 2.x
+删掉了 `Server.list_tools`——今天 `pip install mcp` 装到的是 2.x，服务端会在启动时
+`AttributeError` 崩掉。那 5 个测试用 `pytest.importorskip("mcp")` 守着，所以**没装 mcp 的机器
+看到的是 skip 而不是失败**，而装了 2.x 的机器会看到 3 个失败。这是参考实现的约束，不是引擎的：
+引擎自己不 import `mcp`。
 
 #### 状态库的默认位置在引擎之外
 
@@ -316,6 +325,10 @@ macOS 没有原生 XDG 位置，而为了算一个「按平台正确」的路径
 
 第三条出路（在新位置全新开一个）**必须可达**，因为旧库存在时连 `init` 也会被拒——所以那条消息把
 它写了出来，并有一条测试断言那句话是真的。
+
+## spec 格式与声明面
+
+一条 flow 能声明什么，以及引擎在载入期就拒绝什么。这一节全是**载入期**的事——跑起来之前就该失败的，不留到跑起来之后。
 
 ### spec 格式的版本：MAJOR 是可读性声明，MINOR 只说加了键
 
@@ -443,8 +456,10 @@ spec format 1.0 cannot be read; this engine reads 2.0.
 
 对称地钉住了它**不该**声称知道的：一个本引擎从未定义过的版本，只拒绝、**不编造迁移说明**。
 
-实测代价：已装的 7 个 flow 里**只有一处跨 ability 引用**（`plan` 用 `push` 注册的 provider，且它本来
-就 `requires: [push]`），所以迁移是 7 行 `version:` 加那一行加限定。
+迁移代价之所以低，是因为**跨 ability 引用本来就该罕见**：一条 flow 借另一条注册的东西时必须
+`requires:` 它，而那条声明就是引用的上限。所以一次 MAJOR 迁移通常是「每条 flow 改一行 `version:`」，
+加上给那少数几处借用补上限定。你自己那棵树有多少处，`harness abilities --json` 数得出来 ——
+这里不写一个数字，因为它是**你装了什么**的性质，不是引擎的性质。
 
 **并且「名字是否被占」的权威仍然是注册表本身**，owner 映射只是说明性的。两个必须保持同步的字典
 就是一个等着发生的 bug，而它当场发生过：清理代码从注册表移走了一个名字、却留在 owner 映射里，
@@ -518,7 +533,7 @@ results:
 
 词汇表在 `abilities --json` 里可读，所以 driver **在关 run 之前**就知道合法值，而不是只能从一次拒绝里学到。
 
-7 个已装 flow 全部声明了 `[completed, abandoned]`。**这个集合刻意保守**：`abandoned` 是引擎已经半知道
+8 个已装 flow 全部声明了 `[completed, abandoned]`。**这个集合刻意保守**：`abandoned` 是引擎已经半知道
 的那个区别（强制关闭与干净关闭不是一件事）。更贴合各 flow 的词汇（`shipped` / `drafted` / `pushed`）现在
 可表达了，但那是领域判断，不该由我替这些 spec 决定。
 
@@ -576,6 +591,10 @@ $ harness close-step --run o2 --step K02
 顺带修掉一处：**`requirements()` 漏报 `match`**。`match` 是 `evidence` 断言真的会读的键，但它没出现
 在机器可读的要求清单里——于是清单**低报**了判据。一份漏了一条要求的要求清单比没有更糟，因为它会被
 信任。
+
+## 账本的不变量、审计与强制
+
+账本一旦写下就不许被悄悄改写，而账本能被反问「这里最常出什么问题」。以及：**哪里的流程是强制的**——防遗漏，不防颠覆。
 
 ### 已结束的 run 不接受写入
 
@@ -724,6 +743,10 @@ scope 里**为假**。现在规则带上了例外，而本机的实际清单作�
 决定。设计里的下一步是让豁免复用引擎已有的两回合证人机制（`proof.vouch` + cursor），这样跳过流程会
 留下一条 `harness audit` 能看到的记录，而不是让人去改文件。
 
+## 命令面、集成与信任
+
+命令面本身是数据，所以适配器不必把它重写一遍；扩展文件是代码，所以读一份 spec 会运行它。两件事都关于**边界在哪、谁为越界负责**。
+
 ### 命令面作为数据：适配器不该重写它一遍
 
 `harness adapter-contract` 的 `surface` 键把整个命令面**从引擎自己的 argparse 解析器推导出来**：
@@ -860,7 +883,8 @@ harness close-run --run <id> --json # result_source：flow_default / explicit / 
 
 #### 每个命令都被分类，缺口是具名的
 
-`PROSE_ONLY`（7 条，各带理由）与 `NO_JSON_YET`（2 条）**分区整个解析器**，有测试断言这一点。于是
+`PROSE_ONLY`（各带理由，名字见下表）与 `NO_JSON_YET`（**现已为空集**，且有测试钉死它为空）
+**分区整个解析器**，有测试断言这一点。于是
 一个新命令**无法靠遗漏**加入沉默阵营——它不会被分类，而那会红。
 
 分类也在 `adapter-contract` 里发布，因为「按决定没有机器形态」和「还没有机器形态」对适配器不是同一
@@ -929,6 +953,10 @@ unreadable [('lb', 'zzz_b')]
 里 8 处声明，每一处都在复述默认值。删掉没人用的那个分支会留下一个单值键，所以**键也一起删了**。
 预算用尽现在无条件拒绝。升级要回来，走和任何东西一样的路：一个取值、它的分支、以及一条选择它的
 flow。
+
+## 接线与运维
+
+把引擎接到一个真实 runtime 上，然后回答「已经发生过什么」和「能力装在哪」。
 
 ### 接一个 agent：一段生成的 prompt + 一份契约
 
@@ -1050,35 +1078,6 @@ traceback 照旧打到 stderr（一个藏起自己位置的 bug 比一个退出�
 `KeyboardInterrupt` 是 `BaseException`，**刻意直穿**——用户中断不是引擎的过错。
 
 
-## 一条 flow 长什么样
-
-```yaml
-version: 1
-ability: delivery
-scope_kind: repo            # 这个 run 独占哪个维度
-
-guards:                     # 外部 hook 会问的动作 → 保护它的那一步
-  commit: D02
-
-phases:
-  - id: deliver
-    title: 交付
-
-steps:
-  - id: D02
-    phase: deliver
-    title: 提交前确认
-    deps: [D01]
-    gate: affirm            # none | affirm | preauth:<config-key>
-    completion:
-      type: gate_recorded   # 注册在 predicates.py 的谓词名
-    directive: |
-      🚦 停在这里，把改动摊给人看，然后结束这一轮。
-```
-
-`step id` / `phase` 名 / `guard` 的动作名 / 喂给模型的 `directive` —— **全部是数据**。
-引擎代码里一个都不出现。
-
 ## 五条设计约束，以及它们各自的来由
 
 这个项目的设计不是凭空来的。每条约束都对应一个**在真实系统里观察到的失败**。
@@ -1130,19 +1129,25 @@ steps:
 `HANDLERS = {"...": ...}`、`KIND = "..."` 全部落网。
 
 **一处顺带要说清的**：`scope_kind` 是**跨 ability 共享的命名空间**。两个 ability 用同一个值就共用
-同一片 scope——实测 `delivery` 与 `shipcheck-asis` 都用 `repo`，于是同一个目录下开了一个，另一个
-会被拒（`⛔ scope repo='...' already has 1 open run(s)`）。这不是耦合，而是这套设计的要点：守卫回答
-的是「这件事能不能对**这个东西**做」，所以两条都作用于同一个仓库的流程**必须**互相看见，而
-`scope_lease` 就是给它们裁决用的。
+同一片 scope——给两条 flow 写上同一个 `scope_kind`，在同一个 key 上开了一个，另一个就会被拒：
+
+```
+⛔ scope repo='/tmp/r' already has 1 open run(s)
+```
+
+这不是耦合，而是这套设计的要点：守卫回答的是「这件事能不能对**这个东西**做」，所以两条都作用于
+同一个仓库的流程**必须**互相看见，而 `scope_lease` 就是给它们裁决用的。反过来说，两条流程要能并行，
+它们得在谈论不同的东西——那时 `scope_kind` 本来就该不同。
 
 **而它自己也曾静默过期。** 禁用名单里那条「已装 ability 的名字」是**手写的**，注释写着
 「the two installed abilities」——而当时已经装了 **7 个**。也就是说其中五个可以被引擎代码
 点名，而这道门栓不会有任何反应。修法是**从磁盘派生名单**，而不是再补五个字符串。
 
-派生之后有一个必须做对的判断：**不能用子串匹配**。`predicates.py` 有一句 docstring 在引用
-一条真实不变量——「the revision whose checks were verified must BE the latest revision
-**pushed**」——而 `push` 正是一个已装的名字。子串规则会因为一句英文散文而失败，**而一条会
-被散文打红的守卫会换来一份豁免清单**，那正是这个文件存在的理由所要阻止的东西。所以禁的是
+派生之后有一个必须做对的判断：**不能用子串匹配**。能力的名字往往就是普通英文词 ——
+`delivery`、`authoring` 都是普通英文词；引擎自己的散文里就有句子在正常地使用这类词
+（`predicates.py` 一句 docstring 引用真实不变量：「the revision whose checks were verified
+must BE the latest revision **pushed**」）。子串规则会因为一句英文散文而失败，**而一条会被
+散文打红的守卫会换来一份豁免清单**，那正是这个文件存在的理由所要阻止的东西。所以禁的是
 两种「意味着代码」的形态：**引号里的字面量**，和**下划线拼进标识符**。
 
 原有的「概念词」名单保留不动，与派生名单在两个名字上重叠。这不是冗余：那些条目禁的是一个
@@ -1187,6 +1192,17 @@ gate」会被发现（第二个看到的游标已经消费掉那次回复了）�
 所以：`open` 在同 scope 已有 open run 时**拒绝**（在第二个 run 出现前就阻止歧义，
 最便宜的时机）；而 `guard` 遇到多个候选时**放行 + 大声警告并列出全部候选**，绝不猜。
 
+### 三条从「接外部工具」里学到的，与具体工具无关
+
+这三条各自来自一次真实的接入尝试，原始记录随那个工具走了，只有判据留在这里：
+
+- **接一个外部工具之前，先问「这里有什么可比的东西」。** 没有可比物时，工具产出的是一个
+  无法被反驳的数字。一个不能被别的来源检查的度量，进了账本也只是好看。
+- **有一种工具不能 vendor：它的价值是它自己累积的状态。** 把它的代码抄过来，抄不到那份状态，
+  于是得到一个形状相同、内容为空的东西 —— 而空的那个看起来是在工作的。
+- **引擎对它服务的流程应当是零接触的。** 引擎不该要求那些流程改自己的文件、目录或习惯；
+  它们只需要多出一份 `flow.yaml`。这条是可检验的：接入之后，那些流程的树里改了几个字节？
+
 ## 完成谓词
 
 `close-step` 不因为「agent 说做完了」就放过，而是跑 flow 指定的谓词：
@@ -1218,16 +1234,67 @@ gate」会被发现（第二个看到的游标已经消费掉那次回复了）�
 加一个是纯增量：写个函数挂 `@predicate("name")`，不动引擎其它部分。
 **保持它们领域无关**——谓词可以知道「存在 kind=K 的证据」，永远不该知道 K 对某个能力意味着什么。
 
+### 一条判据的数字可以在 run 里被发现，而不必写进 spec
+
+`evidence` 的 `min_count` 是写在 spec 里的字面量，所以它只能表达「在写 spec 那一刻就定下来的数量」。
+而有一类要求不是那种形状：**「每个对象一条判断」，而对象有几个是跑起来之后才知道的**。
+
+```yaml
+completion: {type: counts_at_least, kind_a: verdict, kind_b: commit}
+```
+
+两侧都来自**账本**，这才是它成为判据而不是请求的原因：对象是这个 run 收集时记下的行，判断是它工作时
+记下的行。「我全部看过了」无法核对，「一边 24 条一边 20 条」可以。
+
+```
+⛔ 2 'verdict' row(s) for 5 'commit' row(s) — 3 short.
+    Record one 'verdict' per 'commit'; the shortfall is what is left undone.
+```
+
+**空过会被说成空过。** 0 比 0 满足这个不等式，而且必须满足 —— 一个什么都没有的窗口是正常结论不是
+失败。但「满足」在 0/0 和 24/24 上读起来一样，正是这个引擎反复被纠正的形状，所以句子会说它是空的：
+
+```
+✔ 0 'verdict' for 0 'commit' — VACUOUS: there was nothing to cover.
+  Whether there SHOULD have been is not this criterion's question.
+```
+
+而「本来该有多少」由收集那一层的判据管 —— 那才是知道窗口有多宽的地方。这个谓词不猜它。
+
+**它和 `fields_agree` 的区别正是它存在的理由。** 后者比两个**值**相等；如果让 agent 记
+`subject_count=24` 和 `verdict_count=24`，它满足的是一个自己写下的等式。而这里每一行**就是**一个
+对象、一条判断，数字是「做了什么」的性质，不是「怎么说」的性质。有测试专门钉住这一点：记两行各自
+声称 24，判据只数到 **1**。
+
+#### 而这条判据的位置是我第一版写错的地方
+
+引擎有一条不显眼但要紧的性质：
+
+```
+step 的 completion   evidence_scope = 该 step 自己   → 只看本步骤记的行
+phase 的 goal        evidence_scope = None          → 看整个 run
+```
+
+`commit` 记在一步、`verdict` 记在另一步。把这条判据写成后者的 **step** 判据，它看到的是 0 和 0 ——
+**永远空过**，而且空过时还如实说自己是空的，于是判据看起来在、实际什么都不管。**两侧不在同一个 step
+的比较，位置只能是 phase goal。**
+
+而 phase goal 恰好是「这一层做完了没有」的正确问法，并且它在关 run 的必经路上：一个 phase 的 goal
+里写 `phases_summarized`，`close-run` 就要求其余 phase 都被 summarize，而 summarize 一个 phase 要求
+它的 goal 达成。少了那一条，前面几层的判据就在旁边而不在路上。
+
 ### 强度分层，以及为什么要如实报它
 
-`validate` 打印每个 ability 的判据强度分布：
+`validate` 打印每个 ability 的判据强度分布。下面这份输出取自**上一节那条 102 步的流程**
+（同样不随发行包分发）——`role: fixture` 的能力**刻意不报强度**，所以两个夹具身上看不到这几行：
 
 ```
-✅ shipcheck-asis: 101 steps, 8 phases, 4 guard(s); order ok
-   criteria: derived×13 · value-checked×52 · record-exists×36 · UNCHECKED×0
-   artifacts: 124 pinned across 101 steps (30 step(s) pin ≥2)
+✅ <一条 102 步的私有流程>: 102 steps, 8 phases, 5 guard(s); order ok
+   criteria: derived×21 · value-checked×47 · record-exists×34 · UNCHECKED×0
+   artifacts: 151 pinned across 102 steps (37 step(s) pin ≥2)
    goals: 8/8 phases  [context:derived/config:derived/...]
 ```
+（摘录：真实输出另有 `uses:` / `capabilities:` / `prose:` 三行。）
 
 分层是从 `requirements()` 派生的，不是手维护的表——所以新加谓词会**按它索取什么**被自动分类，
 报告不会和注册表脱节。
@@ -1239,7 +1306,7 @@ gate」会被发现（第二个看到的游标已经消费掉那次回复了）�
 
 ### 升级 record-exists 的纪律：值必须来自散文
 
-从 57 步降到 39 步的做法不是给每步编一个允许值集合，而是只处理**散文自己指名了结果**的步骤：
+把 `record-exists` 的占比压下来，做法不是给每步编一个允许值集合，而是只处理**散文自己指名了结果**的步骤：
 「命中则缓存」「已提议或显式跳过」「残留 = 0，或残留都已解释」「无编译错误」「历史保持单条」
 「每条意见归类为『该处理』或『固有噪声』」。凭空发明枚举比留在 `record-exists` **更糟**——
 它看起来更强，而它检查的是一个我编的东西。
@@ -1248,33 +1315,35 @@ gate」会被发现（第二个看到的游标已经消费掉那次回复了）�
 只换成枚举会用「强度」换掉「内容」：`evidence_in(kb_entry, [written, skipped])` 能通过，
 而账本上再也看不出写进去的是什么。
 
-剩下 36 步中占比最大的两类是真天花板：**纯存在性产物**（散文的判据是「这份表/块/文档产出了且清晰」，
-没有可枚举的值）和**全称但无裁决词汇**（「同类点已穷尽」「下游影响已列全」——
-断言的是穷尽性，需要一个外部预言机而不是账本里的值）。
+**升不上去的那些是真天花板**，占比最大的两类：**纯存在性产物**（散文的判据是
+「这份表/块/文档产出了且清晰」，没有可枚举的值）和**全称但无裁决词汇**（「同类点已穷尽」
+「下游影响已列全」——断言的是穷尽性，需要一个外部预言机而不是账本里的值）。
 
 ### 完整性是与强度**正交**的第二个维度，而强度会掩盖它
 
 一步产出三样东西、只钉住最强的**一样**，在强度报告里得分很好，同时三分之二的产出没人查。
-所以 `validate` 另报**钉住的产物数**：
+所以 `validate` 另报**钉住的产物数**——就是上面那份输出里的这一行：
 
 ```
-artifacts: 124 pinned across 101 steps (30 step(s) pin ≥2)
+artifacts: 151 pinned across 102 steps (37 step(s) pin ≥2)
 ```
 
-两个数字缺一不可——只看强度会漏掉「一条判据代替了好几条」，
-只看数量会漏掉「判据全是自陈」。两条都有防回退基线测试。
+「跨 102 步钉住 151 个产物，其中 37 步钉了两个以上」——**`pin ≥2` 的那一列才是重点**：
+一步只钉一个产物时，强度报告仍然满分，而它另外两个产出没人查。
+两个数字缺一不可：只看强度会漏掉「一条判据代替了好几条」，只看数量会漏掉「判据全是自陈」。
+两条都有防回退基线测试。
 
 **这个维度上的两个陷阱**（都是散文自己指出来的）：
 
-- **完成标准与失败条款矛盾时，失败条款赢。** `R06` 的完成标准要求「描述已随之刷新」，
-  而正文明说「没更新就发一行告警……但**不阻断**」；`E24` 要求「分数已落库」，
+- **完成标准与失败条款矛盾时，失败条款赢。** 一步的完成标准要求「描述已随之刷新」，
+  而同一份散文的失败条款明说「没更新就发一行告警……但**不阻断**」；另一步要求「分数已落库」，
   失败时说「写分失败只记 warning、不阻断收口」。把这两项写成硬产物会让流程卡在
   散文明确允许通过的地方。正确做法是把**处置**记成枚举（`refreshed|warned`、
   `persisted|warned`）——比要求它成功更符合意图，因为散文要的是
   「分数缺失是审计信号」，而一个没被记录的 warning 不是信号。
-- **不是每个「看起来像合取」的完成标准都是合取。** `E18b` 的完成标准只有「评分已 emit」
-  一项；散文里的「等待中先不 emit」是**时序前提**，而它已由 `deps` 结构性保证，
-  不需要也不应该塞进完成判据。
+- **不是每个「看起来像合取」的完成标准都是合取。** 有一步的完成标准只有「评分已 emit」一项，
+  而散文里另一句「等待中先不 emit」是**时序前提** —— 它已由 `deps` 结构性保证，
+  不需要也不应该塞进完成判据。合取里多一条已被结构保证的东西，等于把一条永真项当成守卫。
 
 ### `all_checks`：一步只能挂一条判据是个真缺陷
 
@@ -1307,7 +1376,7 @@ goal 因此落在**关闭 run 的必经路径上**，而不是旁边。加一条
 ## 测试
 
 ```sh
-python3 -m pytest tests/ -q      # 476 passed
+python3 -m pytest tests/ -q      # 全绿；条数见开头那张生成的表
 ```
 
 分两类：
@@ -1323,29 +1392,55 @@ python3 -m pytest tests/ -q      # 476 passed
 四条关键守卫做过变异验证（去掉守卫 → 测试必须变红）：guard 的 exit 4、witness 的同轮
 重复检测、close-step 的谓词校验、同 scope 并发预防。
 
-## 对照结论：真实流程转写的结果
+### 手写文档也有守卫了，而可推导的那部分改成生成
 
-`abilities/shipcheck-asis/flow.yaml` 是一条**成熟真实流程**的忠实转写——从
-`state_machine.py` 的 `CANONICAL_STEPS` 注册表程序化导出（导出时源注册表报 **111 步 / 8 层 /
-24 stage**；**今天这份 spec 里是 102 步**——8 层与 24 stage 仍然吻合，9 步的差额没有被核对过，
-所以这里把「当时」与「现在」分开写而不是挑一个数字填上），
-gate 取自 `LAYER_MANDATORY_GATE` + `LIFECYCLE_TRANSITION_GATES`，deps 取自
-`STEP_PRECONDITIONS` + `step-manifest.yaml` 的 score-emit 链。手写 111 步必错，所以没手写。
+`integrations/CAPABILITIES.md` 在测试里有断言；`integrations/WIRING.md` 一条都没有——**而漂掉
+四处的正是后者**，四处全是写下时正确的数字。没人看着的那一份就是变旧的那一份。
+
+修法按声明的种类分成两半，而不是给所有声明加断言：
+
+| 声明的种类 | 怎么处理 | 为什么 |
+|---|---|---|
+| **可推导**（条数、体积、默认路径） | **生成**：`integrations/render-wiring.py` 渲染进一个带标记的块，测试断言文件与重新渲染逐字节相同 | 生成的事实**过期就红**；被守的事实只能事后抓到它已经旧了 |
+| **引用**（命令、flag、路径、env、常量、被引用的消息） | 断言它**真的存在** | 一份指名已改名命令的文档读起来像指令，也就按指令失败 |
+| **判断**（为什么 hook 是唯一强制点、为什么隔离轴是 scope） | 留在散文里，不检查 | 不可推导，不该进代码，也不会因重构变旧 |
+
+`WIRING.md` 开头本来就写着自己的规则——「刻意不复述任何引擎事实」——而那条规则此前**只是一句
+声明**，于是被违反了四次。现在它有两样东西托着：那张生成表，以及一条把它提到的每个引用逐个核对
+的测试。
+
+**外部引用以数据形式豁免，连理由一起。** 那份文档引用了源系统的四个常量（转写的来处），它们不在
+本仓库里。豁免表里每条都要写理由，且理由本身有长度断言——**一条没有理由的豁免，就是一条悄悄停止
+生效的检查**。
+
+## spec 语言的边界
+
+这一节是**压测结果**，不是设计意图。做法是把一条成熟的真实流程程序化转写成一份 spec —— 一条
+**102 步 / 8 phase / 24 stage** 的流程，从它源系统的步骤注册表导出而不是手写（手写一百多步必错）。
+
+> **那条流程不随发行包分发**，所以下面每个数字都是**一次过去的测量**，你在这棵树里复现不了它 ——
+> 和「整套测试在 3.10.16 上跑过」是同一类声称。它留在这里是因为它是关于**引擎**的证据：
+> 换成两个玩具夹具，下面这些结论一条都得不出来。转写的出处细节（哪张注册表、哪些表、哪些步骤 id）
+> 属于那条流程自己，不在这里。
 
 它**通过校验并能跑**，这一点本身有意义：spec 语言在 102 步的规模上不塌。但结论是
 **结构能表达，控制流不能。**
 
 ### 引擎赢的地方（两条，都是实测）
 
-**① load-time 校验抓到了转写里的真实建模错误。** 第一版 exit 2 报
-`guard 'task_close' points at step 'E21', whose gate is 'none'`。原因是源系统里
-「哪些 step 是 gate」**散在三张表**（`LAYER_MANDATORY_GATE` /
-`LIFECYCLE_TRANSITION_GATES` / manifest 的 `gate_type`），我只读了第一张就漏了 E21。
-把 gate 归拢到「每步一处声明」的收益，就是这种漏会在加载时炸而不是在运行时静默。
+**① load-time 校验抓到了转写里的真实建模错误。** 第一版 exit 2 报的是这个形状：
 
-**② 转写过程暴露了引擎自己的一个缺陷，已修。** 源系统的第三层 `stage` 在这份 spec 里
-无处可去，我写成 `stage:` 时**被静默忽略**了。同理 `gaet: affirm` 会静默产出一个无 gate
-的步骤——正是引擎已经在防的「看着有保护、实际是空」那一类。现在未知 key 一律 exit 2。
+```
+guard 'task_close' points at step 'X', whose gate is 'none'
+```
+
+原因在源系统那边：「哪些 step 是 gate」**散在三张表里**，转写时只读了第一张，于是有一步
+漏了 gate，而一个指着无 gate 步骤的 guard 是**看着有保护、实际是空**。
+把 gate 归拢到「每步一处声明」的收益，就是这种漏会在**加载时炸**而不是在运行时静默。
+
+**② 转写过程暴露了引擎自己的一个缺陷，已修。** 源流程有第三层分组，而当时的 spec 无处安放它 ——
+写下 `stage:` 时它**被静默忽略**了。同一个洞让 `gaet: affirm`（拼错的 `gate`）静默产出一个无 gate
+的步骤，正是上一条那类「看着有保护、实际是空」。现在未知 key 一律 exit 2。
 
 ### 引擎输的地方（四条，全部是真实构造，引擎表达不了）
 
@@ -1353,25 +1448,25 @@ gate 取自 `LAYER_MANDATORY_GATE` + `LIFECYCLE_TRANSITION_GATES`，deps 取自
 |---|---|---|
 | **第三层结构** | layer → **stage** → step，24 个 stage | ✅ v2 已实现 `stage:` |
 | **可选的整层** | revision 层 16 步，只在有 findings 时跑 | ✅ v2 已实现 `optional:` |
-| **互斥分支** | `E22a` 关单 Y 分支 / `E22b` N 分支，二选一 | ✅ v2 已实现 `exclusive_groups:` |
-| **per-step 的降级策略** | `LIFECYCLE_TRANSITION_GATES = {E09g, E21}` 必须 fail-closed | ✅ v2 已实现 `strict_witness:` |
-| **loop + 迭代预算** | revision 3 次预算 + `conflict_rebase_count` 独立上限 | ❌ 仍未做（见下文，故意的） |
+| **互斥分支** | 关单的「是 / 否」两条分支，二选一 | ✅ v2 已实现 `exclusive_groups:` |
+| **per-step 的降级策略** | 少数几个 gate 必须 fail-closed，其余可降级 | ✅ v2 已实现 `strict_witness:` |
+| **loop + 迭代预算** | 修订循环 3 次预算 + 冲突重基的**独立**上限 | ❌ 仍未做（见下文，故意的） |
 
-另外两个较小的：
-- **条件步骤**：`C07b` 是「仅 Complex」——步骤是否适用取决于 run 级变量，引擎无此概念。
-- **单向棘轮**：`COMPLEXITY_RANK = {Fast:0, Standard:1, Complex:2}`，只许升不许降。引擎没有 run 级的棘轮维度。
+另外两个较小的，**至今没做**：
+- **条件步骤**：某一步「仅在复杂度为 X 时适用」——步骤是否适用取决于 run 级变量，引擎无此概念。
+- **单向棘轮**：一个 run 级的等级只许升不许降。引擎没有棘轮维度。
 
 ### 这份对照给出的结论
 
-引擎当前的形状适合**线性带 gate 的流程**（`delivery` / `authoring` 都是），
-而一条成熟流程有 **loop / branch / conditional / 第三层分组**。
+引擎当前的形状天然适合**线性带 gate 的流程**（两个夹具都是这种），
+而一条成熟流程还会有 **loop / branch / conditional / 第三层分组**。
 
-**这条对照没有做的事**：它不是移植。没有一行代码从 ship-check 复制过来，
-`~/.kiro/` 一个字节都没改。它只回答「spec 语言够不够用」，答案是「结构够、控制流不够」。
+**这次压测没有做的事**：它不是移植 —— 没有一行代码从那条流程的源系统复制过来，
+它只回答「spec 语言够不够用」。答案是「结构够、控制流不够」，而下一节是把不够的那部分补上。
 
 ### 四个控制流原语（v2 已实现）
 
-v1 的四个缺口都补上了，那条 102 步的真实流程现在**能真正跑到关闭**：
+v1 的四个缺口都补上了，那条 102 步的流程现在**能真正跑到关闭**（同一次压测，同样不可在本树复现）：
 
 ```
 驱动结果：closed=82  skipped=29  gated=6  人类发言=4
@@ -1379,24 +1474,23 @@ close-run → exit 0（未用任何 --force-* flag）
 audit → unwitnessed: 0，无 forced_close
 ```
 
+这几个数字里**最要紧的是 `skipped=29` 和 `人类发言=4`**：前者说明「可选」真的可以合法地永不运行，
+后者说明 gate 没有被一次性批量糊过去 —— 一个人在四个不同的回合里说了话。
+
 | 原语 | 语法 | 语义 |
 |---|---|---|
 | **`stage:`** | 步骤上 `stage: pre-flight`，phase 上 `stages: [...]` | 第三层分组。stage 必须被它的 phase 声明，拼错 → exit 2 |
 | **`optional: true`** | 步骤上 | 可以合法地永不运行。`close-run` 只要求非 optional 的步骤；`skip` 命令**只对 optional 生效**（必需步骤能被运行时跳过，流程就变成谁想跳就跳） |
-| **`exclusive_groups:`** | 顶层 `- [E22a, E22b]` | 互斥分支。关掉一个 → 兄弟自动记 `skipped`，该组只算一次。**依赖单个分支是 fatal**（另一分支被选时依赖方永远不可达） |
+| **`exclusive_groups:`** | 顶层 `- [X1, X2]` | 互斥分支。关掉一个 → 兄弟自动记 `skipped`，该组只算一次。**依赖单个分支是 fatal**（另一分支被选时依赖方永远不可达） |
 | **`strict_witness: true`** | 有 gate 的步骤上 | 这个 gate 不接受降级：无 witness 直接 exit 3，不记「带标记的通过」 |
 
-转写里的实际用法（全部有源码依据）：24 个 stage 来自注册表；29 个 optional 步骤 =
-revision 整层 16 步（只在有 findings 时跑）+ resume/仅-Complex/外部系统相关/housekeeping；
-`[E22a]/[E22b]` 是互斥组；`strict_witness` 打在 `LIFECYCLE_TRANSITION_GATES = {E09g, E21}` 上。
-
-`status` 现在按 stage 渲染，`●` 已了结 / `◌` 可选未动 / `○` 仍欠：
+`status` 按 stage 渲染，`●` 已了结 / `◌` 可选未动 / `○` 仍欠：
 
 ```
-  observation (observation（8 步）)
-    ●●             autosde
-    ●              dry-run
-    ●●●            analyzer-wait
+  <phase> (<phase>（8 步）)
+    ●●             <stage-a>
+    ●              <stage-b>
+    ●●●            <stage-c>
   owed    nothing — closeable
 ```
 
@@ -1410,8 +1504,9 @@ step id 变成了 `True` / `False`（错误信息里 `known: A, True, False, Z`�
 `ON`/`OFF`/`Y`/`N` 同理，`07` 会变成 int 7。这正是这个加载器存在的理由——静默改变语义。
 现在非字符串 id 一律 exit 2，并提示加引号。
 
-**这个 bug 是「真的去用它」抓出来的，不是想出来的。** 光写 delivery/authoring 两个
-玩具流程永远碰不到它。
+**这个 bug 是「真的去用它」抓出来的，不是想出来的。** 光写两个玩具夹具永远碰不到它 ——
+这也是这一节即使主体不随包分发也要留下的原因：**夹具证明机制存在，规模证明机制够用**，
+而后者只有把真东西压上去才拿得到。
 
 ### loop + 迭代预算（已实现）
 
@@ -1421,10 +1516,9 @@ step id 变成了 `True` / `False`（错误信息里 `known: A, True, False, Z`�
 而在引擎里回答等于把一个能力的答案烙给所有人。校验会拒绝「声明 escalate 但那一步没有 gate」
 的 spec——那样人的决定没地方记录。
 
-转写里的用法有散文依据：修订循环 `R01–R08` 预算 3 次，`R16` 冲突重基**独立**计数 3 次
-（散文原话：「它解决的不是『意见』，因此不占这条预算」）。两者的耗尽处理都是 `refuse`——
-散文要求「拒绝继续……换方法或叫人，而不是偷偷把上限调大再来一轮」，
-而升级路径由**独立的 R07 步骤**表达，不是引擎的 escalate 模式。
+压测里的用法说明了为什么「独立计数」要能表达：修订循环有 3 次预算，而**冲突重基单独计 3 次** ——
+理由是它解决的不是「意见」，因此不该占那条预算。两者耗尽都是 `refuse`：拒绝继续、换方法或叫人，
+而不是偷偷把上限调大再来一轮。升级路径由**一个独立的步骤**表达，不是引擎的 escalate 模式。
 
 ### violation 的两种性质必须可区分
 
@@ -1436,7 +1530,7 @@ step id 变成了 `True` / `False`（错误信息里 `known: A, True, False, Z`�
 | `breach` | 有东西**带标记地通过了**。保障没生效 |
 
 不区分的后果是具体的：终点判据 `no_open_violations` 会因为**引擎工作了**而让 run 关不掉，
-于是「不去尝试」比「守规矩」更划算。更具体的是，转写里 `unwitnessed_gate` 一个 code
+于是「不去尝试」比「守规矩」更划算。更具体的是，`unwitnessed_gate` 这一个 code 曾经
 既用在「拒绝伪造」也用在「接受降级」上——语义相反，而下游分不出来。
 现在前者叫 `gate_refused_unwitnessed` 且是 `blocked`。
 
@@ -1449,7 +1543,7 @@ step id 变成了 `True` / `False`（错误信息里 `known: A, True, False, Z`�
 
 | 注册表 | 扩展什么 | 内置 |
 |---|---|---|
-| `predicates` | 「这步做完了吗」 | 5 个 |
+| `predicates` | 「这步做完了吗」 | 15 个 |
 | `witnesses` | 「gate 真有人确认吗」 | 2 个 |
 | `fact_providers` | 运行时事实从哪来 | 3 个 |
 | `operators` | 条件怎么比 | 8 个 |
@@ -1529,6 +1623,10 @@ per-run 缓存会在长流程里过期——开头读到的「改了哪些文件
       ✔ evidence_kinds contains 'open_question'   (actual: '[2 item(s)]')
 ```
 
+## 作用域与强制的边界
+
+一个动作**算不算落在这条流程管的范围里** —— 以及当两条流程共用同一个 scope 时，谁拥有这个动作。这一节里每一条都是某个绕过路径被关掉的记录。
+
 ### 一个位置 scope 可以按「调用自己指名的目标」判定
 
 `path_prefix` 只问**调用方在哪**，而一次工具调用可以作用于它所在之外的目录。实测：
@@ -1555,8 +1653,10 @@ scope = /s，run 已开
   这正是误拦面的边界）
 - **不声明的 flow 逐字节不变**，默认仍是最窄的 `exact`
 
-两个生产 ability 声明了它（`shipcheck-asis` repo / `push` workspace）；`cr-reviewer` 与
-`cr-to-task` 是 `in_payload`（一个 CR 或一个迭代不是一个位置），不受影响。
+**怎么选**取决于这条流程的 scope 是不是一个**位置**：scope 是一个目录（仓库、工作区）时，
+一个动作可以「站在别处、指名这里」，所以要 `path_prefix_or_payload`；scope 是一个 CR、一次迭代、
+一个文档 slug 这类**不是位置**的东西时，`in_payload` 就够了，路径前缀对它没有意义。
+不声明的 flow 不受任何影响。
 
 **两种 payload 模式共用一份搜索实现。** 两份实现会漂，而漂移是隐形的：两个模式由不同 ability
 使用，分歧表现为其中一个悄悄匹配得更少。有测试同时对两个模式断言同一批边界。
@@ -1580,8 +1680,8 @@ payload 那一侧**刻意不解析符号链接**（而两个目录会）：paylo
 
 ```
 <repo>/.harness-required
-  # 这个仓库的交付必须走 shipcheck-asis
-  shipcheck-asis
+  # 这个仓库的交付必须走 delivery
+  delivery
 ```
 
 于是同一份字节在任何机器上意思相同，签进仓库就让要求**跟着代码走**，并且改动它会出现在 code
@@ -1654,9 +1754,9 @@ harness leases          # 谁此刻持有哪个 scope，从谁那里、在哪一
 真正想知道的事，而在这之前它只能靠触发一次守卫、读它打印的警告才能发现：
 
 ```
-sc1  shipcheck-asis repo=/tmp/r  step=C00  actor=alpha  → delegated to dl1
-dl1  delivery       repo=/tmp/r  step=C01  actor=beta   ← leased from sc1  → delegated to dl2
-dl2  delivery       repo=/tmp/r  step=C01  actor=gamma  ← leased from dl1
+run1  flow-a  repo=/tmp/r  step=C00  actor=alpha  → delegated to run2
+run2  flow-b  repo=/tmp/r  step=C01  actor=beta   ← leased from run1  → delegated to run3
+run3  flow-b  repo=/tmp/r  step=C01  actor=gamma  ← leased from run2
 
 repo=/tmp/r: 3 runs, sc1 → dl1 → dl2  — guards adjudicate
 ```
@@ -1688,6 +1788,10 @@ holder 之后，声明在两侧都是单射的，于是图是若干互不相交�
 又是 holder，所以不含 root——root 恰好一个时它所在的分量必是路径，别处的环走不到，落到
 `partial`。一条跑不到的分支比没有更糟，**它读起来像一个隐患已经被处理了**。这条由一个测试
 钉住：把环放在旁支上，如果走图会不终止，那个测试会挂住。
+
+## 能力声明与并发
+
+一条 flow 声明它依赖引擎的哪些机制（于是缺失在载入期就说得出口），以及多个 session 同时跑时**隔离轴是什么**。
 
 ### `uses:` —— 一条 flow 声明它依赖引擎的哪些机制
 
@@ -1799,6 +1903,10 @@ harness status
 
 这道防护落地时立刻抓到一条**既有**测试也在这么干。
 
+## 演进与夹具
+
+账本怎么带着数据往前走，以及为什么两个 demo 能力最终被留下来当**夹具**而不是被删掉。
+
 ### schema 版本与迁移
 
 `init()` 从「创建」变成「**创建或迁移**」，版本号存在 `PRAGMA user_version`（DB 头里的 4 字节，
@@ -1879,6 +1987,10 @@ role: fixture      # 缺省 production
 `fail_closed`（引擎的「效果」缝，`delivery` 是唯一消费方）、内置 provider `git_tree`
 （同上）、以及 `attest` 谓词（`authoring` 是唯一使用者）。
 
+## provider：把外部世界接进来
+
+运行时事实来自外部世界，而外部世界会不在、会要凭证、会撒谎。这一节是**接一个外部工具之前要先回答的那些问题**。
+
 ### provider 声明它需要什么能力，引擎决定缺失意味着什么
 
 一个伸手到进程外的 provider 需要某样东西在那里：一个工具文件、一个可执行程序、
@@ -1924,160 +2036,6 @@ role: fixture      # 缺省 production
 一处刻意没有迁移的：`scope 不是一个目录` 这支留在 provider 里。那是**真答案**（没什么可分析），
 不是缺失的答案，把两者混为一谈会把一个正确的空结果变成拒绝。
 
-### 接入源系统外围工具时的筛选判据：先问「这里有什么可比的东西」
-
-盘点源系统 6 个「纯计算」外围脚本（约 1,860 行）后，真正接得进来的只有 **237 行**。差距不在
-可移植性上——最可移植的那个（零硬编码路径、纯 stdlib）反而没接：
-
-| 工具 | 可移植 | 有消费方 | 结论 |
-|---|---|---|---|
-| `analyze-run-metrics.py` 237 | 部分（路径硬编码） | ✅ 有一步在记指标 | **接了** |
-| `verify-artifact-digest.py` 98 | ✅ 完全 | ❌ 本引擎没有产物摘要这回事 | 不接 |
-| `verify-spec.py` 726 | ❌ 需要源系统整棵 spec 树 | ❌ 它验的是**那个引擎自己的** spec | 不接 |
-| `verify-layer-pointers.py` 94 | ❌ 路径无法参数化 | ❌ 同上 | 不接 |
-| `analyze-batch.py` 469 | 部分 | ❌ 它统计的是源系统自己的 history 语料 | 不接 |
-| `phase4-pre-close-writeback.py` 244 | ❌ **它是写入工具** | —— | 属「效果」类，不是纯计算 |
-
-**判据是「这里有没有它能比对的东西」，不是「它跑不跑得起来」。** 上表里 4 个不接的共同原因一样：
-它们计算的对象是源系统自己的产物，而这个引擎要么有自己的等价物（`validate` / 孤儿 topic 检测 /
-交叉链接检查），要么根本没有那份语料。接进来只会得到「声明了却没人读」——那正是本仓花了一整轮清掉
-两次的形态。
-
-接进来的那一个买到了什么：一步的判据从「有这么一行」变成「这些数字来自运行时」是一句可被独立记录
-反驳的声称。原来的判据接受**没人产出过的数字**。
-
-### 效果类（C3）的形态：agent 执行，引擎用只读命令独立核实
-
-隔离一个工作树会建分支、建检出、复制一份构建骨架；拆除它会 `worktree remove` + `branch -D`
-+ 带守卫的 `rm -rf`。**引擎一件都不做。** agent 跑脚本，引擎随后问世界到底怎样——这个分工
-不是洁癖，它是「我隔离了」这句话唯一能被反驳的安排。
-
-源实现自己写下了它要消除的失效模式，值得原样引用，因为它就是这里加判据的理由：
-
-> provisioning **FAILS HARD on error rather than falling back to the shared tree**. A silent
-> fallback would hand back exactly the shared-working-tree behaviour the caller asked to be
-> isolated FROM, while reporting success.
-
-一句没人核对的「已隔离」就是同一个退回上移了一层。所以两个取值各有反驳事实：
-
-| 声称 | 反驳它的事实 | 依据 |
-|---|---|---|
-| `isolated` | `in_linked_worktree equals false` | 链接工作树的 `.git` 是**文件**（指向拥有它的仓库），源检出的是**目录** |
-| `shared_declared` | `isolation_declared equals true` | 方案文档里声明的 `worktree_isolation`——否则它是跳过隔离的免费出口 |
-
-不可逆的那一半由 guard 管，挂在 Y/N 关闭决策那个 gate 上。守卫**同时拦脚本与它包装的破坏性
-原语**（`git worktree remove` / `git branch -D shipcheck/*`）——只认包装器的门，改个措辞就能绕过。
-
-一处实测得来的约束：**本引擎的 matcher 没有引号感知**，防「命令里只是提到脚本名」靠的是
-**命令开头锚定**。所以把锚点放宽到任意空白边界会同时拆掉那层保护（试过，它把
-`echo 'run worktree-teardown.sh later'` 一起拦了）。正确形状是两条锚定规则：裸调用 +
-枚举的解释器前缀。解释器可枚举，提及不可枚举。
-
-### 一个步骤的两半可核实性可以不对等 —— 那就分开处理，不要给不可核的那半编一个假事实
-
-收口这一步同时做两件事：把任务系统里的单子关掉、把方案文档写回归档。**两者的可核实性差得很远。**
-
-| | 能核吗 | 怎么办 |
-|---|---|---|
-| 方案文档归档 | ✅ 完全可核（文件系统） | 三个取值各有反驳事实 |
-| 收口写回跑过了 | ✅ 可核（它留下两处痕迹） | 由「两处痕迹一个都没有」反驳 |
-| 任务系统里已关闭 | ❌ **不可核** | **刻意不加核对**，强制来自 gate 上的 guard |
-
-第三行是重点。读那个任务系统只有 MCP 一条路，而 provider 是子进程、调不到 MCP。这时候
-**编一个「看起来在核」的事实比不核更糟**：它在 schema 里读着合理，在输出里不可证伪。所以那半
-明确留空，理由写进 flow.yaml，而强制来自动作发生前就拦住它的 guard —— 不是事后自陈。
-
-这与 C2 那边不声明 `cr_exists` 是同一条纪律：**不声明我算不出来的事实。**
-
-方案文档那半有三处实现要点，每一处都是一种会静默出错的方式：
-
-- **按 slug 解析，不用早先记下的路径。** 那个路径在收口时**按设计已经过时**——移动文件正是被检验
-  的那个效果。读它要么找不到（把成功报成失败），要么还在原处（把没发生的移动报成成功）。
-- **history 记录按包含匹配。** 写入方的命名随时间变过（205 条真实记录里只有 18 条带日期前缀），
-  精确名查找会把每一条旧形状的现存记录报成缺失。
-- **frontmatter 只读开头那一块。** 一份丢了 frontmatter 但正文引用了 yaml 的文档，否则会把
-  引用里的片段读成它的状态。而 `## Shipped` 必须锚行首：方案正文常会提到 shipped
-  （「will be shipped in a follow-up」），子串匹配会把写回的痕迹报成存在。
-
-「目录即状态」这个不变量在真实语料上 **405/406** 成立，这是这条判据的依据。
-
-另外给读真实位置的 provider 留了环境覆盖口（`HARNESS_PLAN_DATA_DIR` / `HARNESS_HISTORY_LOG_DIR`），
-**这是安全属性不是便利**：没有它，测试只能读用户几百份真实方案文档，而一个粗心的测试会写进去——
-相邻项目里发生过一次，一套测试扫掉了 772MB 真实存储。覆盖在**调用时**解析而非 import 时：
-import 时读会把它冻结在进程生命周期里，并静默失效于「加载之后才设置覆盖」的调用方。
-
-### 有一种工具不能 vendor：它的价值是自己累积的状态
-
-其余每个领域工具都是逐字节复制进 ability 的，因为**算法可以搬运**。常驻经验库的读取器不行——
-它的价值是一个**活的本地存储**：一个刻意不进版本控制的数据库，因为它累积的是本机的使用信号。
-把读取器复制过来，只会得到一个指向空处的读取器。
-
-所以能力声明指向它**实际所在的路径**，缺失由能力层如实报出：
-
-```python
-@facts.provider("hot_set", requires=({"file": "~/.kiro/skills/shared-kb/memory/memory.py"},), ...)
-```
-
-这确立了一条通则：**一个价值在于自身累积状态的工具不可 vendor，而能力声明是让它的缺失保持诚实
-的那一半。**
-
-顺带一条必须核对的纪律：那个 CLI 的 `hot-banner` 是纯读（只有 SELECT），所以反复调用安全；
-它的兄弟 `recall` 看起来也像读，**实际会写使用记录**，除非显式关掉。provider 调的是前者。
-
-激活横幅的三个取值同样各有反驳事实（`loaded` ← 计数为 0；`empty` ← 计数 ≥1；`unavailable`
-← 其实读得到）。这条把源系统只能用散文说的那句话变成了机制：**命令失败不是编造「Hot Set: 0」
-的许可。**
-
-### 上报：把「我报了」变成可被协调方反驳的声称
-
-派发式工作的行为规范要求每到一个里程碑就上报。参照系统把这条写成散文 + 一个 fire-once
-hook，于是「我报了」按它自己的话被接受——它自己的账上因此有 **162 次强制确认**和
-**24 次记录在案的未到达**。协调方那边有没有东西到达，是唯一能反驳它的事实，而那个事实
-从没被问过。
-
-所以这里问它。收口步骤记一个 `fleet_report`，**三个合法值每一个都有各自的反驳事实**：
-
-| 声称 | 反驳它的事实 |
-|---|---|
-| `sent`（我报了） | `fleet_event_count count_lte 0` —— 协调方那边什么都没到 |
-| `unreachable`（连不上） | `fleet_reachable equals true` —— 它其实答得上来 |
-| `not_applicable`（不是派发的活） | `fleet_applicable equals true` —— 开头记的是一个真任务 id |
-
-**只核对 `sent` 会把另两个变成免费出口**，这是这套设计里反复出现的同一件事。测试因此断言
-三个声称由**三个互不相同**的事实反驳：两个声称共用一个反驳，读起来像全覆盖，实际留下一个值
-没被检查。
-
-「这个 run 服务的是哪个任务」记在**开头**（`C01`）而不是收口处。收口时才声明是否适用，等于
-让想跳过上报的人自己决定适用性。
-
-四个里程碑 hook 是**提醒而非义务**，这也是刻意的：一个「我报了」的义务可以用一句散文销账，
-那正是 162 次的形状。真正的强制在收口的三路核对上——那里没有散文可谈。
-
-一处继承自源工具的判断：一个答得上话却答不出这个任务的端点是**第三种状态**，那个工具叫它
-`indeterminate` 并注明「we could not look -> NO-OP is NOT granted」。它映射为**不可达**，
-所以那种情况下 `sent` 同样被拒。
-
-### 依赖网络的 provider：两条硬边界
-
-第一个 `net` provider（读评审系统）确定了两条边界，都是实测得出的：
-
-**① 它绝不获取凭证。** 读一份评审需要已认证的会话；一个伸手进用户凭证库去取的 provider，是用
-**远大得多的权限**换一个小事实。所以「这个主机要凭证」是**报出来的事实**，不是去满足的前置条件。
-
-**② 因此它答不了什么。** 对真实主机实测：存在的评审与不存在的评审返回**完全相同**的未授权
-重定向（`307 → SSO`）。所以「这个评审是否存在」在无凭证下不可推出，**没有任何事实声称它**。
-声明一个 `cr_exists` 会是最诱人的谎：在 schema 里读起来合理，在输出里不可证伪。
-
-```
-能力（引擎）    主机可达吗              缺失 => 该 provider 全部事实不可用
-事实（provider）答了吗 / 要凭证吗       诚实取值
-不建模          这个评审存在吗          需要凭证才能答
-```
-
-代价也如实记下：这条接入让 `cr-reviewer` 的端到端**开始依赖网络**。缺失路径由一条用不可解析
-主机的确定性测试覆盖（不需要网络即可证明拒绝），在场路径则如实取决于运行它的机器——而这正是
-`validate` 的 `capabilities:` 一行要回答的问题。
-
 ### 通用性是被测试证明的，不是声称的
 
 两个 ability 用**完全不相交的事实**：
@@ -2091,11 +2049,3 @@ hook，于是「我报了」按它自己的话被接受——它自己的账上�
 配套三条测试：两个 ability 不许共用任何一个事实名；求值层（`conditions.py` / `operators.py`）
 不许出现任何事实名；内置算子不许含领域词干。
 
-## 与现有 skill 的关系
-
-**零接触。** 这里没有任何代码读写 `~/.kiro/`，也没有从任何现有 skill 复制代码。
-两个 flow 是**参照**那些流程的形状写的，不是它们的移植。
-
-如果要把某个真实能力搬进来，正确顺序是：先写它的 `flow.yaml`（纯数据，几小时），
-用 `harness validate` 校验，跑一个真实 run 看退出码语义是否吻合——**吻合再谈迁移**。
-先立框架、后找消费方，就是上面 ①。

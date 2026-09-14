@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +40,15 @@ DOCS = ("README.md", "integrations/WIRING.md", "integrations/CAPABILITIES.md")
 RENDERER = REPO / "integrations" / "render-wiring.py"
 BEGIN = "<!-- BEGIN GENERATED"
 END = "<!-- END GENERATED -->"
+
+# Every doc that has a generated block, with the renderer that owns it. Parametrised rather than
+# duplicated: WIRING.md got these two guards first and README.md then drifted in 7 places while
+# WIRING.md drifted in 0 — so the guards are the asset, and a third generated doc should inherit
+# them by adding one line here, not by someone remembering to copy two tests.
+GENERATED = (
+    ("integrations/WIRING.md", "integrations/render-wiring.py"),
+    ("README.md", "integrations/render-readme.py"),
+)
 
 # References a doc names that are NOT this project's, with the reason. Declared rather than
 # skipped: an unexplained exemption is how a check stops meaning anything, and a NEW unknown
@@ -62,39 +72,123 @@ def _cli(*args, cwd=None, env_extra=None):
 
 # ------------------------------------------------------------------ derivable → generated
 
-def test_the_generated_block_matches_what_re_rendering_produces():
-    """The four facts that drifted are now generated, and this is what makes that mean something.
+@pytest.mark.parametrize("doc,renderer", GENERATED)
+def test_the_generated_block_matches_what_re_rendering_produces(doc, renderer):
+    """The facts that drifted are now generated, and this is what makes that mean something.
 
     Without it, "generated" would only describe how the text got there the first time.
     """
-    proc = subprocess.run([sys.executable, str(RENDERER)],
+    proc = subprocess.run([sys.executable, str(REPO / renderer)],
                           capture_output=True, text=True, cwd=str(REPO))
     assert proc.returncode == 0, proc.stderr
     rendered = proc.stdout.strip()
 
-    text = (REPO / "integrations/WIRING.md").read_text(encoding="utf-8")
-    assert BEGIN in text and END in text, "the generated block's markers are gone"
+    text = (REPO / doc).read_text(encoding="utf-8")
+    assert BEGIN in text and END in text, f"{doc}'s generated block markers are gone"
     start = text.index(BEGIN)
     in_file = text[start:text.index(END, start) + len(END)].strip()
 
     assert in_file == rendered, (
-        "integrations/WIRING.md's generated block is not what the renderer produces.\n"
-        "  regenerate: python3 integrations/render-wiring.py --write"
+        f"{doc}'s generated block is not what the renderer produces.\n"
+        f"  regenerate: python3 {renderer} --write"
     )
 
 
-def test_re_rendering_is_idempotent():
+@pytest.mark.parametrize("doc,renderer", GENERATED)
+def test_re_rendering_is_idempotent(doc, renderer):
     """A generator that changes the file every run makes the guard above unusable — it would fail
     on a clean tree, and a guard that cries wolf is turned off."""
-    doc = REPO / "integrations/WIRING.md"
-    before = doc.read_text(encoding="utf-8")
+    path = REPO / doc
+    before = path.read_text(encoding="utf-8")
     try:
-        proc = subprocess.run([sys.executable, str(RENDERER), "--write"],
+        proc = subprocess.run([sys.executable, str(REPO / renderer), "--write"],
                               capture_output=True, text=True, cwd=str(REPO))
         assert proc.returncode == 0, proc.stderr
-        assert doc.read_text(encoding="utf-8") == before, "--write is not idempotent"
+        assert path.read_text(encoding="utf-8") == before, f"{renderer} --write is not idempotent"
     finally:
-        doc.write_text(before, encoding="utf-8")
+        path.write_text(before, encoding="utf-8")
+
+
+def test_the_readme_block_survives_the_tree_being_published(tmp_path):
+    """README's block promises every number still holds once `abilities/` is cut to a sample.
+
+    Rehearsed rather than trusted: stage the tree as it would ship — engine, tests, integrations,
+    and ONLY the `role: fixture` abilities — render there, and require the same bytes. A docstring
+    saying "engine facts only" would not catch the first row that quietly reads the installed set,
+    and that mistake is one copy-paste away: `render-wiring.py` has such a row BY DESIGN (its
+    "biggest installed flow"). Publishing would silently turn that kind of row into a confident
+    wrong number, which is worse than an absent one.
+    """
+    stage = tmp_path / "as-published"
+    for rel in ("engine", "bin", "tests", "integrations"):
+        shutil.copytree(REPO / rel, stage / rel)
+    shutil.copy2(REPO / "pyproject.toml", stage / "pyproject.toml")
+
+    (stage / "abilities").mkdir()
+    fixtures = [p.parent for p in sorted((REPO / "abilities").glob("*/flow.yaml"))
+                if "role: fixture" in p.read_text(encoding="utf-8")]
+    assert fixtures, "no `role: fixture` ability on disk — this rehearsal needs a sample to keep"
+    for d in fixtures:
+        shutil.copytree(d, stage / "abilities" / d.name)
+
+    here = subprocess.run([sys.executable, str(REPO / "integrations/render-readme.py")],
+                          capture_output=True, text=True, cwd=str(REPO))
+    there = subprocess.run([sys.executable, str(stage / "integrations/render-readme.py")],
+                           capture_output=True, text=True, cwd=str(stage))
+    assert there.returncode == 0, f"the renderer does not even run on a published tree:\n{there.stderr}"
+    assert there.stdout == here.stdout, (
+        "README's generated block changes when the tree is cut down to its sample abilities, so at "
+        "least one row is derived from the installed ability set. Move that row out of README — "
+        "`harness abilities` is where an installation-specific count belongs."
+    )
+
+
+def test_the_readme_block_still_carries_every_row_it_is_meant_to():
+    """Guard the block's INVENTORY, not just its bytes.
+
+    The byte guard above cannot see a row being deleted — remove a row and re-render, and both
+    files agree again. But a deleted row is exactly how a number goes back to being hand-copied
+    into prose. So each source of truth the block cites is asserted present by name.
+    """
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    start = text.index(BEGIN)
+    block = text[start:text.index(END, start)]
+    for cited in ("engine/*.py", "bin/harness", "engine/schema.sql", "flow.SPEC_MAJOR",
+                  "predicates._REGISTRY", "proof._WITNESSES", "facts._PROVIDERS",
+                  "operators._OPERATORS", "flow.ENGINE_CAPABILITIES", "flow.SCOPE_MATCH_MODES",
+                  "harness.GUARD_VERDICTS", "harness.PROSE_ONLY", "harness.NO_JSON_YET",
+                  "pytest --collect-only"):
+        assert cited in block, (
+            f"README's generated block no longer cites `{cited}`. If that fact stopped being "
+            f"derivable, say so; if it just moved, it moved into prose, which is where the drift "
+            f"came from."
+        )
+
+
+def test_a_hand_written_total_test_count_carries_the_date_it_was_measured():
+    """The one test count that must NOT be generated, and why it must carry a date instead.
+
+    "The whole suite passes on 3.10.16" cannot be regenerated: the suite runs on ONE interpreter
+    and never verifies another, so re-rendering that number would fabricate a run that did not
+    happen. It is a record of a past measurement. But an undated "passes and all green" is
+    unfalsifiable — a reader cannot tell whether it is from this week or last quarter. So the
+    rule is: a hand-written TOTAL goes with a date, or it does not go in.
+
+    Subset counts ("the 5 mcp tests") are not totals and are not asked for a date.
+    """
+    text = (REPO / "README.md").read_text(encoding="utf-8")
+    start, stop = text.index(BEGIN), text.index(END) + len(END)
+    outside = text[:start] + text[stop:]
+
+    totals = [m for m in re.finditer(r"整套\s*(\d+)\s*个测试", outside)]
+    assert totals, ("no hand-written total test count found — if the 3.10 sentence was reworded "
+                    "away, drop this guard deliberately rather than leaving it to pass on nothing")
+    for m in totals:
+        window = outside[m.start():m.start() + 400]
+        assert re.search(r"20\d\d-\d\d-\d\d", window), (
+            f"{m.group(0)!r} states a whole-suite result with no measurement date within the "
+            f"following sentences. Add the date you actually ran it, or remove the number."
+        )
 
 
 def test_the_facts_that_are_generated_are_not_also_restated_in_prose():
