@@ -122,7 +122,12 @@ def test_the_readme_block_survives_the_tree_being_published(tmp_path):
     stage = tmp_path / "as-published"
     for rel in ("engine", "bin", "tests", "integrations"):
         shutil.copytree(REPO / rel, stage / rel)
-    shutil.copy2(REPO / "pyproject.toml", stage / "pyproject.toml")
+    # README.md and LICENSE are part of what ships, and leaving them out was a real bug in an
+    # earlier version of this rehearsal: `test_portability.py` parametrises over the shipped
+    # surface, so an absent README.md removed one test case, changed the collected count, and
+    # broke the byte comparison for a reason that had nothing to do with abilities.
+    for name in ("pyproject.toml", "README.md", "LICENSE"):
+        shutil.copy2(REPO / name, stage / name)
 
     (stage / "abilities").mkdir()
     fixtures = [p.parent for p in sorted((REPO / "abilities").glob("*/flow.yaml"))

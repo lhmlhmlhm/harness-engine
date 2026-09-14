@@ -36,7 +36,7 @@
 ```sh
 harness init                      # 顺带把本机契约写到 store 旁边，并打印路径
 harness brief --write             # 或者单独刷新它
-#   ✅ wrote /Users/you/.local/state/harness-engine/brief.md
+#   ✅ wrote ~/.local/state/harness-engine/brief.md
 ```
 
 它按**这套安装**产出：真实存在的子命令、真实的退出码、以及**已装 flow 实际用到的机制**——
@@ -123,7 +123,7 @@ harness adapter-contract          # JSON：I/O 契约 + translation + resilience
 open run、静默全放行。适配器会显式检查并报警而不是静默放行：
 
 ```
-⚠️  HARNESS_STATE_DIR=/tmp/x has no harness.db — guard NOT enforced.
+⚠️  HARNESS_STATE_DIR=<dir> has no harness.db — guard NOT enforced.
 ```
 
 最省事的做法是**两边都不设**，让它用默认值。

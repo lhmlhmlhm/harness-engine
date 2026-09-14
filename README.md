@@ -51,7 +51,7 @@ harness-engine/
 | `guard` 裁决闭集 | 7 种 | `harness.GUARD_VERDICTS` |
 | 只有散文的命令 | 7 个（各带理由） | `harness.PROSE_ONLY` |
 | 还没有 `--json` 的命令 | 空集（每个写命令都能用 `--json` 作答） | `harness.NO_JSON_YET` |
-| 测试 | 481 个 | `pytest --collect-only` |
+| 测试 | 526 个 | `pytest --collect-only` |
 
 <!-- END GENERATED -->
 
@@ -1132,7 +1132,7 @@ traceback 照旧打到 stderr（一个藏起自己位置的 bug 比一个退出�
 同一片 scope——给两条 flow 写上同一个 `scope_kind`，在同一个 key 上开了一个，另一个就会被拒：
 
 ```
-⛔ scope repo='/tmp/r' already has 1 open run(s)
+⛔ scope repo='<repo>' already has 1 open run(s)
 ```
 
 这不是耦合，而是这套设计的要点：守卫回答的是「这件事能不能对**这个东西**做」，所以两条都作用于
@@ -1412,6 +1412,38 @@ python3 -m pytest tests/ -q      # 全绿；条数见开头那张生成的表
 **外部引用以数据形式豁免，连理由一起。** 那份文档引用了源系统的四个常量（转写的来处），它们不在
 本仓库里。豁免表里每条都要写理由，且理由本身有长度断言——**一条没有理由的豁免，就是一条悄悄停止
 生效的检查**。
+
+### 可重定位性也是被测试证明的
+
+这棵树会被复制到云桌面、会被交给别人。所以一个写死在 macOS `/Users` home 下的字面路径，
+在 Linux 上直接是错的，
+而一个指向某人 home 的字面路径对除他之外的所有人都是错的 —— **两者都不会响**：读者只是照着
+一条对他不成立的指令做，而作者永远看不到，因为在作者机器上它们都是对的。
+
+这和 README 曾经漂掉 8 个数字是同一个形状（写下时正确、没人看着、后来变错），所以它同样
+拿到一套机制而不是一条习惯。`tests/test_portability.py`：
+
+| 禁 | 为什么 |
+|---|---|
+| 根在 home 或厂商目录的路径（`/Users`、`/home`、`/opt`、`/Library` 这些） | 它们编码了一个操作系统，通常还编码了一个人 |
+| **这份 checkout 自己的绝对位置**（从磁盘派生，所以规则不会过期） | 写死自己在哪的脚本只在写它的那台机器上成立一次 |
+| **当前用户的登录名出现在路径段里**（从环境读，不写死） | 那正是「分享给别人」会坏的那一处 |
+| 夹具能力伸到自己目录之外（`~/`、`$HOME`、`../..`） | 一个悄悄需要作者 home 里某个文件的 sample，比没有 sample 更糟 |
+
+**`~/` 和 `$HOME/` 不禁**，它们能正确重定位 —— 这个引擎本来就依赖这一点：`harness require`
+存的是字面 `~`，只在比较时才展开，这才让一份策略记录能跨机器用。
+
+**看起来像绝对路径的占位不禁**（`/path/to/your/flows`、`<tree>/abilities/x`、
+`…/delivery/providers.py`）。一条「文档里不许出现前导斜杠」的规则会把这些也判红，而它们是
+写文档的正确方式 —— **一条会误伤好做法的守卫会换来一份豁免清单，而清单一长，规则就悄悄变成建议**。
+
+**不扫非 `role: fixture` 的能力**，这是对的：那些是私有流程，它们的 provider 本来就指向真实的
+本机工具，而且它们不随包走 —— 把它们泛化掉等于弄坏它们。发行面是从磁盘派生的：引擎、入口、
+集成、测试、根文档，加上作为 sample 的夹具能力。
+
+写这四条守卫时它们抓到的第一个违规者是**守卫文件自己**（docstring 里为了举例写了带尾斜杠的
+`/Users` 形式）和 `pyproject.toml` 的作者署名。前者改措辞而不是加豁免；后者说明守卫写宽了 ——
+一个包本来就该署名，真实危害是名字**当作目录用**，于是判据收窄成「login 出现在路径段里」。
 
 ## spec 语言的边界
 
@@ -1754,17 +1786,17 @@ harness leases          # 谁此刻持有哪个 scope，从谁那里、在哪一
 真正想知道的事，而在这之前它只能靠触发一次守卫、读它打印的警告才能发现：
 
 ```
-run1  flow-a  repo=/tmp/r  step=C00  actor=alpha  → delegated to run2
-run2  flow-b  repo=/tmp/r  step=C01  actor=beta   ← leased from run1  → delegated to run3
-run3  flow-b  repo=/tmp/r  step=C01  actor=gamma  ← leased from run2
+run1  flow-a  repo=<repo>  step=C00  actor=alpha  → delegated to run2
+run2  flow-b  repo=<repo>  step=C01  actor=beta   ← leased from run1  → delegated to run3
+run3  flow-b  repo=<repo>  step=C01  actor=gamma  ← leased from run2
 
-repo=/tmp/r: 3 runs, sc1 → dl1 → dl2  — guards adjudicate
+repo=<repo>: 3 runs, sc1 → dl1 → dl2  — guards adjudicate
 ```
 
 再塞进一条无关的 run，判定就翻过去（而这正是强制此刻在这个 scope 上是关着的）：
 
 ```
-repo=/tmp/r: 4 runs, no usable delegation (partial)  — ⚠️  guards will NOT adjudicate here
+repo=<repo>: 4 runs, no usable delegation (partial)  — ⚠️  guards will NOT adjudicate here
 ```
 
 | 规则 | 为什么 |

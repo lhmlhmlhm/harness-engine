@@ -2461,7 +2461,7 @@ def test_two_abilities_share_one_registry_without_copying_it(env):
 
     # The point of all of it: one registry, so the same input yields the same answer — and
     # the shared vocabulary is the ability's declared variants, not a copied table.
-    for ws in ("/Users/x/.kiro/skills/ux/output/proj", "/tmp/an-ordinary-package"):
+    for ws in ("~/.kiro/skills/ux/output/proj", "/tmp/an-ordinary-package"):
         got = facts.gather_all(pu.facts_providers,
                                {"run_id": "t", "scope": ws, "scope_kind": "s",
                                 "ability": "t"})["executor"]
@@ -2601,7 +2601,7 @@ def test_the_two_new_abilities_have_full_prose_and_no_product_names(env):
 # ──────────────── end-to-end: both abilities, both variants, four runs ────────────────
 
 @pytest.mark.parametrize("ability,variant,scope,derive", [
-    ("push", "ux",         "/Users/x/.kiro/skills/ux/output/proj", True),
+    ("push", "ux",         "~/.kiro/skills/ux/output/proj", True),
     ("push", "ship-check", "/tmp/an-ordinary-package",             True),
     ("plan", "ux",         "some-ux-plan-slug",                    False),
     ("plan", "ship-check", "some-code-plan-slug",                  False),
