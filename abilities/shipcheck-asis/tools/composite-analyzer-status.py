@@ -33,7 +33,12 @@ SEVERITY = {
 }
 CLEAN = {"all-pass", "merged"}
 
-CR_WATCH = os.path.expanduser("~/.kiro/tools/cr-watch/cr-watch.py")
+# Overridable, because the default names a tool that lives OUTSIDE this ability and may simply not
+# be on another machine. `fetch_status` already tolerates its absence by returning "unknown" — which
+# is the danger: without an override the only symptom of a wrong path is every CR reporting unknown,
+# and "no analyzer has spoken yet" is a legitimate state, so nothing looks wrong.
+CR_WATCH = os.environ.get("HARNESS_CR_WATCH") or os.path.expanduser(
+    "~/.kiro/tools/cr-watch/cr-watch.py")
 
 
 def rollup(statuses: dict) -> dict:

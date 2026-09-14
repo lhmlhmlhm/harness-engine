@@ -52,16 +52,35 @@ REPO = Path(__file__).resolve().parent.parent
 HOME_OR_VENDOR = re.compile(r"/(Users|home|root|Applications|Library|private|opt|usr/local)/")
 
 
+# Directories that hold generated output, and suffixes that are not source. Both named rather than
+# guessed: the first version of this scan used `rglob("*")` and swept up `__pycache__/*.pyc`, whose
+# embedded compile-time paths tripped three guards at once — and, because this file parametrises over
+# the result, changed the COLLECTED TEST COUNT depending on whether anything had run first. The
+# README's generated block records that count, so its byte guard went non-deterministic with it. A
+# guard that is green after a purge and red otherwise teaches people that red means "try again".
+BUILD_DIRS = {"__pycache__", "build", "dist", ".egg-info", ".pytest_cache", ".mypy_cache"}
+SOURCE_SUFFIXES = {".py", ".sql", ".yaml", ".yml", ".md", ".toml", ".json", ".sh", ".cfg", ""}
+
+
+def _is_source(p: Path) -> bool:
+    if any(part in BUILD_DIRS or part.endswith(".egg-info") for part in p.parts):
+        return False
+    return p.suffix in SOURCE_SUFFIXES
+
+
 def _shipped() -> list[Path]:
     """The files that travel. Derived, not listed: a new engine module or a new fixture ability
-    joins the scan by existing, which is the only way a guard like this keeps up with the tree."""
+    joins the scan by existing, which is the only way a guard like this keeps up with the tree.
+
+    Source only — see BUILD_DIRS above for what that excludes and why it is spelled out.
+    """
     out: list[Path] = []
     for pat in ("engine/*.py", "engine/*.sql", "bin/*", "integrations/*",
                 "tests/*.py", "README.md", "pyproject.toml"):
-        out += [p for p in REPO.glob(pat) if p.is_file()]
+        out += [p for p in REPO.glob(pat) if p.is_file() and _is_source(p)]
     for spec in sorted((REPO / "abilities").glob("*/flow.yaml")):
         if "role: fixture" in spec.read_text(encoding="utf-8"):
-            out += [p for p in sorted(spec.parent.rglob("*")) if p.is_file()]
+            out += [p for p in sorted(spec.parent.rglob("*")) if p.is_file() and _is_source(p)]
     assert len(out) > 20, f"the shipped-surface scan found only {len(out)} files — it is not looking"
     return sorted(set(out))
 
@@ -73,13 +92,20 @@ def _lines(p: Path):
     return enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1)
 
 
-@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: str(p.relative_to(REPO)))
-def test_no_shipped_file_names_a_home_or_vendor_rooted_path(path: Path):
-    """A macOS home path reads as an instruction, and is simply false on a Linux cloud desktop."""
-    bad = [(i, l.strip()) for i, l in _lines(path) if HOME_OR_VENDOR.search(l)]
+def test_no_shipped_file_names_a_home_or_vendor_rooted_path():
+    """A macOS home path reads as an instruction, and is simply false on a Linux cloud desktop.
+
+    Deliberately NOT parametrised over the file list. It was, and that made the number of collected
+    tests a function of the working tree — which the README's generated block records, so a stray
+    file turned that block's byte guard red for a reason unrelated to the block. One test, every
+    offender in the message: the per-file id read better in a failure, and a collected count that
+    does not move is worth more than an id.
+    """
+    bad = [(p.relative_to(REPO), i, l.strip()) for p in SHIPPED for i, l in _lines(p)
+           if HOME_OR_VENDOR.search(l)]
     assert not bad, (
-        f"{path.relative_to(REPO)} names a path rooted at a home or vendor directory:\n"
-        + "\n".join(f"  line {i}: {t[:110]}" for i, t in bad)
+        "these shipped files name a path rooted at a home or vendor directory:\n"
+        + "\n".join(f"  {rel}:{i}  {t[:100]}" for rel, i, t in bad)
         + "\n  Use `~/` or `$HOME/` (they relocate), or a placeholder like `/path/to/x`."
     )
 

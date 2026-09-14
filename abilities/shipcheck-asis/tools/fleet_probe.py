@@ -77,7 +77,14 @@ TIMEOUT_SEC = 8
 # 7 layer boundaries would otherwise add ~9s of pure latency, which is the kind of friction
 # that gets a guard disabled. Only the POSITIVE result is cached (see check_reachable).
 REACHABLE_CACHE_TTL_SEC = 60
-CACHE_DIR = Path(os.path.expanduser("~/.kiro/skills/ship-check/state"))
+# THIS ENGINE'S state dir, resolved the way the engine resolves it (HARNESS_STATE_DIR, then
+# XDG_STATE_HOME, then the home default). It used to be the OTHER system's state directory, which
+# worked only because both happened to exist on one machine: the cache is this tool's own bookkeeping
+# and has no business living in a tree this ability is being separated from.
+CACHE_DIR = Path(
+    os.environ.get("HARNESS_STATE_DIR")
+    or os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                    "harness-engine"))
 CACHE_FILE = CACHE_DIR / ".fleet-reachable-cache.json"
 
 MCP_SETTINGS = [

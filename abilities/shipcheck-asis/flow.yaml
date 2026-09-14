@@ -22,7 +22,11 @@ results:
 # 这条 flow 依赖的引擎机制。加载期与 flow 实际做的事**双向核对**：
 # 声明了没用 -> 拒；用了没声明 -> 拒。它不是开关（可关掉的强制不是强制），
 # 而是这条 flow 的表面 + 一份会指名缺了什么的引擎版本契约。
-uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, producers, prose, repeatable, results, stages]
+# The worktree facts live in their own ability: git-and-filesystem knowledge that must stay
+# correct when this lifecycle changes, and portable when the tree moves. The STEPS that consult
+# them stay here — they are four points in a ship, not a lifecycle of their own.
+requires: [worktree]
+uses: [ability_deps, exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, producers, prose, repeatable, results, stages]
 
 when: |
   任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（102 步），
@@ -43,7 +47,7 @@ facts:
   - run_metrics
   - fleet_central
   - hot_set
-  - worktree_state
+  - worktree.worktree_state
   - plan_writeback
   - quality_slo
 hooks:
@@ -331,6 +335,17 @@ guards:
 exclusive_groups:
 - - E22a
   - E22b
+# The ship step and the two observation steps that only exist because a review exists.
+# E06 admits `no_commit` as a delivery mode; before these groups existed, that mode was
+# declared valid and then structurally unsatisfiable three steps later — the spec
+# contradicted itself, and only whoever shipped a non-git target ever found out.
+# E08 needed no sibling: its `fields_agree` already carries `absent_ok: true`.
+- - E07
+  - E07n
+- - E09
+  - E09n
+- - E18
+  - E18n
 phases:
 - id: context
   title: context（25 步）
@@ -467,7 +482,7 @@ steps:
         equals: true
 - id: C01
   # 隔离工作树由这个工具开出来，引擎只事后只读核实。指针而已：怎么调用看它自己的文件头。
-  produced_by: ~/.kiro/skills/ship-check/scripts/worktree-setup.sh
+  produced_by: ../worktree/tools/worktree-setup.sh
   phase: context
   topics:
   - worktree-isolation
@@ -1369,12 +1384,39 @@ steps:
   completion:
     type: all_checks
     checks:
+    # Which BRANCH of the ship group this is. Without it the group is closable on the wrong
+    # side: a no-commit run could record a sha from somewhere and close the reviewed branch.
+    - type: evidence_in
+      kind: delivery_mode
+      values:
+      - commit_and_review
+      - commit_only
     - type: evidence
       kind: commit_sha
     - type: evidence
       kind: cr_url
     - type: evidence
       kind: pushed_rev
+- id: E07n
+  phase: execution
+  stage: ship
+  title: No-commit delivery record
+  directive: |
+    产出：一条「本次不提交」的如实记录——交付物落在哪，以及为何没有提交与评审
+    完成：交付方式确为 no_commit，且交付物位置已记录
+  deps:
+  - E06
+  - D14
+  - E04
+  completion:
+    type: all_checks
+    checks:
+    - type: evidence_in
+      kind: delivery_mode
+      values:
+      - no_commit
+    - type: evidence
+      kind: local_delivery_record
 - id: E07b
   phase: execution
   stage: ship
@@ -1384,6 +1426,7 @@ steps:
     完成：评分已 emit、交棒标记已写
   deps:
   - E07
+  - E07n
   - D16
   completion:
     type: all_checks
@@ -1421,6 +1464,24 @@ steps:
     values:
     - actionable
     - inherent_noise
+- id: E09n
+  phase: observation
+  stage: autosde
+  title: No-review comment triage
+  directive: |
+    产出：一条「本次没有评审意见可归类」的如实记录，并说明为何没有
+    完成：交付方式确为 no_commit，且已记录无评审意见的理由
+  deps:
+  - E08
+  completion:
+    type: all_checks
+    checks:
+    - type: evidence_in
+      kind: delivery_mode
+      values:
+      - no_commit
+    - type: evidence
+      kind: no_review_record
 - id: E27
   phase: observation
   stage: dry-run
@@ -1447,6 +1508,7 @@ steps:
   - terminal-not-optimistic
   deps:
   - E09
+  - E09n
   completion:
     type: all_checks
     checks:
@@ -1460,6 +1522,25 @@ steps:
       - analyzer_fail
       - timeout
   gate: affirm
+- id: E18n
+  phase: observation
+  stage: analyzer-wait
+  title: No-analyzer terminal record
+  directive: |
+    产出：一条「没有分析器可等」的如实记录
+    完成：交付方式确为 no_commit，且已记录无分析器的理由
+  deps:
+  - E09
+  - E09n
+  completion:
+    type: all_checks
+    checks:
+    - type: evidence_in
+      kind: delivery_mode
+      values:
+      - no_commit
+    - type: evidence
+      kind: no_analyzer_record
 - id: E18b
   phase: observation
   stage: analyzer-wait
@@ -1469,6 +1550,7 @@ steps:
     完成：评分已 emit
   deps:
   - E18
+  - E18n
   - E07b
   completion:
     type: evidence
@@ -1759,6 +1841,7 @@ steps:
   deps:
   - E18b
   - E07
+  - E07n
   gate: preauth:cleanup_entry_auto
   strict_witness: true
   completion:
@@ -2106,7 +2189,7 @@ steps:
       min_count: 4
 - id: E22a
   # 拆除同样是效果：脚本会在评审仍活着或有未提交改动时拒绝删除，那是预期结果。
-  produced_by: ~/.kiro/skills/ship-check/scripts/worktree-teardown.sh
+  produced_by: ../worktree/tools/worktree-teardown.sh
   phase: cleanup
   stage: close
   title: Y 分支完整 cleanup

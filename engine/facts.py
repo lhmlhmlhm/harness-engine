@@ -37,6 +37,7 @@ from . import registry
 
 import inspect
 import os
+import re
 import shutil
 import socket
 from pathlib import Path
@@ -102,6 +103,29 @@ NET_TIMEOUT = 2.0
 _PROBE_CACHE: dict = {}
 
 
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env(spec: str) -> str:
+    """Expand `${VAR}` / `${VAR:-default}` in a capability argument, AT CALL TIME.
+
+    THE POINT IS ONE RESOLVER. A provider whose data lives at an overridable location used to
+    declare the DEFAULT in `requires` and read the OVERRIDE at runtime, so the probe and the read
+    asked about different paths. On a machine where the override pointed elsewhere, `validate`
+    reported the capability present because the default happened to exist — and where neither
+    existed it still reported present if the default did. The failure that mattered was the first
+    one: a green check for a path nothing would read.
+
+    Shell notation rather than a second key, because `requires` entries are single-key on purpose
+    ("one capability per descriptor keeps a refusal able to name exactly which one is missing"),
+    and because a reader already knows what `${VAR:-default}` means without being taught.
+
+    An unset variable with no default expands to empty, which resolves to a path that does not
+    exist — reported absent, which is the honest answer.
+    """
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1)) or (m.group(2) or ""), spec)
+
+
 def _probe(kind: str, arg: str, base: Path) -> bool:
     """Answer one capability question, cached for the life of the process.
 
@@ -110,12 +134,18 @@ def _probe(kind: str, arg: str, base: Path) -> bool:
     the number of providers. Short-lived also means the cache cannot go stale in a way that
     matters — a capability that appears mid-command is not a case worth serving.
     """
-    key = (kind, arg, str(base))
+    # Keyed on the EXPANDED argument, not the spec. Keyed on the spec, `${VAR:-default}` would
+    # answer for whatever VAR held the first time it was asked — and since the whole point of the
+    # expansion is that VAR can differ between callers, that cache would serve a stale answer
+    # precisely when the override mattered. Found by the suite: which tests failed moved with
+    # execution order, because a test that set the variable poisoned the entry for the next one.
+    expanded = expand_env(arg) if kind == "file" else arg
+    key = (kind, expanded, str(base))
     if key in _PROBE_CACHE:
         return _PROBE_CACHE[key]
     ok = False
     if kind == "file":
-        pth = Path(arg).expanduser()
+        pth = Path(expanded).expanduser()
         ok = (pth if pth.is_absolute() else base / pth).exists()
     elif kind == "cmd":
         ok = shutil.which(arg) is not None
@@ -344,10 +374,38 @@ def _scope_only(ctx: dict) -> dict:
 # engine ALREADY holds: nothing, the run's own identity, and the run's own progress.
 
 @provider("run_progress", schema={
+    # ── the original four. Their meanings are FROZEN: three installed flows and a dozen tests
+    # read them, so a redefinition here would move criteria without touching a single spec.
+    # `closed_steps` includes SKIPPED steps (see `store.closed_steps`) — left as it is, with
+    # `steps_skipped` below making the split answerable instead.
     "closed_steps": operators.T_LIST,
     "evidence_kinds": operators.T_LIST,
     "gate_count": operators.T_INT,
     "violation_count": operators.T_INT,
+    # ── measures the ledger already supported and nothing exposed.
+    #
+    # Attempts that were TURNED DOWN. The engine writes a `refused` step-log row at three sites,
+    # and until now that record could not be read by any criterion — so a run that reached the end
+    # after twenty refusals looked identical to one that walked straight through. Friction is a
+    # measurement, and it was being discarded.
+    "steps_refused": operators.T_INT,
+    # Skipped, separately from closed — see the note on `closed_steps`.
+    "steps_skipped": operators.T_INT,
+    # The severity split, which exists precisely so these two are not summed. `blocked` means an
+    # attempt was REFUSED (the guarantee worked, this row is an audit trace); `breach` means
+    # something passed WITH A MARK (the guarantee did not). `violation_count` above cannot tell
+    # them apart, which makes it the wrong number to put a bar on.
+    "violations_blocked": operators.T_INT,
+    "violations_breach": operators.T_INT,
+    # Debt still outstanding at this moment.
+    "obligations_open": operators.T_INT,
+    "phases_summarized": operators.T_INT,
+    # WHY BOTH. `run_duration_s` is 0 for a run that has not closed, and 0 also means "took under a
+    # second". Those must not read the same — it is the 0-of-0 hazard this engine names elsewhere:
+    # a vacuous answer that looks like a measured one. `run_closed` is what makes the duration
+    # interpretable, so it is a fact rather than something a caller has to know to ask about.
+    "run_closed": operators.T_BOOL,
+    "run_duration_s": operators.T_INT,
 })
 def _run_progress(ctx: dict) -> dict:
     """Facts about the run's OWN progress — no filesystem, no external world.
@@ -369,7 +427,45 @@ def _run_progress(ctx: dict) -> dict:
             "SELECT COUNT(*) n FROM gate WHERE run_id = ?", (run_id,)).fetchone()["n"]
         viol = conn.execute(
             "SELECT COUNT(*) n FROM violation WHERE run_id = ?", (run_id,)).fetchone()["n"]
+
+        def one(sql: str, *args) -> int:
+            return int(conn.execute(sql, (run_id, *args)).fetchone()["n"])
+
+        refused = one("SELECT COUNT(*) n FROM step_log WHERE run_id = ? AND event = 'refused'")
+        skipped = one("SELECT COUNT(DISTINCT step_id) n FROM step_log "
+                      "WHERE run_id = ? AND event = 'skipped'")
+        # Counted by severity rather than filtered in Python, so the two numbers cannot drift
+        # apart from `violation_count` above by rounding through a different code path.
+        blocked = one("SELECT COUNT(*) n FROM violation WHERE run_id = ? AND severity = ?",
+                      "blocked")
+        breach = one("SELECT COUNT(*) n FROM violation WHERE run_id = ? AND severity = ?",
+                     "breach")
+        owed = one("SELECT COUNT(*) n FROM obligation "
+                   "WHERE run_id = ? AND discharged_at IS NULL")
+        phases = one("SELECT COUNT(*) n FROM phase_summary WHERE run_id = ?")
+
+        # Duration only for a CLOSED run. An unfinished thing has no duration yet, and reporting
+        # "elapsed so far" would make the fact change between two reads of the same run — which
+        # would then reach criteria as a moving target. See the schema note above.
+        row = store.get_run(conn, run_id)
+        run_closed, duration = False, 0
+        if row is not None and row["closed_at"]:
+            run_closed = True
+            try:
+                from datetime import datetime
+                a = datetime.fromisoformat(str(row["opened_at"]))
+                b = datetime.fromisoformat(str(row["closed_at"]))
+                duration = max(0, int((b - a).total_seconds()))
+            except (ValueError, TypeError):
+                # A timestamp this engine cannot parse is not a reason to fail a whole gather.
+                # `run_closed` stays true, which is the fact that was actually established.
+                duration = 0
+
         return {"closed_steps": closed, "evidence_kinds": kinds,
-                "gate_count": int(gates), "violation_count": int(viol)}
+                "gate_count": int(gates), "violation_count": int(viol),
+                "steps_refused": refused, "steps_skipped": skipped,
+                "violations_blocked": blocked, "violations_breach": breach,
+                "obligations_open": owed, "phases_summarized": phases,
+                "run_closed": run_closed, "run_duration_s": duration}
     finally:
         conn.close()

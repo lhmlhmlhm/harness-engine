@@ -141,6 +141,7 @@ runtime hosting you.
 - **`plan`** — 要为**还没开始做**的事出一份结构化方案。产出是一份待推送的方案文档，不是代码。
 - **`push`** — 手上有一份方案文档要推成任务，或要收尾一条已推送的方案（关任务 / 归档）。
 - **`shipcheck-asis`** — 任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（102 步），
+- **`worktree`** — Never on its own. Nothing routes here — the facts are borrowed by whichever flow owns the
 
 ## Judgment
 

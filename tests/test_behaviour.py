@@ -3947,23 +3947,26 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path, m
     import sys as _s
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
-    _fl.load_extensions("shipcheck-asis")
+    # `load` rather than `load_extensions`, so the ENGINE follows `requires:` to whichever ability
+    # owns this provider. Naming the owner here would make the test a second place that has to be
+    # edited when a provider moves — and it just did move, which is how this line got noticed.
+    _fl.load("shipcheck-asis")
 
     # This repository IS a source checkout — `.git` is a directory.
     assert (REPO / ".git").is_dir()
-    src = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(REPO)})
+    src = _f.gather("worktree.worktree_state", {"run_id": "none", "scope": str(REPO)})
     assert src["in_linked_worktree"] is False, src
 
     # The shape of a linked worktree, without touching a real one.
     wt = tmp_path / "linked"
     wt.mkdir()
     (wt / ".git").write_text(f"gitdir: {REPO}/.git/worktrees/probe\n", encoding="utf-8")
-    linked = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(wt)})
+    linked = _f.gather("worktree.worktree_state", {"run_id": "none", "scope": str(wt)})
     assert linked["in_linked_worktree"] is True, linked
     # A directory that is not a repository at all is neither isolated nor on a branch.
     plain = tmp_path / "plain"
     plain.mkdir()
-    bare = _f.gather("shipcheck-asis.worktree_state", {"run_id": "none", "scope": str(plain)})
+    bare = _f.gather("worktree.worktree_state", {"run_id": "none", "scope": str(plain)})
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 

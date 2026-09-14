@@ -58,27 +58,35 @@ COMMENT_CLASSIFY = TOOLS / "analyzer-comment-classify.py"
 RUN_METRICS = TOOLS / "analyze-run-metrics.py"
 FLEET_PROBE = TOOLS / "fleet_probe.py"
 # NOT copied into the ability, deliberately — see `_hot_set`.
-MEMORY_CLI = Path("~/.kiro/skills/shared-kb/memory/memory.py")
+MEMORY_CLI_DEFAULT = "${HARNESS_MEMORY_CLI:-~/.kiro/skills/shared-kb/memory/memory.py}"
 # 与 worktree 同类：这两处的效果由 agent 跑脚本完成，引擎只读核实，所以脚本一个字节都不复制。
 # 两个位置都可用环境变量覆盖，而这不是为了灵活：**没有覆盖口的话，测试只能读用户真实的
 # 方案语料**（几百份文档），而一个粗心的测试会写进去。这类事在相邻项目里发生过一次——一套
 # 测试扫掉了 772MB 真实存储——所以给读取真实位置的 provider 留一个重定向口是安全属性，
 # 不是便利。被读的 CLI 自己也有同样的口（MEMORY_DB_PATH），这里与它对称。
-PLAN_DATA_DEFAULT = "~/.kiro/skills/plan/data"
-HISTORY_LOG_DEFAULT = "~/.kiro/skills/ship-check/history-log"
+PLAN_DATA_DEFAULT = "${HARNESS_PLAN_DATA_DIR:-~/.kiro/skills/plan/data}"
+HISTORY_LOG_DEFAULT = "${HARNESS_HISTORY_LOG_DIR:-~/.kiro/skills/ship-check/history-log}"
 
 
-def _dir_from_env(var: str, default: str) -> Path:
-    """Resolve an override AT CALL TIME, not at import.
+def _spec_path(spec: str) -> Path:
+    """Resolve a `${VAR:-default}` path spec with THE ENGINE'S expander, at call time.
+
+    Deliberately not a local re-implementation: `facts.expand_env` is the same function the
+    capability probe uses, so `validate` reporting a file present and this provider finding it
+    cannot disagree. That disagreement was the defect — the probe read the default while the
+    provider read the override.
 
     Read at import it would be frozen for the life of the process — correct for a one-shot CLI
     and wrong for anything long-lived, and it silently defeats a caller that sets the override
     after loading this module. A path that can change should be read when it is used.
     """
-    return Path(os.environ.get(var) or default)
+    return Path(facts.expand_env(spec))
 PLAN_DIRS = ("pending", "pushed", "in-progress", "done", "shipped")
-QUALITY_SLO_DEFAULT = "~/.kiro/loop agents/quality-slo.yaml"
-SESSIONS_DIR = Path("~/.kiro/sessions/cli")
+QUALITY_SLO_DEFAULT = "${HARNESS_QUALITY_SLO:-~/.kiro/loop agents/quality-slo.yaml}"
+# NO SESSIONS_DIR HERE. It was declared and never read — the transcript directory is a fact
+# about the host, and the only thing that needs it is `tools/analyze-run-metrics.py`, which
+# derives it itself. A constant naming a private path that nothing reads reads as a
+# dependency this provider has, and it did mislead a reader into counting it as one.
 
 
 def _change_set_from_evidence(run_id: str) -> dict:
@@ -481,7 +489,7 @@ def _fleet_central(ctx: dict) -> dict:
 
 
 @facts.provider("hot_set",
-                requires=({"file": "~/.kiro/skills/shared-kb/memory/memory.py"},),
+                requires=({"file": MEMORY_CLI_DEFAULT},),
                 schema={
     # Whether the store could be READ. Paired with the count on purpose: "consulted and
     # genuinely empty" and "never consulted" both render as zero, and the standing instruction
@@ -507,7 +515,10 @@ def _hot_set(ctx: dict) -> dict:
     unless told otherwise — which is exactly why this provider calls the one that does not.
     """
     empty = {"hot_banner_readable": False, "hot_set_count": 0, "hot_set_ids": []}
-    cli = MEMORY_CLI.expanduser()
+    # Overridable for the same reason the other two are: a test must be able to point this at a
+    # scratch store instead of the live one. Unlike the plan corpus this is a CLI rather than a
+    # directory, so a wrong value fails loudly on exec rather than reading someone else's data.
+    cli = _spec_path(MEMORY_CLI_DEFAULT).expanduser()
     try:
         proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
                               capture_output=True, text=True, timeout=30)
@@ -524,107 +535,6 @@ def _hot_set(ctx: dict) -> dict:
     return {"hot_banner_readable": True,
             "hot_set_count": int(m.group(1)),
             "hot_set_ids": ids}
-
-
-@facts.provider("worktree_state",
-                requires=({"cmd": "git"},),
-                schema={
-    # What the PLAN asked for, read from the plan doc this run recorded. Without it, "I am
-    # deliberately working in the shared tree" would be the one claim nothing could contradict.
-    "isolation_declared": operators.T_BOOL,
-    "plan_doc_readable": operators.T_BOOL,
-    # WHICH directory the answers below are about. Under isolation the run does not work in
-    # its scope — it works in a worktree whose path is unknowable until the provisioning tool has
-    # run, so the run records it and this provider reads it. Reported as a fact rather than
-    # assumed, because "no row, so I looked at the scope" and "a row that equals the scope" must
-    # not be the same answer.
-    "worktree_path_recorded": operators.T_BOOL,
-    # What is actually TRUE of the directory this run WORKS IN. A linked worktree's `.git`
-    # is a file pointing at the owning repo; a source checkout's is a directory.
-    "in_linked_worktree": operators.T_BOOL,
-    "on_isolation_branch": operators.T_BOOL,
-    "worktree_dirty": operators.T_BOOL,
-    # Whether THIS run's own worktree still exists, matched by the run id rather than by a
-    # global count — another session's worktree says nothing about this one.
-    "own_worktree_exists": operators.T_BOOL,
-})
-def _worktree_state(ctx: dict) -> dict:
-    """Whether this run is really isolated, derived with read-only git — never by provisioning.
-
-    THIS IS THE SHAPE FOR AN EFFECT. Provisioning a worktree creates branches, checkouts and a
-    copied build skeleton; tearing one down runs guarded deletes. The engine performs none of
-    it. The agent runs the tool, and the engine independently asks the world what is true —
-    which is the only arrangement in which "I isolated the work" can be contradicted.
-
-    The reference implementation states the failure mode this closes, and it is worth quoting
-    because it is why a criterion here is not decoration: provisioning "FAILS HARD on error
-    rather than falling back to the shared tree. A silent fallback would hand back exactly the
-    shared-working-tree behaviour the caller asked to be isolated FROM, while reporting
-    success." A recorded claim of isolation with no check is that same fallback, one layer up.
-    """
-    from engine import store
-    empty = {"isolation_declared": False, "plan_doc_readable": False,
-             "worktree_path_recorded": False,
-             "in_linked_worktree": False, "on_isolation_branch": False,
-             "worktree_dirty": False, "own_worktree_exists": False}
-    run_id = str(ctx.get("run_id") or "")
-    conn = store.connect(read_only=True)
-    try:
-        docs = store.find_evidence(conn, run_id, None, "plan_doc")
-        # Run-wide (scope=None) on purpose: the path is recorded by whichever step provisioned the
-        # worktree, and this provider must not care which one that was.
-        wt_rows = store.find_evidence(conn, run_id, None, "worktree_path")
-    finally:
-        conn.close()
-    got = dict(empty)
-
-    # What was asked for. The plan doc path comes from the run's own evidence, so the answer
-    # stays derived from what the run said rather than from a second place that could disagree.
-    for row in reversed(docs):
-        cand = Path(str(row["value"]).strip()).expanduser()
-        if cand.is_file():
-            try:
-                head = cand.read_text(encoding="utf-8", errors="replace")[:4000]
-            except OSError:
-                break
-            got["plan_doc_readable"] = True
-            m = re.search(r"^worktree_isolation:\s*(\S+)", head, re.M)
-            got["isolation_declared"] = bool(m) and m.group(1).lower() in ("true", "yes", "on")
-            break
-
-    # What is actually true — OF THE DIRECTORY THIS RUN WORKS IN.
-    root = Path(str(ctx.get("scope") or ".")).expanduser()
-    recorded: Path | None = None
-    for row in reversed(wt_rows):
-        got["worktree_path_recorded"] = True
-        cand = Path(str(row["value"]).strip()).expanduser()
-        recorded = cand
-        if cand.is_dir():
-            root = cand
-        break
-    if not root.is_dir():
-        return got
-    dotgit = root / ".git"
-    got["in_linked_worktree"] = dotgit.is_file()
-
-    def git(*args: str) -> str:
-        try:
-            r = subprocess.run(["git", "-C", str(root), *args],
-                               capture_output=True, text=True, timeout=20)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return r.stdout if r.returncode == 0 else ""
-
-    branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
-    got["on_isolation_branch"] = branch.startswith("shipcheck/")
-    got["worktree_dirty"] = bool(git("status", "--porcelain").strip())
-    # "Does THIS run's own worktree still exist" — asked of the path the run recorded, so teardown
-    # is observed directly. The previous form matched `refs/heads/shipcheck/*` against `run_id[:8]`,
-    # which required this engine's run id and the other engine's session UUID to share a prefix;
-    # that held by arrangement, and nothing would have reported it if it stopped holding.
-    got["own_worktree_exists"] = bool(
-        recorded is not None and recorded.is_dir() and (recorded / ".git").is_file())
-    return got
 
 
 @facts.provider("plan_writeback",
@@ -672,7 +582,7 @@ def _plan_writeback(ctx: dict) -> dict:
         return empty
 
     got = dict(empty)
-    base = _dir_from_env("HARNESS_PLAN_DATA_DIR", PLAN_DATA_DEFAULT).expanduser()
+    base = _spec_path(PLAN_DATA_DEFAULT).expanduser()
     hit = None
     for d in PLAN_DIRS:
         cand = base / d / f"{slug}.md"
@@ -698,7 +608,7 @@ def _plan_writeback(ctx: dict) -> dict:
     # Matched by CONTAINS, not by an exact directory name: the writer's naming has changed over
     # time (of 205 real entries only 18 carry a date prefix), so an exact-name lookup would
     # report a present record as missing for every older shape.
-    hl = _dir_from_env("HARNESS_HISTORY_LOG_DIR", HISTORY_LOG_DEFAULT).expanduser()
+    hl = _spec_path(HISTORY_LOG_DEFAULT).expanduser()
     if hl.is_dir():
         got["history_record_exists"] = any(
             (d / "record.md").is_file() for d in hl.iterdir()
@@ -773,8 +683,7 @@ def _quality_slo(ctx: dict) -> dict:
         conn.close()
 
     # ── the declared bar
-    path = Path(os.environ.get("HARNESS_QUALITY_SLO")
-                or QUALITY_SLO_DEFAULT).expanduser()
+    path = _spec_path(QUALITY_SLO_DEFAULT).expanduser()
     # NO `is_file()` PRE-CHECK — it was there and was removed as redundant: a missing file
     # raises below and lands on the same answer, and a guard that cannot change an outcome is
     # the thing this engine spends its refusals on elsewhere. (Verified by mutation: removing
