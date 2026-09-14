@@ -38,7 +38,7 @@ harness-engine/
 
 | 引擎实测 | | 出处 |
 |---|---|---|
-| 基座 | 16 个模块 · 8,992 行 | `engine/*.py` |
+| 基座 | 16 个模块 · 9,141 行 | `engine/*.py` |
 | 入口 | 10 行（行为全在 `engine/`） | `bin/harness` |
 | 引擎自己拥有的表 | 9 张 | `engine/schema.sql` |
 | spec 格式 MAJOR | 2 | `flow.SPEC_MAJOR` |
@@ -46,12 +46,12 @@ harness-engine/
 | gate 防伪 witness | 2 个 | `proof._WITNESSES` |
 | 运行时事实 provider | 3 个 | `facts._PROVIDERS` |
 | 条件操作符 | 8 个 | `operators._OPERATORS` |
-| 一条 flow 可声明的引擎能力 | 16 项 | `flow.ENGINE_CAPABILITIES` |
+| 一条 flow 可声明的引擎能力 | 17 项 | `flow.ENGINE_CAPABILITIES` |
 | `scope_match` 模式 | 4 种 | `flow.SCOPE_MATCH_MODES` |
 | `guard` 裁决闭集 | 7 种 | `harness.GUARD_VERDICTS` |
 | 只有散文的命令 | 7 个（各带理由） | `harness.PROSE_ONLY` |
 | 还没有 `--json` 的命令 | 空集（每个写命令都能用 `--json` 作答） | `harness.NO_JSON_YET` |
-| 测试 | 526 个 | `pytest --collect-only` |
+| 测试 | 533 个 | `pytest --collect-only` |
 
 <!-- END GENERATED -->
 

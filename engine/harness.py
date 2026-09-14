@@ -441,6 +441,34 @@ def cmd_validate(args) -> int:
             if gone:
                 print("   ⚠️  steps whose criteria or hooks read those facts will REFUSE, "
                       "not pass")
+        # PRODUCERS. The counterpart to the capabilities line above, pointing the other way:
+        # that one says what the engine needs in order to LOOK, this one says what the agent must
+        # RUN. Reported rather than enforced at load, because a tool absent on THIS machine must
+        # not make the spec unreadable — but an agent told an effect is mandatory, and left to
+        # find the producer by grep, is how a run ends up driving the reference implementation.
+        producers = [(st.id, st.produced_by) for st in f.steps.values() if st.produced_by]
+        if producers:
+            base = f.source.parent
+            missing = [(sid, p) for sid, p in producers if not facts.file_present(p, base)]
+            line = (f"   producers: {len(producers)} declared, {len(missing)} absent")
+            print(line if not missing else line + " — " + "; ".join(
+                f"{sid} needs {p}" for sid, p in missing))
+            if missing:
+                print("   ⚠️  those steps demand an effect whose tool is not on this machine")
+
+        # TOPIC POINTERS IN THE PROSE BODIES. The `topics cited N` line below counts the
+        # DECLARED side, which is the side that was already correct. These are the references
+        # written into the prose itself — the ones a driver follows mid-step.
+        dangling = prose.dangling_topics(f)
+        if dangling:
+            bad += 1
+            print(f"   ❌ topics referenced in prose with no file: "
+                  f"{len({n for _, _, n in dangling})} distinct, {len(dangling)} reference(s)")
+            for path, lineno, name in dangling:
+                print(f"      {path.name}:{lineno}  {name}")
+            print("      Write the file, or drop the pointer — a pointer to nothing sends the "
+                  "driver looking somewhere else.")
+
         no_goal = [x for x in f.phases if x not in f.phase_goals]
         gs = "/".join(f"{k}:{NAMES[predicates.strength(v)]}"
                       for k, v in f.phase_goals.items())
@@ -932,6 +960,14 @@ def cmd_next(args) -> int:
             print("  ── directive ──")
             for line in s.directive.splitlines():
                 print(f"  {line}")
+        # WHO PRODUCES THE EFFECT. Printed here because this is the moment the driver would
+        # otherwise start grepping for it — and a driver that greps finds the reference
+        # implementation, which is a whole second engine rather than one tool.
+        if s.produced_by:
+            print("  ── produced by (the engine does not run this) ──")
+            print(f"  {s.produced_by}")
+            print("  how to call it: that file's own header — this is a pointer, not a copy")
+
         # Deliberately the POINTER, not the text. Dumping a document on every `next`
         # would drown the driver and defeat the point of tiering it.
         if guide is not None:

@@ -19,7 +19,7 @@
 | 其中不可派生的判断规则 | 7 条 | `brief.JUDGMENT` |
 | 只在用到时才渲染的小节 | 10 个 | `brief._CONDITIONAL` |
 | 最大的一条 flow | `shipcheck-asis`，102 步 | `harness abilities` |
-| 它的 spec 与散文 | 62 KB + 1338 行 | 磁盘 |
+| 它的 spec 与散文 | 64 KB + 1406 行 | 磁盘 |
 | 一步的 directive（中位数） | 2 行 | 同上 |
 | 适配器用例 translation | 5 条 | `harness adapter-contract` |
 | 适配器用例 resilience | 5 条 | 同上 |

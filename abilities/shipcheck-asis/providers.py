@@ -533,7 +533,13 @@ def _hot_set(ctx: dict) -> dict:
     # deliberately working in the shared tree" would be the one claim nothing could contradict.
     "isolation_declared": operators.T_BOOL,
     "plan_doc_readable": operators.T_BOOL,
-    # What is actually TRUE of the directory this run is scoped to. A linked worktree's `.git`
+    # WHICH directory the answers below are about. Under isolation the run does not work in
+    # its scope — it works in a worktree whose path is unknowable until the provisioning tool has
+    # run, so the run records it and this provider reads it. Reported as a fact rather than
+    # assumed, because "no row, so I looked at the scope" and "a row that equals the scope" must
+    # not be the same answer.
+    "worktree_path_recorded": operators.T_BOOL,
+    # What is actually TRUE of the directory this run WORKS IN. A linked worktree's `.git`
     # is a file pointing at the owning repo; a source checkout's is a directory.
     "in_linked_worktree": operators.T_BOOL,
     "on_isolation_branch": operators.T_BOOL,
@@ -558,12 +564,16 @@ def _worktree_state(ctx: dict) -> dict:
     """
     from engine import store
     empty = {"isolation_declared": False, "plan_doc_readable": False,
+             "worktree_path_recorded": False,
              "in_linked_worktree": False, "on_isolation_branch": False,
              "worktree_dirty": False, "own_worktree_exists": False}
     run_id = str(ctx.get("run_id") or "")
     conn = store.connect(read_only=True)
     try:
         docs = store.find_evidence(conn, run_id, None, "plan_doc")
+        # Run-wide (scope=None) on purpose: the path is recorded by whichever step provisioned the
+        # worktree, and this provider must not care which one that was.
+        wt_rows = store.find_evidence(conn, run_id, None, "worktree_path")
     finally:
         conn.close()
     got = dict(empty)
@@ -582,8 +592,16 @@ def _worktree_state(ctx: dict) -> dict:
             got["isolation_declared"] = bool(m) and m.group(1).lower() in ("true", "yes", "on")
             break
 
-    # What is actually true.
+    # What is actually true — OF THE DIRECTORY THIS RUN WORKS IN.
     root = Path(str(ctx.get("scope") or ".")).expanduser()
+    recorded: Path | None = None
+    for row in reversed(wt_rows):
+        got["worktree_path_recorded"] = True
+        cand = Path(str(row["value"]).strip()).expanduser()
+        recorded = cand
+        if cand.is_dir():
+            root = cand
+        break
     if not root.is_dir():
         return got
     dotgit = root / ".git"
@@ -600,11 +618,12 @@ def _worktree_state(ctx: dict) -> dict:
     branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
     got["on_isolation_branch"] = branch.startswith("shipcheck/")
     got["worktree_dirty"] = bool(git("status", "--porcelain").strip())
-    short = run_id[:8]
-    if short:
-        refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads/shipcheck/*")
-        got["own_worktree_exists"] = any(
-            r.strip().endswith(short) for r in refs.splitlines() if r.strip())
+    # "Does THIS run's own worktree still exist" — asked of the path the run recorded, so teardown
+    # is observed directly. The previous form matched `refs/heads/shipcheck/*` against `run_id[:8]`,
+    # which required this engine's run id and the other engine's session UUID to share a prefix;
+    # that held by arrangement, and nothing would have reported it if it stopped holding.
+    got["own_worktree_exists"] = bool(
+        recorded is not None and recorded.is_dir() and (recorded / ".git").is_file())
     return got
 
 

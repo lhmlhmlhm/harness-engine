@@ -1,2236 +1,2247 @@
 {
- "_note": "每条完成判据/层验收判据的派生依据。判据本身住在 flow.yaml；这里留的是「它从哪来」——reason 引用 prose/ 里对应小节的原话片段。存在的理由：判据是否被凭空发明，在 flow.yaml 里看不出来，而『看起来更强、检查的却是编出来的东西』比留在弱判据更糟。spec_at_derivation 是 8 路并行分类当时提出的形态；live_spec 是现在生效的形态——两者不同处即为后续人工升级（复合判据 / gate 修正 / 散文自相矛盾的处置）。",
- "phases": {
-  "context": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed"
-   },
-   "reason": "本层散文的验收判据写得很明确：「做完的标准：起始横幅已打出、前置事实校验通过、方案已经过人确认（或被明确预授权免确认）、初始进度已落进持久化状态库，然后才交棒给下一层。」这几件事分别落在 C00 / C05 / C20 / C22 / C24 上，没有单一 evidence 值能同时表达「全都做完且承重点为真」。phase_steps_closed 要求本 phase 每个必需步骤都已关闭或显式跳过——而 C20 自身的判据是 gate_recorded，所以「方案已经过人确认」这个承重点被 C20 关闭的前提传递性地强制了；C22 的落库、C05 的校验、C24 的交棒同理。它完全从引擎状态派生、无法用一句声明伪造，且正好落在 close-run 的必经路径上，是比任何单步 evidence 都强的层级关口。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "1) 爆炸半径 change-set 五个输入 kind 的落位：change_file→C10（强制谓词，改动表路径列，每次改动必有）；old_value→C11（强制谓词，穷尽同类点=待清除旧值的全部落点，C11 条件化可 skip）；module_under_test→C15（强制谓词，下游受影响=应覆盖模块，任何改动至少含被改模块本身）。api_constant 与 auto_generated 未做成强制谓词，而是作为条件化『同表副记录』：auto_generated 记在 C10 改动表的『自动』行、api_constant 记在 C14 的权威来源（当改动触及契约常量时）。原因：它们的自然宿主步 C10/C14 是每次都跑的强制步，但这两个 kind 只在特定改动类型下才有——若硬绑 evidence(min_count=1) 会让不含生成产物/契约常量的普通改动永远关不掉，违反硬约束#1（不放宽）与#6（豁免走 skip、不靠弱判据）。故设计为：宿主步跑时按适用性登记这两行，blast-radius 有则读、无则本就不该有（不是惰性化）。真正会让分析『跑了却什么都没查』的是 change_file 缺失，这一条已用 C10 强制谓词兜住。\n\n2) 条件化步骤（散文写明触发条件、不适用时应 skip 而非弱化判据，遵硬约束#6）：C07b（仅复杂任务）、C11（仅有数值断言/去硬编码）、C12（仅用到正则/批量替换）、C17（仅涉模糊/阈值/启发式）、C18（仅符号多落点）、C21（仅触及向模型暴露 schema）、C01/C02（续跑相关，flow 标 optional:true）。这些都给了 T1/T2 强判据，不适用场景由 skip 兜。\n\n3) 无法机器化的缺口：C00 的『第一条叙述输出 / 只打一次』这个顺序与唯一性约束，现有谓词词汇（evidence/gate/all_of/…）都表达不了，只能靠 evidence 留下横幅内容行做事后审计——已是此步可达的最强判据（T1），非偷懒 T0。散文自己也承认『条数必须来自脚本对库的实际计数』属外部脚本行为。\n\n4) fields_agree 的方向限制：C13 自环检查要的是『改动对象 ≠ 验证对象』（不相等），而 fields_agree 只表达相等，故改用 evidence_in(verdict=independent)。共享表里唯一天然的 fields_agree 不变式（pushed_rev==verified_rev）属 execution/observation 层，本 phase 无对应两值可比，故 goal 未用 fields_agree 而用 phase_steps_closed。\n\n5) 散文 vs flow 的不一致（据实上报）：\n   - C07b 的 stage 是 understanding-gate，散文把理解门排在 resume 与 plan-confirmation 之间（即 C07b 逻辑上应在 C08 之前对诊断做质疑），但 flow 步骤表把 C07b 排在全 phase 最后一行（C24 之后）。执行顺序与散文叙述顺序不一致——若引擎按表序在 C24 之后才跑 C07b，则『先质疑诊断再定方案』的意图落空。建议核对 flow.yaml 中 C07b 的实际位置。\n   - 步骤 id 从 C22 直接跳到 C24（无 C23），且 phase 共 25 步含 C07b。id 不连续本身允许，但确认 C23 是被有意删除而非遗漏。\n   - C20 是本 phase 唯一 gate!=none 的步（affirm）；其余全部 gate=none，故除 C20 外无处可用 gate_recorded，与判据分布一致。\n\n6) C02 的 goal 用 phases_summarized 时排除了 context 本层（exclude=[context]），因 context 的 summary 要到本层末步 C24 才产生，不排除会在 C02 处误判本层未收尾。context 是首层，新跑时该谓词对其它层真空为真；续跑时才真正强制补齐前序层小结（对应散文 resume-underreport 的确定性对账）。"
+  "_note": "每条完成判据/层验收判据的派生依据。判据本身住在 flow.yaml；这里留的是「它从哪来」——reason 引用 prose/ 里对应小节的原话片段。存在的理由：判据是否被凭空发明，在 flow.yaml 里看不出来，而『看起来更强、检查的却是编出来的东西』比留在弱判据更糟。spec_at_derivation 是 8 路并行分类当时提出的形态；live_spec 是现在生效的形态——两者不同处即为后续人工升级（复合判据 / gate 修正 / 散文自相矛盾的处置）。",
+  "phases": {
+    "context": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed"
+      },
+      "reason": "本层散文的验收判据写得很明确：「做完的标准：起始横幅已打出、前置事实校验通过、方案已经过人确认（或被明确预授权免确认）、初始进度已落进持久化状态库，然后才交棒给下一层。」这几件事分别落在 C00 / C05 / C20 / C22 / C24 上，没有单一 evidence 值能同时表达「全都做完且承重点为真」。phase_steps_closed 要求本 phase 每个必需步骤都已关闭或显式跳过——而 C20 自身的判据是 gate_recorded，所以「方案已经过人确认」这个承重点被 C20 关闭的前提传递性地强制了；C22 的落库、C05 的校验、C24 的交棒同理。它完全从引擎状态派生、无法用一句声明伪造，且正好落在 close-run 的必经路径上，是比任何单步 evidence 都强的层级关口。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "1) 爆炸半径 change-set 五个输入 kind 的落位：change_file→C10（强制谓词，改动表路径列，每次改动必有）；old_value→C11（强制谓词，穷尽同类点=待清除旧值的全部落点，C11 条件化可 skip）；module_under_test→C15（强制谓词，下游受影响=应覆盖模块，任何改动至少含被改模块本身）。api_constant 与 auto_generated 未做成强制谓词，而是作为条件化『同表副记录』：auto_generated 记在 C10 改动表的『自动』行、api_constant 记在 C14 的权威来源（当改动触及契约常量时）。原因：它们的自然宿主步 C10/C14 是每次都跑的强制步，但这两个 kind 只在特定改动类型下才有——若硬绑 evidence(min_count=1) 会让不含生成产物/契约常量的普通改动永远关不掉，违反硬约束#1（不放宽）与#6（豁免走 skip、不靠弱判据）。故设计为：宿主步跑时按适用性登记这两行，blast-radius 有则读、无则本就不该有（不是惰性化）。真正会让分析『跑了却什么都没查』的是 change_file 缺失，这一条已用 C10 强制谓词兜住。\n\n2) 条件化步骤（散文写明触发条件、不适用时应 skip 而非弱化判据，遵硬约束#6）：C07b（仅复杂任务）、C11（仅有数值断言/去硬编码）、C12（仅用到正则/批量替换）、C17（仅涉模糊/阈值/启发式）、C18（仅符号多落点）、C21（仅触及向模型暴露 schema）、C01/C02（续跑相关，flow 标 optional:true）。这些都给了 T1/T2 强判据，不适用场景由 skip 兜。\n\n3) 无法机器化的缺口：C00 的『第一条叙述输出 / 只打一次』这个顺序与唯一性约束，现有谓词词汇（evidence/gate/all_of/…）都表达不了，只能靠 evidence 留下横幅内容行做事后审计——已是此步可达的最强判据（T1），非偷懒 T0。散文自己也承认『条数必须来自脚本对库的实际计数』属外部脚本行为。\n\n4) fields_agree 的方向限制：C13 自环检查要的是『改动对象 ≠ 验证对象』（不相等），而 fields_agree 只表达相等，故改用 evidence_in(verdict=independent)。共享表里唯一天然的 fields_agree 不变式（pushed_rev==verified_rev）属 execution/observation 层，本 phase 无对应两值可比，故 goal 未用 fields_agree 而用 phase_steps_closed。\n\n5) 散文 vs flow 的不一致（据实上报）：\n   - C07b 的 stage 是 understanding-gate，散文把理解门排在 resume 与 plan-confirmation 之间（即 C07b 逻辑上应在 C08 之前对诊断做质疑），但 flow 步骤表把 C07b 排在全 phase 最后一行（C24 之后）。执行顺序与散文叙述顺序不一致——若引擎按表序在 C24 之后才跑 C07b，则『先质疑诊断再定方案』的意图落空。建议核对 flow.yaml 中 C07b 的实际位置。\n   - 步骤 id 从 C22 直接跳到 C24（无 C23），且 phase 共 25 步含 C07b。id 不连续本身允许，但确认 C23 是被有意删除而非遗漏。\n   - C20 是本 phase 唯一 gate!=none 的步（affirm）；其余全部 gate=none，故除 C20 外无处可用 gate_recorded，与判据分布一致。\n\n6) C02 的 goal 用 phases_summarized 时排除了 context 本层（exclude=[context]），因 context 的 summary 要到本层末步 C24 才产生，不排除会在 C02 处误判本层未收尾。context 是首层，新跑时该谓词对其它层真空为真；续跑时才真正强制补齐前序层小结（对应散文 resume-underreport 的确定性对账）。"
+    },
+    "config": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed"
+      },
+      "reason": "散文开篇把本层验收写成两点合取：「所有与 diff 无关的偏好都已写盘，且这一层唯一的确认 gate 已被如实记录。做不到这两点，这一层就没完。」本层只有 CF00、CF09 两个必需步，且 CF00 的判据是 gate_recorded——CF00 关闭即蕴含「gate 已如实记录」，CF09 关闭即蕴含收尾打分已发。故 phase_steps_closed（本 phase 必需步骤全部关闭或显式跳过）恰好把「这两点」变成关闭 run 必经路径上的硬关口，且完全从引擎状态派生、无法一句声明伪造（T3）。不用 attest（引擎会 exit 2），也不用 all_of——phase_steps_closed 是本层「步骤都关闭」的最贴合、最强的通用形态。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "1) CF00 完成标准是合取（① 偏好已写盘 ∧ ② gate 已记录），但每步只能给一条 spec。选 gate_recorded 覆盖抗伪造、承重的那一半（②）；①「偏好已写盘」目前无法机器化——共享 evidence kind 表里没有 `config`/持久化产物这一 kind，`config` 对象本身是单次对象写盘、不是两值相等，evidence_equals/fields_agree 都套不上。若要补检 ①，需新增一个如 `config`（snake_case 名词）的 kind 并让 CF00 额外落一条 evidence——但那需要引擎支持一步多谓词，或把「偏好写盘」拆成独立可检步。当前设计下承重项是 gate，故 ① 属已知留白，不是漏检偷懒。2) 好消息：本 phase 2 步 + goal 全部 T3，零 T0——用户担心的「2 步全 attest = 该层完全没检测」被完全避免。3) flow.yaml 与散文一致：CF00 gate=`preauth:auto_confirm_config`（非 none，可用 gate_recorded），CF09 gate=none（不可用 gate_recorded），phase 声明 stage=['config-collect'] 与两步 stage 吻合，无跨 phase 依赖。4) 散文的『config 是 default，不是终判……后面 diff 出来仍允许人反悔覆盖，覆盖会回写 config 并标注来源』属后续 execution 层的覆盖行为，不影响本层完成判据——本层只需保证「起点」被合法确认/预授权并写盘。"
+    },
+    "coding": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed"
+      },
+      "reason": "本层验收 = 编码纪律全部落地。散文开篇写「做完的标准不是『代码看起来对了』，而是『实际 diff 与清单一一对应、且能编译过』」；这两条分别由 K04（范围比对）和 K03（编译）承载，K01/K02 产出清单与改动，K05 收尾。phase_steps_closed 要求 K01–K05 全部关闭或显式跳过，而 K03/K04 各自的 T2 谓词又强制『编译过』与『改动集与清单一致』——所以步骤全关本身就蕴含了这两条核心纪律，是最贴合本层验收的硬关口。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "1) change-set 归属：本 phase 的 K01/K02/K04 都涉及『文件』，但只让 K01 发 change_file（计划派生的改动集，输出即逐项文件路径），作为 context 层未声明清单时的兜底产出源；K02 发 code_diff（改动落地的 diff 证据），K04 只发裁决枚举（不是文件列表）——单一产出源避免下游 change-set 被重复喂入。2) K02 散文提到『改了枚举值/计数/版本号/保留区间 N-M……别处有配套的地方要一起改』，语义上对应共享 kind old_value / api_constant / auto_generated / module_under_test（爆炸半径与一致性检查的输入），但散文并未把它们列为 K02 的完成标准，故不纳入本 phase 谓词；如需更强的下游联动，可在 K02 机会性补发这些 kind，属 revision/verification 层职责。3) K01 完成标准的『已验证存在的锚点』（grep 实测命中）在现有谓词词汇里无法机器化，是本 phase 唯一被迫降格到 T1 的判据（无 T0）。4) 全 5 步 gate 均为 none，故无处可用 gate_recorded，符合硬约束 3。5) 无 T0：分层为 T1×2 (K01,K02) / T2×2 (K03,K04) / T3×1 (K05)，goal 为 T3。6) 未发现散文与 flow.yaml 步骤集/顺序的不一致；K04→K02 的回退、K02 卡三次升级问人属层内控制流，不产生跨 phase 依赖。"
+    },
+    "verification": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed"
+      },
+      "reason": "D15 散文把本层验收判据写死为一个复合条件：「本层目标校验（测试计划已解析、结论为通过或豁免、门禁已通过、必跑步全部完成）」。这四项里，前三项已经被本层各步自己的完成谓词钉死——D00=evidence:test_plan(测试计划已解析)、D05=evidence_in:test_result∈{pass,exempt}(结论为通过或豁免)、D14=gate_recorded(门禁已通过)——所以『必跑步全部完成』一旦成立，就传递地蕴含了前三项的值正确。因此 phase_steps_closed 在这里不是弱化，反而比任何单条 evidence_in 都强：它要求本层所有承重谓词（D05 的值、D14 的门、D15 的决策）同时满足，而单条 evidence_in 只能钉一个值。brief 明说『步骤都关闭且关键值正确用 all_of 表达不了时选更强的那一条』——phase_steps_closed 正是那条，且散文 D15 明确『门禁未通过就不出小结』与 close-run 要求已到达 phase 有 summary 完全对齐。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "1) D03『旧值残留=0』与 D08『所有点名检查都跑过』是全称/计数式完成标准，但词汇表没有『统计仓库 grep 命中数』或『枚举计划点名集合』的谓词，无法机器裁决『=0』或『没漏』，只能用 evidence 强制留下 old_value / verification_check 审计行（T1 天花板）。这两处的真正把关仍靠人工/脚本，属散文强于词汇表的地方。 2) D10 断言表的核心纪律『每个标待人工的项都由你作答』同样不可用 evidence kind 机器校验——evidence:assertion_table 只证明表存在。散文把兜底显式放到 D14（未作答项→门禁拒绝静默放行），所以 D10 停 T1 是设计使然，强制发生在 D14 gate_recorded + 本层 goal（phase_steps_closed 传递要求 D14 关闭）。 3) D13『验证状态落库』语义单薄，与 D15 的『决策落库』在持久化动作上高度重叠，本质是个进度写点，只能到 evidence T1。 4) stage 归属可疑：flow.yaml 把 D05『Test Plan execution』划到 stage=blast-radius，而 D00『Test framework』在 stage=test-execution——测试执行步落在 blast-radius 而非 test-execution 略反直觉，不阻断，但建议核对 stage 划分是否手误。 5) 跨 phase 不变式 pushed_rev/verified_rev 的 fields_agree 属 execution 层，verification 层无任何步触碰它，一致、无越界引用。 6) 本层 0 个 T0，未使用 all_of/跨 phase 引用，gate_recorded 仅用于 D14（gate=affirm），满足全部硬约束。"
+    },
+    "execution": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed"
+      },
+      "reason": "散文首段把本层「做完的标准」定义为『改动已提交（有提交哈希），评审已创建，且提交前的人工确认门已被如实记录 —— 任何一环靠猜、靠自我说服跳过，都算没做完』。这正好是「本 phase 的必需步骤都已关闭或已显式跳过」。因为每步各自带了非-attest 谓词（E04=gate_recorded、E07=pushed_rev 证据、E02/E03=值匹配等），phase_steps_closed 全关闭会传递性地蕴含这些子判据成立，故它足以验收这一层且从引擎状态派生、无法一句声明伪造（T3）。本 phase 无 optional 步，不需要 allow_optional_open。纯本地/只提交交付下不该跑的步由 skip 机制显式跳过后同样满足『已显式跳过』。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "1) E05a gate 不一致（真实缺陷）：散文把 E05a 描述为『🚦 评审配置确认门 …… 摆出一个轻确认门』，标题也带 🚦，但 flow.yaml 里 E05a 的 gate=none。依硬约束#3，gate=none 的步不能用 gate_recorded，故我只能降级为 evidence(cr_config)（T1）。若产品意图确实是一道人工确认门，应把 flow.yaml 的 E05a gate 改为 affirm 并改判据为 gate_recorded（T3）；否则这道『确认』在引擎里是无强制的自陈，和 E04 的真门不对等。请裁定。 2) E07 多-kind 合取无法表达（词汇缺口）：E07 完成标准是三合取（commit_sha + cr_url + pushed_rev 都要在），但谓词表没有『多个 kind 同时存在』的合取式（evidence 只查一个 kind，all_of/any_of 是对 steps）。当前只能钉 pushed_rev 一个，靠 cleanup 下游消费 commit_sha/cr_url 来间接兜底。建议要么把 E07 拆成三个可独立核验的子步，要么给词汇表加一个 evidence_all(kinds:[...]) 谓词——否则任何单步的多产物完成标准都会漏检其余产物。 3) fields_agree(pushed_rev, verified_rev) 不变式是跨 phase 的：verified_rev 在 observation 层记录，依硬约束#5 不能写进 execution 的 goal 或 E07 完成（会引用尚未运行的步、令本 phase 永远关不掉）。该不变式必须挂在 observation 层那一步上；execution 层对它的唯一责任就是在 E07 记下 pushed_rev（本 spec 已用 E07 的 evidence 判据机器化保证这一半，避免 observation 侧因缺操作数而 absent_ok 静默通过）。 4) 本 phase 无 optional 步、无 T0（0 个 attest），T1×5 / T2×3 / T3×1，未触及『≤4 个 T0』上限。"
+    },
+    "observation": {
+      "goal_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev",
+        "absent_ok": true
+      },
+      "reason": "散文把本层收尾判定钉死为一条硬不变式：「完成判定会硬性核对『已验证修订号 == 最新推送修订号』，两者不等就无法收尾 —— 这正是从结构上堵死『修完就当过』的那道闸」（E18-recon）。这句话描述的就是关闭本层的必经关口，因此 goal 取 fields_agree(pushed_rev, verified_rev)。absent_ok 表达「本次无提交的纯本地交付」这条 N/A 分支（散文全局说明观察对象是『最新推送的那个修订』，无推送则无对象）。取舍：goal 无法在单条谓词里同时表达『步骤都关闭』+『终态字串代表通过/已合入』；rev 钉定是散文明写的『硬性核对』关口，比 phase_steps_closed 更强也更贴合本层语义（phase_steps_closed 会让一个以超时收尾的 E18 也算过关，正是本层要防的假完成），故选它。终态『代表通过/已合入』的约束在步骤级由 E18/E18-recon 的 evidence_in 承担并按终态分流回修订。",
+      "live_goal": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "phase_steps_closed"
+          },
+          {
+            "type": "fields_agree",
+            "kind_a": "pushed_rev",
+            "kind_b": "verified_rev",
+            "absent_ok": true
+          }
+        ]
+      },
+      "notes": "1) 🚦 gate 与 flow 声明冲突：E18、E29 散文都带 🚦 且语义是『门/终态跟踪循环』，但 flow.yaml 两步 gate 均为 none，故无法用最强的 gate_recorded(T3)，只能退到 evidence_in(T2)。若这两步本应是真 gate（尤其 E18『结束这一轮、等人回话』极像 yield-gate），建议在 flow.yaml 把 gate 从 none 改为对应门类型，届时 E18/E29 可升级为 gate_recorded，判据强度更高。请复核这是设计如此还是 flow 漏配。\n2) phase goal 的固有取舍：goal=fields_agree(pushed_rev,verified_rev) 只钉定『已验证修订==最新推送修订』，并不断言终态字串『代表通过/已合入』。理论上一个以 timeout 收尾、verified_rev 又恰等于 pushed_rev 的情形能满足 goal 却并未真正干净通过。单条谓词无法同时表达 rev 钉定 + 终态干净（all_of 只吃 step id、fields_agree 的 value_in 校验的是相等后的『rev 值』而非状态）。已在步骤级用 E18/E18-recon 的 evidence_in 承接终态分流（有意见/失败→回修订）。若引擎支持，建议 close 关口再叠一条 evidence_in(analyzer_terminal,[all_pass,merged]) 作复合门。\n3) E18 的 evidence_in 合法值含 timeout：这是散文明确许可的收尾（『明说是超时』），但 timeout 不是干净通过——因此 E18『关闭』不可被读作『本层通过』。本层真正通过依赖 E18-recon resume 后重读到 all_pass/merged 且 rev 钉定成立。此为设计所需，但要求下游别把 E18 关闭当层成功。\n4) E09 零意见边界：完成标准『每条意见都有归类结果』在无任何意见时是空真，但 evidence(kind=decision,min_count=1) 需要至少一行。E09 非 optional，故无意见时执行者仍须显式落一条『无意见可分诊』的 decision 行，否则本步关不掉。建议在步骤实现里对『零意见』显式记一条决定（保守留痕），或由 flow 给 E09 允许该分支跳过。\n5) E18b 时机张力：散文要求『上一步以等待收尾则先不 emit，留到终态确认后再补』，而本步非 optional 且判据是『评分行已存在』。二者其实自洽——evidence 未满足会阻止在等待中途关层，正好符合『还没到终态本层没真做完』；仅需保证 resume(E18-recon)确认终态后再补 emit E18b。\n6) 新增 kind：dry_run_status(E27)、layer_score(E18b)、pipeline_status(E28)、cr_terminal(E29)，均 snake_case 名词、不带步骤 id，共享表无对应项故新起；其中 pipeline_status 纯本层记录、无下游消费者。\n7) analyzer_terminal 是共享 kind，我为 E18 的 evidence_in 列的值 [all_pass, merged, has_comments, analyzer_fail, timeout] 是按散文『全部通过/已合入/有意见/失败』+超时推断的规范串。**若已有上游 emitter 用的是别的字面串（如 all-pass / passed 等），evidence_in 会因字符串不等而静默失败**——落地前务必与现有 analyzer_terminal 发射方对齐确切取值。"
+    },
+    "revision": {
+      "goal_at_derivation": {
+        "type": "phase_steps_closed",
+        "allow_optional_open": true
+      },
+      "reason": "本层散文开宗明义：「改动推出去后，如果外部检查……全都放行，就直接跳过它、什么都不做」——16 步全 optional，findings 为空时一步都不会跑。所以 goal 必须在「整层被跳过」时仍能通过：phase_steps_closed 在必需步骤集为空时 vacuously 通过，恰好满足这一点。而当有 findings、部分步骤确实跑了时，它又要求跑过的步骤到达 closed/skipped 终态，防止「跑了不收尾」。allow_optional_open 显式声明「留在 open 的 optional 步骤不算 goal 失败」——因为本层没有任何必需步骤，逐步的「跑了必检」由每步自己的完成谓词承担（硬约束 1），goal 只做层级验收。它完全从引擎状态派生（T3），无法用一句声明伪造，且不是 attest（引擎会 exit 2）。",
+      "live_goal": {
+        "type": "phase_steps_closed"
+      },
+      "notes": "== 可重复步骤 / 预算 / 耗尽处理（配 repeatable/budget/on_exhausted 用）==\n\n【迭代预算——修订循环】散文原话：「它还有一条硬性的迭代预算（默认 3 次）。这不是『多试几次总能过』的余量，而是一条止损线」。\n- repeatable 步骤：R01→R02→R03→R04→R05→R06→R08 构成 fix/re-check 循环，可重复，每绕一圈迭代计数 +1（散文 R08：「再出意见就迭代计数加一、回 R01」）。\n- budget：默认 3 次（revision-loop 支线专属）。\n- on_exhausted：达上限触发 R07。散文明确要求「拒绝继续」：「继续在预算之外硬试，只是在同一个错误认知上反复推送……换方法或叫人，而不是偷偷把上限调大再来一轮」。耗尽后不是重试，而是生成可交接失败记录并进入 auto-investigation 支线（R09→R14）：收集轨迹→写调查计划→建调查任务→回写原任务→面向人的最终报告→退出。即 on_exhausted = 停止循环 + 升级给人（经调查支线交接）。\n- 一次性/终态步骤（非 repeatable）：R07（仅耗尽时一次）、R09–R14（调查支线各一次）、R15（仅最后一轮确认全绿后一次）。\n\n【独立预算——冲突重基 R16】散文原话：「合入冲突重基（R16）——它解决的不是『意见』，因此不占这条预算、自带单独的计数」，且「它自带一条独立的止损计数（同样默认 3 次，且强制执行）」。\n- repeatable：R16 自身是一个带推送的重基回路，可重复。\n- budget：独立于修订循环，默认 3 次，强制执行（与 R01–R08 那条完全隔离，互不触动）。\n- on_exhausted：与修订循环处理方式不同——散文失败时明确：「独立计数耗尽 → 通知并停下交回人，不转入调查支线」；正文：「到上限说明主线前进的速度超过了这条回路能跟上的速度，这需要人来决定（等一个窗口 / 把改动拆小 / 协调节奏）」。即 on_exhausted = 通知 + 停止 + 交回人（不进 R09–R14 调查支线）。\n- 执行纪律（配 repeatable 的前置守卫可参考）：散文「先占计数再动手」「重基前复验冲突是否还在」「语义冲突绝不擅自解 → 回干净状态、通知、停下问人」。\n\n== 发现的真实问题 ==\n\n1) 【prose/flow 不一致 — R04】R04 标题是「Decision gate」、散文语义就是一道推送前的决策门（自动放行 vs 需人拍板），但 flow.yaml 里 R04 的 gate 列 = none。按硬约束 3，gate_recorded 只能用在 gate!=none 的步骤上，故本步无法用 T3 的 gate_recorded，退而用 evidence_in(revision_decision)（T2）。建议核对：若 R04 本应是真正的 gate，flow.yaml 应把它的 gate 从 none 改为 y/优先项，届时 R04 可升级为 gate_recorded(T3)。\n\n2) 【全 phase 无 gate】本 phase 16 步 gate 列全部为 none，故整层没有任何步骤可用 gate_recorded——这与散文里 R04「修复确认」的门禁语气、以及修订循环本应有「是否推送」的把关点相悖。若引擎期望修订推送前有真实 gate，需在 flow.yaml 补 gate。\n\n3) 【R15 绿态取值假设】R15 用 evidence_in(analyzer_terminal, values:[\"all-pass\"]) 表达散文「外部检查确认全绿」。all-pass 是按 ship-check asis 惯例的推测值，必须与观察阶段(E18 等)实际写入 analyzer_terminal 的「干净/全绿」终态 token 完全一致，否则 R15 永远关不掉。请用观察阶段实际的绿态 token 覆盖此 values（可能是 all-pass / clean / merged 之一或多个）。\n\n4) 【R09 min_count 与预算耦合】R09 用 min_count:3 量化散文「三次尝试的过程都被记录」。此 3 直接绑定默认迭代预算 3；若 budget 被改配（如调成 2 或 5），min_count 需同步改，否则要么关不掉、要么欠记录。建议引擎侧让 R09 的 min_count 跟随 budget 配置派生，而非硬编码。\n\n5) 【共享不变式复用良好，非问题，仅备注】R08 与 R16 都落在 pushed_rev/verified_rev 的 fields_agree 不变式上——两条支线（修意见 / 重基）最终都要证明「推出去的那一版确实被重新验证过」，语义一致、正确复用共享 kind，未改名。\n\n== 分层统计 ==\nT0=0；T1=11（R01,R02,R03,R05,R06,R07,R09,R10,R11,R12,R14）；T2=5（R04,R08,R13,R15,R16）；步骤合计 16。goal=T3（phase_steps_closed）。硬约束 1（optional 不放宽判据）已全程遵守：16 步全 optional，但无一步用 attest，全部落到 T1 及以上真实证据/可检谓词。硬约束 2（≤4 个 T0）：T0=0，远优于上限。"
+    },
+    "cleanup": {
+      "goal_at_derivation": {
+        "type": "all_of",
+        "steps": [
+          "E09g",
+          "E10",
+          "E11",
+          "E12",
+          "E19",
+          "E20",
+          "E21",
+          "E24"
+        ],
+        "any_of": [
+          [
+            "E22a",
+            "E22b"
+          ]
+        ]
+      },
+      "reason": "散文明确「E22a 与 E22b 二选一、只走一个，由 E21 的决定分叉，不会两条都走」。E22a/E22b 在 flow 表里都是非可选步，若用 phase_steps_closed 作 goal 会同时要求两条分支都关闭——而互斥意味着永远只有一条真跑、另一条被 skip，goal 将永不满足。故按要点2用 all_of：steps 列恒执行的必需步（入口门+回写三步+汇总+分支判定+关单门+最终小结），再用 any_of 组 [[E22a,E22b]] 表达「恰好一个分支被走过」（该组只要求≥1关闭，跑过的那条关闭即满足，被 skip 的另一条不拖累）。刻意不纳入 E13/E25：二者在 close-run 必经路径的末端、summarize 评估时点会造成循环；也不纳入 E23（散文「仅关闭分支执行」，N 分支会 skip）与全部可选步。这是 T3、完全由引擎状态派生、无法用一句声明伪造。",
+      "live_goal": {
+        "type": "all_of",
+        "steps": [
+          "E09g",
+          "E10",
+          "E11",
+          "E12",
+          "E19",
+          "E20",
+          "E21",
+          "E24"
+        ],
+        "any_of": [
+          [
+            "E22a",
+            "E22b"
+          ]
+        ]
+      },
+      "notes": "1) 互斥分支 E22a/E22b 在 flow 表里都是非可选步——若拿 phase_steps_closed 当 goal 会同时要求两条都关闭，与散文『二选一、只走一个』直接冲突。故 goal 改用 all_of + any_of:[[E22a,E22b]]（要点2）；被 skip 的那条不拖累关闭。2) E13 文档里列在最后，但『执行位置紧贴退出点——排在 E24 之后 E25 之前』；请确认 flow.yaml 的执行序真的把 E13 排到 E25 前，否则挡退出的语义落空。3) E13 完成标准是『4 项 pre-exit 谓词全部为真』，但词表没有 4 路合取的单一谓词——我取最强的②(phases_summarized)，另三项①③④分散到 E09g-pre / E21+E10 / phase goal；若引擎允许 goal 或 step 挂多条 spec，E13 才能真正一次查全 4 条。4) E24 散文完成标准写『分数已落库，小结已给出』，但同段失败条款说写分失败只记 warning、不阻断收口——两者矛盾：分数落库不能作硬门。我把 E24 完成绑到恒产出的『最终小结』，分数落库降为尽力而为。5) E14/E26 标题是『确认门/ask-gate』，但 flow.yaml gate=none——『经人确认』这一步并没有引擎门支撑，只能 T1 记录写入行，实际的人类确认无法机器校验；若确实要门控，应把这两步的 gate 从 none 改成 affirm 再用 gate_recorded。6) E09g-pre『评审已合入』本身（merge state）无对应 kind，只能用 pushed_rev==verified_rev 代理『分析器已验终态干净』；merge 与 verify 严格说不等价，若需真正校验合入，需要新增一个 merge_state kind。7) 本 phase 新增 kind：shipped_section / history_log / kb_entry / platform_quirk / memory_sweep / failure_analysis / changelog_entry / session_metrics / close_branch / plan_metrics / final_summary / close_cleanup / deferred_close——均 snake_case 名词、不带步骤 id，未与共享表冲突；task_state/plan_doc 等共享 kind 按要求原样使用（其中 plan_doc 在 E11 刻意不复用以避免跨层假阳性）。"
+    }
   },
-  "config": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed"
-   },
-   "reason": "散文开篇把本层验收写成两点合取：「所有与 diff 无关的偏好都已写盘，且这一层唯一的确认 gate 已被如实记录。做不到这两点，这一层就没完。」本层只有 CF00、CF09 两个必需步，且 CF00 的判据是 gate_recorded——CF00 关闭即蕴含「gate 已如实记录」，CF09 关闭即蕴含收尾打分已发。故 phase_steps_closed（本 phase 必需步骤全部关闭或显式跳过）恰好把「这两点」变成关闭 run 必经路径上的硬关口，且完全从引擎状态派生、无法一句声明伪造（T3）。不用 attest（引擎会 exit 2），也不用 all_of——phase_steps_closed 是本层「步骤都关闭」的最贴合、最强的通用形态。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "1) CF00 完成标准是合取（① 偏好已写盘 ∧ ② gate 已记录），但每步只能给一条 spec。选 gate_recorded 覆盖抗伪造、承重的那一半（②）；①「偏好已写盘」目前无法机器化——共享 evidence kind 表里没有 `config`/持久化产物这一 kind，`config` 对象本身是单次对象写盘、不是两值相等，evidence_equals/fields_agree 都套不上。若要补检 ①，需新增一个如 `config`（snake_case 名词）的 kind 并让 CF00 额外落一条 evidence——但那需要引擎支持一步多谓词，或把「偏好写盘」拆成独立可检步。当前设计下承重项是 gate，故 ① 属已知留白，不是漏检偷懒。2) 好消息：本 phase 2 步 + goal 全部 T3，零 T0——用户担心的「2 步全 attest = 该层完全没检测」被完全避免。3) flow.yaml 与散文一致：CF00 gate=`preauth:auto_confirm_config`（非 none，可用 gate_recorded），CF09 gate=none（不可用 gate_recorded），phase 声明 stage=['config-collect'] 与两步 stage 吻合，无跨 phase 依赖。4) 散文的『config 是 default，不是终判……后面 diff 出来仍允许人反悔覆盖，覆盖会回写 config 并标注来源』属后续 execution 层的覆盖行为，不影响本层完成判据——本层只需保证「起点」被合法确认/预授权并写盘。"
-  },
-  "coding": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed"
-   },
-   "reason": "本层验收 = 编码纪律全部落地。散文开篇写「做完的标准不是『代码看起来对了』，而是『实际 diff 与清单一一对应、且能编译过』」；这两条分别由 K04（范围比对）和 K03（编译）承载，K01/K02 产出清单与改动，K05 收尾。phase_steps_closed 要求 K01–K05 全部关闭或显式跳过，而 K03/K04 各自的 T2 谓词又强制『编译过』与『改动集与清单一致』——所以步骤全关本身就蕴含了这两条核心纪律，是最贴合本层验收的硬关口。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "1) change-set 归属：本 phase 的 K01/K02/K04 都涉及『文件』，但只让 K01 发 change_file（计划派生的改动集，输出即逐项文件路径），作为 context 层未声明清单时的兜底产出源；K02 发 code_diff（改动落地的 diff 证据），K04 只发裁决枚举（不是文件列表）——单一产出源避免下游 change-set 被重复喂入。2) K02 散文提到『改了枚举值/计数/版本号/保留区间 N-M……别处有配套的地方要一起改』，语义上对应共享 kind old_value / api_constant / auto_generated / module_under_test（爆炸半径与一致性检查的输入），但散文并未把它们列为 K02 的完成标准，故不纳入本 phase 谓词；如需更强的下游联动，可在 K02 机会性补发这些 kind，属 revision/verification 层职责。3) K01 完成标准的『已验证存在的锚点』（grep 实测命中）在现有谓词词汇里无法机器化，是本 phase 唯一被迫降格到 T1 的判据（无 T0）。4) 全 5 步 gate 均为 none，故无处可用 gate_recorded，符合硬约束 3。5) 无 T0：分层为 T1×2 (K01,K02) / T2×2 (K03,K04) / T3×1 (K05)，goal 为 T3。6) 未发现散文与 flow.yaml 步骤集/顺序的不一致；K04→K02 的回退、K02 卡三次升级问人属层内控制流，不产生跨 phase 依赖。"
-  },
-  "verification": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed"
-   },
-   "reason": "D15 散文把本层验收判据写死为一个复合条件：「本层目标校验（测试计划已解析、结论为通过或豁免、门禁已通过、必跑步全部完成）」。这四项里，前三项已经被本层各步自己的完成谓词钉死——D00=evidence:test_plan(测试计划已解析)、D05=evidence_in:test_result∈{pass,exempt}(结论为通过或豁免)、D14=gate_recorded(门禁已通过)——所以『必跑步全部完成』一旦成立，就传递地蕴含了前三项的值正确。因此 phase_steps_closed 在这里不是弱化，反而比任何单条 evidence_in 都强：它要求本层所有承重谓词（D05 的值、D14 的门、D15 的决策）同时满足，而单条 evidence_in 只能钉一个值。brief 明说『步骤都关闭且关键值正确用 all_of 表达不了时选更强的那一条』——phase_steps_closed 正是那条，且散文 D15 明确『门禁未通过就不出小结』与 close-run 要求已到达 phase 有 summary 完全对齐。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "1) D03『旧值残留=0』与 D08『所有点名检查都跑过』是全称/计数式完成标准，但词汇表没有『统计仓库 grep 命中数』或『枚举计划点名集合』的谓词，无法机器裁决『=0』或『没漏』，只能用 evidence 强制留下 old_value / verification_check 审计行（T1 天花板）。这两处的真正把关仍靠人工/脚本，属散文强于词汇表的地方。 2) D10 断言表的核心纪律『每个标待人工的项都由你作答』同样不可用 evidence kind 机器校验——evidence:assertion_table 只证明表存在。散文把兜底显式放到 D14（未作答项→门禁拒绝静默放行），所以 D10 停 T1 是设计使然，强制发生在 D14 gate_recorded + 本层 goal（phase_steps_closed 传递要求 D14 关闭）。 3) D13『验证状态落库』语义单薄，与 D15 的『决策落库』在持久化动作上高度重叠，本质是个进度写点，只能到 evidence T1。 4) stage 归属可疑：flow.yaml 把 D05『Test Plan execution』划到 stage=blast-radius，而 D00『Test framework』在 stage=test-execution——测试执行步落在 blast-radius 而非 test-execution 略反直觉，不阻断，但建议核对 stage 划分是否手误。 5) 跨 phase 不变式 pushed_rev/verified_rev 的 fields_agree 属 execution 层，verification 层无任何步触碰它，一致、无越界引用。 6) 本层 0 个 T0，未使用 all_of/跨 phase 引用，gate_recorded 仅用于 D14（gate=affirm），满足全部硬约束。"
-  },
-  "execution": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed"
-   },
-   "reason": "散文首段把本层「做完的标准」定义为『改动已提交（有提交哈希），评审已创建，且提交前的人工确认门已被如实记录 —— 任何一环靠猜、靠自我说服跳过，都算没做完』。这正好是「本 phase 的必需步骤都已关闭或已显式跳过」。因为每步各自带了非-attest 谓词（E04=gate_recorded、E07=pushed_rev 证据、E02/E03=值匹配等），phase_steps_closed 全关闭会传递性地蕴含这些子判据成立，故它足以验收这一层且从引擎状态派生、无法一句声明伪造（T3）。本 phase 无 optional 步，不需要 allow_optional_open。纯本地/只提交交付下不该跑的步由 skip 机制显式跳过后同样满足『已显式跳过』。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "1) E05a gate 不一致（真实缺陷）：散文把 E05a 描述为『🚦 评审配置确认门 …… 摆出一个轻确认门』，标题也带 🚦，但 flow.yaml 里 E05a 的 gate=none。依硬约束#3，gate=none 的步不能用 gate_recorded，故我只能降级为 evidence(cr_config)（T1）。若产品意图确实是一道人工确认门，应把 flow.yaml 的 E05a gate 改为 affirm 并改判据为 gate_recorded（T3）；否则这道『确认』在引擎里是无强制的自陈，和 E04 的真门不对等。请裁定。 2) E07 多-kind 合取无法表达（词汇缺口）：E07 完成标准是三合取（commit_sha + cr_url + pushed_rev 都要在），但谓词表没有『多个 kind 同时存在』的合取式（evidence 只查一个 kind，all_of/any_of 是对 steps）。当前只能钉 pushed_rev 一个，靠 cleanup 下游消费 commit_sha/cr_url 来间接兜底。建议要么把 E07 拆成三个可独立核验的子步，要么给词汇表加一个 evidence_all(kinds:[...]) 谓词——否则任何单步的多产物完成标准都会漏检其余产物。 3) fields_agree(pushed_rev, verified_rev) 不变式是跨 phase 的：verified_rev 在 observation 层记录，依硬约束#5 不能写进 execution 的 goal 或 E07 完成（会引用尚未运行的步、令本 phase 永远关不掉）。该不变式必须挂在 observation 层那一步上；execution 层对它的唯一责任就是在 E07 记下 pushed_rev（本 spec 已用 E07 的 evidence 判据机器化保证这一半，避免 observation 侧因缺操作数而 absent_ok 静默通过）。 4) 本 phase 无 optional 步、无 T0（0 个 attest），T1×5 / T2×3 / T3×1，未触及『≤4 个 T0』上限。"
-  },
-  "observation": {
-   "goal_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev",
-    "absent_ok": true
-   },
-   "reason": "散文把本层收尾判定钉死为一条硬不变式：「完成判定会硬性核对『已验证修订号 == 最新推送修订号』，两者不等就无法收尾 —— 这正是从结构上堵死『修完就当过』的那道闸」（E18-recon）。这句话描述的就是关闭本层的必经关口，因此 goal 取 fields_agree(pushed_rev, verified_rev)。absent_ok 表达「本次无提交的纯本地交付」这条 N/A 分支（散文全局说明观察对象是『最新推送的那个修订』，无推送则无对象）。取舍：goal 无法在单条谓词里同时表达『步骤都关闭』+『终态字串代表通过/已合入』；rev 钉定是散文明写的『硬性核对』关口，比 phase_steps_closed 更强也更贴合本层语义（phase_steps_closed 会让一个以超时收尾的 E18 也算过关，正是本层要防的假完成），故选它。终态『代表通过/已合入』的约束在步骤级由 E18/E18-recon 的 evidence_in 承担并按终态分流回修订。",
-   "live_goal": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "phase_steps_closed"
-     },
-     {
-      "type": "fields_agree",
-      "kind_a": "pushed_rev",
-      "kind_b": "verified_rev",
-      "absent_ok": true
-     }
-    ]
-   },
-   "notes": "1) 🚦 gate 与 flow 声明冲突：E18、E29 散文都带 🚦 且语义是『门/终态跟踪循环』，但 flow.yaml 两步 gate 均为 none，故无法用最强的 gate_recorded(T3)，只能退到 evidence_in(T2)。若这两步本应是真 gate（尤其 E18『结束这一轮、等人回话』极像 yield-gate），建议在 flow.yaml 把 gate 从 none 改为对应门类型，届时 E18/E29 可升级为 gate_recorded，判据强度更高。请复核这是设计如此还是 flow 漏配。\n2) phase goal 的固有取舍：goal=fields_agree(pushed_rev,verified_rev) 只钉定『已验证修订==最新推送修订』，并不断言终态字串『代表通过/已合入』。理论上一个以 timeout 收尾、verified_rev 又恰等于 pushed_rev 的情形能满足 goal 却并未真正干净通过。单条谓词无法同时表达 rev 钉定 + 终态干净（all_of 只吃 step id、fields_agree 的 value_in 校验的是相等后的『rev 值』而非状态）。已在步骤级用 E18/E18-recon 的 evidence_in 承接终态分流（有意见/失败→回修订）。若引擎支持，建议 close 关口再叠一条 evidence_in(analyzer_terminal,[all_pass,merged]) 作复合门。\n3) E18 的 evidence_in 合法值含 timeout：这是散文明确许可的收尾（『明说是超时』），但 timeout 不是干净通过——因此 E18『关闭』不可被读作『本层通过』。本层真正通过依赖 E18-recon resume 后重读到 all_pass/merged 且 rev 钉定成立。此为设计所需，但要求下游别把 E18 关闭当层成功。\n4) E09 零意见边界：完成标准『每条意见都有归类结果』在无任何意见时是空真，但 evidence(kind=decision,min_count=1) 需要至少一行。E09 非 optional，故无意见时执行者仍须显式落一条『无意见可分诊』的 decision 行，否则本步关不掉。建议在步骤实现里对『零意见』显式记一条决定（保守留痕），或由 flow 给 E09 允许该分支跳过。\n5) E18b 时机张力：散文要求『上一步以等待收尾则先不 emit，留到终态确认后再补』，而本步非 optional 且判据是『评分行已存在』。二者其实自洽——evidence 未满足会阻止在等待中途关层，正好符合『还没到终态本层没真做完』；仅需保证 resume(E18-recon)确认终态后再补 emit E18b。\n6) 新增 kind：dry_run_status(E27)、layer_score(E18b)、pipeline_status(E28)、cr_terminal(E29)，均 snake_case 名词、不带步骤 id，共享表无对应项故新起；其中 pipeline_status 纯本层记录、无下游消费者。\n7) analyzer_terminal 是共享 kind，我为 E18 的 evidence_in 列的值 [all_pass, merged, has_comments, analyzer_fail, timeout] 是按散文『全部通过/已合入/有意见/失败』+超时推断的规范串。**若已有上游 emitter 用的是别的字面串（如 all-pass / passed 等），evidence_in 会因字符串不等而静默失败**——落地前务必与现有 analyzer_terminal 发射方对齐确切取值。"
-  },
-  "revision": {
-   "goal_at_derivation": {
-    "type": "phase_steps_closed",
-    "allow_optional_open": true
-   },
-   "reason": "本层散文开宗明义：「改动推出去后，如果外部检查……全都放行，就直接跳过它、什么都不做」——16 步全 optional，findings 为空时一步都不会跑。所以 goal 必须在「整层被跳过」时仍能通过：phase_steps_closed 在必需步骤集为空时 vacuously 通过，恰好满足这一点。而当有 findings、部分步骤确实跑了时，它又要求跑过的步骤到达 closed/skipped 终态，防止「跑了不收尾」。allow_optional_open 显式声明「留在 open 的 optional 步骤不算 goal 失败」——因为本层没有任何必需步骤，逐步的「跑了必检」由每步自己的完成谓词承担（硬约束 1），goal 只做层级验收。它完全从引擎状态派生（T3），无法用一句声明伪造，且不是 attest（引擎会 exit 2）。",
-   "live_goal": {
-    "type": "phase_steps_closed"
-   },
-   "notes": "== 可重复步骤 / 预算 / 耗尽处理（配 repeatable/budget/on_exhausted 用）==\n\n【迭代预算——修订循环】散文原话：「它还有一条硬性的迭代预算（默认 3 次）。这不是『多试几次总能过』的余量，而是一条止损线」。\n- repeatable 步骤：R01→R02→R03→R04→R05→R06→R08 构成 fix/re-check 循环，可重复，每绕一圈迭代计数 +1（散文 R08：「再出意见就迭代计数加一、回 R01」）。\n- budget：默认 3 次（revision-loop 支线专属）。\n- on_exhausted：达上限触发 R07。散文明确要求「拒绝继续」：「继续在预算之外硬试，只是在同一个错误认知上反复推送……换方法或叫人，而不是偷偷把上限调大再来一轮」。耗尽后不是重试，而是生成可交接失败记录并进入 auto-investigation 支线（R09→R14）：收集轨迹→写调查计划→建调查任务→回写原任务→面向人的最终报告→退出。即 on_exhausted = 停止循环 + 升级给人（经调查支线交接）。\n- 一次性/终态步骤（非 repeatable）：R07（仅耗尽时一次）、R09–R14（调查支线各一次）、R15（仅最后一轮确认全绿后一次）。\n\n【独立预算——冲突重基 R16】散文原话：「合入冲突重基（R16）——它解决的不是『意见』，因此不占这条预算、自带单独的计数」，且「它自带一条独立的止损计数（同样默认 3 次，且强制执行）」。\n- repeatable：R16 自身是一个带推送的重基回路，可重复。\n- budget：独立于修订循环，默认 3 次，强制执行（与 R01–R08 那条完全隔离，互不触动）。\n- on_exhausted：与修订循环处理方式不同——散文失败时明确：「独立计数耗尽 → 通知并停下交回人，不转入调查支线」；正文：「到上限说明主线前进的速度超过了这条回路能跟上的速度，这需要人来决定（等一个窗口 / 把改动拆小 / 协调节奏）」。即 on_exhausted = 通知 + 停止 + 交回人（不进 R09–R14 调查支线）。\n- 执行纪律（配 repeatable 的前置守卫可参考）：散文「先占计数再动手」「重基前复验冲突是否还在」「语义冲突绝不擅自解 → 回干净状态、通知、停下问人」。\n\n== 发现的真实问题 ==\n\n1) 【prose/flow 不一致 — R04】R04 标题是「Decision gate」、散文语义就是一道推送前的决策门（自动放行 vs 需人拍板），但 flow.yaml 里 R04 的 gate 列 = none。按硬约束 3，gate_recorded 只能用在 gate!=none 的步骤上，故本步无法用 T3 的 gate_recorded，退而用 evidence_in(revision_decision)（T2）。建议核对：若 R04 本应是真正的 gate，flow.yaml 应把它的 gate 从 none 改为 y/优先项，届时 R04 可升级为 gate_recorded(T3)。\n\n2) 【全 phase 无 gate】本 phase 16 步 gate 列全部为 none，故整层没有任何步骤可用 gate_recorded——这与散文里 R04「修复确认」的门禁语气、以及修订循环本应有「是否推送」的把关点相悖。若引擎期望修订推送前有真实 gate，需在 flow.yaml 补 gate。\n\n3) 【R15 绿态取值假设】R15 用 evidence_in(analyzer_terminal, values:[\"all-pass\"]) 表达散文「外部检查确认全绿」。all-pass 是按 ship-check asis 惯例的推测值，必须与观察阶段(E18 等)实际写入 analyzer_terminal 的「干净/全绿」终态 token 完全一致，否则 R15 永远关不掉。请用观察阶段实际的绿态 token 覆盖此 values（可能是 all-pass / clean / merged 之一或多个）。\n\n4) 【R09 min_count 与预算耦合】R09 用 min_count:3 量化散文「三次尝试的过程都被记录」。此 3 直接绑定默认迭代预算 3；若 budget 被改配（如调成 2 或 5），min_count 需同步改，否则要么关不掉、要么欠记录。建议引擎侧让 R09 的 min_count 跟随 budget 配置派生，而非硬编码。\n\n5) 【共享不变式复用良好，非问题，仅备注】R08 与 R16 都落在 pushed_rev/verified_rev 的 fields_agree 不变式上——两条支线（修意见 / 重基）最终都要证明「推出去的那一版确实被重新验证过」，语义一致、正确复用共享 kind，未改名。\n\n== 分层统计 ==\nT0=0；T1=11（R01,R02,R03,R05,R06,R07,R09,R10,R11,R12,R14）；T2=5（R04,R08,R13,R15,R16）；步骤合计 16。goal=T3（phase_steps_closed）。硬约束 1（optional 不放宽判据）已全程遵守：16 步全 optional，但无一步用 attest，全部落到 T1 及以上真实证据/可检谓词。硬约束 2（≤4 个 T0）：T0=0，远优于上限。"
-  },
-  "cleanup": {
-   "goal_at_derivation": {
-    "type": "all_of",
-    "steps": [
-     "E09g",
-     "E10",
-     "E11",
-     "E12",
-     "E19",
-     "E20",
-     "E21",
-     "E24"
-    ],
-    "any_of": [
-     [
-      "E22a",
-      "E22b"
-     ]
-    ]
-   },
-   "reason": "散文明确「E22a 与 E22b 二选一、只走一个，由 E21 的决定分叉，不会两条都走」。E22a/E22b 在 flow 表里都是非可选步，若用 phase_steps_closed 作 goal 会同时要求两条分支都关闭——而互斥意味着永远只有一条真跑、另一条被 skip，goal 将永不满足。故按要点2用 all_of：steps 列恒执行的必需步（入口门+回写三步+汇总+分支判定+关单门+最终小结），再用 any_of 组 [[E22a,E22b]] 表达「恰好一个分支被走过」（该组只要求≥1关闭，跑过的那条关闭即满足，被 skip 的另一条不拖累）。刻意不纳入 E13/E25：二者在 close-run 必经路径的末端、summarize 评估时点会造成循环；也不纳入 E23（散文「仅关闭分支执行」，N 分支会 skip）与全部可选步。这是 T3、完全由引擎状态派生、无法用一句声明伪造。",
-   "live_goal": {
-    "type": "all_of",
-    "steps": [
-     "E09g",
-     "E10",
-     "E11",
-     "E12",
-     "E19",
-     "E20",
-     "E21",
-     "E24"
-    ],
-    "any_of": [
-     [
-      "E22a",
-      "E22b"
-     ]
-    ]
-   },
-   "notes": "1) 互斥分支 E22a/E22b 在 flow 表里都是非可选步——若拿 phase_steps_closed 当 goal 会同时要求两条都关闭，与散文『二选一、只走一个』直接冲突。故 goal 改用 all_of + any_of:[[E22a,E22b]]（要点2）；被 skip 的那条不拖累关闭。2) E13 文档里列在最后，但『执行位置紧贴退出点——排在 E24 之后 E25 之前』；请确认 flow.yaml 的执行序真的把 E13 排到 E25 前，否则挡退出的语义落空。3) E13 完成标准是『4 项 pre-exit 谓词全部为真』，但词表没有 4 路合取的单一谓词——我取最强的②(phases_summarized)，另三项①③④分散到 E09g-pre / E21+E10 / phase goal；若引擎允许 goal 或 step 挂多条 spec，E13 才能真正一次查全 4 条。4) E24 散文完成标准写『分数已落库，小结已给出』，但同段失败条款说写分失败只记 warning、不阻断收口——两者矛盾：分数落库不能作硬门。我把 E24 完成绑到恒产出的『最终小结』，分数落库降为尽力而为。5) E14/E26 标题是『确认门/ask-gate』，但 flow.yaml gate=none——『经人确认』这一步并没有引擎门支撑，只能 T1 记录写入行，实际的人类确认无法机器校验；若确实要门控，应把这两步的 gate 从 none 改成 affirm 再用 gate_recorded。6) E09g-pre『评审已合入』本身（merge state）无对应 kind，只能用 pushed_rev==verified_rev 代理『分析器已验终态干净』；merge 与 verify 严格说不等价，若需真正校验合入，需要新增一个 merge_state kind。7) 本 phase 新增 kind：shipped_section / history_log / kb_entry / platform_quirk / memory_sweep / failure_analysis / changelog_entry / session_metrics / close_branch / plan_metrics / final_summary / close_cleanup / deferred_close——均 snake_case 名词、不带步骤 id，未与共享表冲突；task_state/plan_doc 等共享 kind 按要求原样使用（其中 plan_doc 在 E11 刻意不复用以避免跨层假阳性）。"
+  "steps": {
+    "C00": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "activation_banner"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "activation_banner"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "hot_set_state",
+            "values": [
+              "loaded",
+              "empty",
+              "unavailable"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "hot_set_state",
+            "claims": [
+              "loaded"
+            ],
+            "disproved_when": {
+              "fact": "hot_set_count",
+              "count_lte": 0
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "hot_set_state",
+            "claims": [
+              "empty"
+            ],
+            "disproved_when": {
+              "fact": "hot_set_count",
+              "count_gte": 1
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "hot_set_state",
+            "claims": [
+              "unavailable"
+            ],
+            "disproved_when": {
+              "fact": "hot_banner_readable",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "散文完成标准：「横幅作为本阶段第一条叙述输出打出，且只打这一次。」输出是「一行激活横幅，末尾带上本次加载的历史经验条数，并逐条列出经验 id」。「第一条叙述 / 只打一次」这种叙述顺序无法用现有任何谓词机器化，但散文强调「条数必须来自脚本对库的实际计数」（topic hot-set-fabrication）——所以最强可机检项是强制留下一条可审计的横幅内容行（条数 + id 明细），故用 evidence(activation_banner)（T1）而非 attest。顺序/唯一性的缺口见 notes。\n[2026-09-02 升级] 增记 hot_set_state，三个取值各有反驳事实。散文的完成标准要求横幅带上加载条数并逐条列出 id；而「查了确实是空」与「压根没查到」都渲染成 0，源系统的常驻指令只能靠散文说「命令失败不是编造 Hot Set: 0 的许可」。现在由 hot_set_count 的两个方向与 hot_banner_readable 各守一个取值。"
+    },
+    "C01": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "plan_doc"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "plan_doc"
+          },
+          {
+            "type": "evidence",
+            "kind": "fleet_task"
+          }
+        ]
+      },
+      "reason": "散文完成标准：「找到方案文档并完成状态迁移。」输出是「方案文档状态从『已排期』迁到『进行中』，并移动到对应目录」。共享 kind plan_doc（方案文档路径，跨层引用）正是此处该落的记录；记下 plan_doc 路径即证明「找到方案文档」这一前提成立。optional 步骤但按硬约束#1不放宽——evidence（T1）是留痕而非放宽。状态迁移本身的目标态由散文/skip 处理。\n[2026-09-02 升级] 增记 fleet_task —— 「这个 run 服务的是哪个被派发的任务」以前无处可读，于是收尾处「已上报」这句声称没有可核对的对象。记在开头而不是收尾：收尾时才声明是否适用，等于让想跳过上报的人自己决定适用性。值是任务 id 或 local。"
+    },
+    "C02": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "phases_summarized",
+        "exclude": [
+          "context"
+        ]
+      },
+      "live_spec": {
+        "type": "phases_summarized",
+        "exclude": [
+          "context"
+        ]
+      },
+      "reason": "散文完成标准：「无并发冲突，且（若续跑）已补齐所有『到达过但没收尾』的层。」散文点名续跑边界是漏报重灾区，「强制用确定性对账取代记忆重建」（topic resume-underreport）。phases_summarized 恰好检查「已到达的 phase 都有 summary 行」= 已补齐所有到达过但没收尾的层，完全从引擎状态派生（T3）。exclude=[context] 是因为 context 是当前进行中的 phase、其 summary 要到本层末步 C24 才 emit，不排除会误判自己未收尾；排除后：新跑时无其它已到达 phase → 真空为真可关闭，续跑时前序层缺小结 → 被强制补齐。并发检测（防双跑，靠锁文件）无对应谓词，见 notes。"
+    },
+    "C03": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "contract_age_verdict",
+        "values": [
+          "fresh",
+          "spot_check",
+          "expired"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "contract_age_verdict",
+        "values": [
+          "fresh",
+          "spot_check",
+          "expired"
+        ]
+      },
+      "reason": "散文完成标准：「给出时效判定并据此决定下一步。」输出是「一个判定——这些事实此刻可信 / 需抽查 / 已过期」。散文把规则写死为三档：「核实时间在一天内直接信任；一天到一周之间，抽查关键路径；超过一周，停下」。这是一个枚举裁决，故用 evidence_in 并列出三个允许值（T2），记录的判定值必须落在这三档之一。"
+    },
+    "C04": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "code_sync_state",
+        "values": [
+          "synced",
+          "up_to_date"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "code_sync_state",
+        "values": [
+          "synced",
+          "up_to_date"
+        ]
+      },
+      "reason": "散文完成标准：「工作区不落后于远端，或确认无需同步。」输出是「落后就同步到最新，本来就干净则跳过」。两种合法终态——已同步 / 本来就最新——是一个枚举结果，故用 evidence_in（T2）把记录值约束在这两个允许值内，而非只留痕。"
+    },
+    "C05": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "verified_fact"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "verified_fact"
+          },
+          {
+            "type": "evidence_all_in",
+            "kind": "fact_verdict",
+            "values": [
+              "hit"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准：「清单全部命中。」输出是「逐条去代码里查证，全部命中才算过」。共享 kind verified_fact（一条『此刻仍成立』的前置事实校验结论，消费者标注为 context 层）正是为此步准备的——每条关键路径核验命中即一条 verified_fact 行。用 evidence(verified_fact)（T1）强制留下逐条可审计的核验结论。「全部命中」这种完整性断言无枚举/相等谓词可表达，min_count 只能保证 ≥N，故止步 T1。"
+    },
+    "C06": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "platform_quirk"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "platform_quirk"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "quirk_lookup",
+            "values": [
+              "hit",
+              "miss"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准：「完成一次查表，命中则缓存。」输出是「命中已知平台特性时，把编译/测试命令的覆盖值缓存给后续层用」。查表这个动作总会发生（命中与否都记一行结果，未命中即『无特性、走默认』），故用 evidence(platform_quirk)（T1）强制这次查表留痕；「命中则缓存」是条件动作，由记录内容体现而非放宽判据。"
+    },
+    "C07": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "dependency_check",
+        "values": [
+          "all_ready",
+          "no_dependencies"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "dependency_check",
+        "values": [
+          "all_ready",
+          "no_dependencies"
+        ]
+      },
+      "reason": "散文完成标准：「所有上游依赖状态为已就绪。」输入是「方案里声明的上游依赖（若有）」，失败时「任一上游未就绪 → 停下」。散文并强调「只认方案文档和任务系统里的状态字段」（topic stale-dependency-snapshot）。用 evidence_in（T2）把聚合裁决约束为 all_ready（确认全部就绪后才可如实记）或 no_dependencies（『若有』的无依赖分支），二者都是显式匹配的期望值，比只留痕更可检。"
+    },
+    "C07b": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "diagnosis_challenge",
+        "values": [
+          "survived"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "diagnosis_challenge",
+        "values": [
+          "survived"
+        ]
+      },
+      "reason": "散文完成标准：「诊断挺过了 M1/M2/M3 三轮质疑。」输出是「经过质疑、被证伪过一轮的诊断结论」，失败时「诊断经不起挑战，就退回去重新查」。合法关闭态只有『挺过质疑』，故用 evidence_in(values=[survived])（T2）——记录的挑战结论必须等于 survived。optional（仅复杂任务）但按硬约束#1不放宽：非复杂任务用 skip 处理，判据照写强的。"
+    },
+    "C08": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "diagnosis"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "diagnosis"
+      },
+      "reason": "散文完成标准：「三要素清晰、有证据支撑。」输出是「现象、根因、影响面（附查证结果）」。这是一份需落盘的诊断对象，故用 evidence(diagnosis)（T1）强制留下带查证结果的诊断记录。三要素齐全/证据充分属内容质量，无枚举或相等关系可机检，止步 T1。"
+    },
+    "C09": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "solution_choice"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "solution_choice"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "solution_form",
+            "values": [
+              "single",
+              "compared"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准：「方案唯一确定，或对比清单已备好待确认。」输出是「多解法时列出对比；确定性修复可跳过」。用 evidence(solution_choice)（T1）强制记录选定方案/对比清单。刻意不复用通用 kind decision——decision 被多步共用，min_count=1 会被任意别处的 decision 行满足而造成跨步串味，故起一个专名 solution_choice。"
+    },
+    "C10": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "reason": "散文完成标准：「每处改动都能对应到具体位置。」输出是「一张改动表（路径 / 操作 / 锚点 / 手动还是自动）」——改动表里的『路径』列就是被改动的文件清单。change_file 是共享表里点名的爆炸半径 change-set 输入（缺它整个分析惰性化），context 层正是『声明改动清单的自然位置』，而 C10 就是这张清单本身，故用 evidence(change_file)（T1）强制它存在。改动表的『手动/自动』列中的自动行同时在此登记 auto_generated（生成产物 glob），若改动含契约常量则一并登记 api_constant——这两个是条件化的同表副记录，见 notes。"
+    },
+    "C11": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "old_value"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "old_value"
+      },
+      "reason": "散文完成标准：「同类点已穷尽、数值有依据。」触发条件是「只要方案里出现『一共 N 处』这类数值断言，就必须穷尽查一遍」（topic investigation-rigor）。去硬编码/改值场景下，『穷尽的同类点』正是那个『不该在改动后残留的值』的全部落点，故把爆炸半径 change-set 输入 old_value 落在此步：evidence(old_value)（T1）强制把所有待清除的旧值落点登记下来，供下游 grep 校验『改后不残留』。本步条件化——方案无数值断言/无旧值时按硬约束#6用 skip 处理，判据不放宽。"
+    },
+    "C12": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "parser_sample_verdict",
+        "values": [
+          "as_expected"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "parser_sample_verdict",
+        "values": [
+          "as_expected"
+        ]
+      },
+      "reason": "散文完成标准：「规则在样本上表现符合预期。」输出是「拿真实样本喂一遍，确认匹配范围既不多也不少」，失败时「样本里出现误伤或漏匹配 → 收紧规则再验」。合法关闭态是『符合预期』，故用 evidence_in(values=[as_expected])（T2）把样本核验裁决约束为期望值。条件化（仅当改动用到正则/批量替换）——无正则时 skip。"
+    },
+    "C13": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "self_loop_check",
+        "values": [
+          "independent"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "self_loop_check",
+        "values": [
+          "independent"
+        ]
+      },
+      "reason": "散文完成标准：「验证与改动相互独立。」输出是「确认『被改的东西』和『用来验证的东西』不是同一个」，防的是「用改过的尺子量改过的布」（topic self-loop-guard）。注意这是要求两者『不相等』——fields_agree 只能表达『相等』方向不适用，故改用 evidence_in(values=[independent])（T2）：把自环检查裁决约束为『独立』这一期望值。"
+    },
+    "C14": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "direction_source_agreement",
+        "values": [
+          "aligned"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "direction_source_agreement",
+        "values": [
+          "aligned"
+        ]
+      },
+      "reason": "散文完成标准：「改动方向与权威来源一致。」输出是「明确『事实来源』和总体改动方向」，失败时「方向和事实来源对不上就停下来核」。这是一个『方向 vs 权威来源』的一致性裁决，故用 evidence_in(values=[aligned])（T2）把该裁决约束为『一致』。当权威来源本身是契约常量时，在此步一并登记爆炸半径 change-set 输入 api_constant（条件化副记录，见 notes——因 C14 是每次都跑的强制步而 api_constant 只在契约常量改动时才有，不能拿它当强制谓词，否则非契约改动永远关不掉，违反硬约束#1/#6）。"
+    },
+    "C15": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "module_under_test"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "module_under_test"
+      },
+      "reason": "散文完成标准：「下游影响已列全。」输出是「一张下游依赖状态表——谁会因此受影响」。下游受影响的对象正是测试应当覆盖的模块，故把爆炸半径 change-set 输入 module_under_test 落在此步：evidence(module_under_test)（T1）强制列出这些模块，供验证层核对测试覆盖。任何改动至少含被改模块本身，min_count=1 恒可满足。"
+    },
+    "C16": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "risk"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "risk"
+      },
+      "reason": "散文完成标准：「风险与回退都写明。」输出是「风险点 + 每个风险的回退路径」，失败时「想不出回退路径的风险，要显式标为『不可逆』」。用 evidence(risk)（T1）强制每条风险连同其回退/不可逆标注留痕；风险条目内容质量无枚举可机检，止步 T1。"
+    },
+    "C17": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "fuzzy_logic_point"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "fuzzy_logic_point"
+      },
+      "reason": "散文完成标准：「模糊判定点已全部点名。」输出是「把这些『非确定』逻辑显式标出来」，失败时「拿不准某段逻辑是否属于此类时，宁可标出来」。用 evidence(fuzzy_logic_point)（T1）强制把每个模糊/阈值/启发式判定点登记下来。条件化（仅当改动涉及此类逻辑）——无此类逻辑时 skip，判据不放宽。"
+    },
+    "C18": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "disambiguated_target"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "disambiguated_target"
+      },
+      "reason": "散文完成标准：「目标路径唯一、无歧义。」输出是「明确这次到底改的是哪一处」，失败时「分不清目标路径就别下手，先消歧」。用 evidence(disambiguated_target)（T1）强制把消歧后的唯一目标落点登记下来。条件化（仅当一个符号/名字在代码里有多处落点）——无歧义时 skip。"
+    },
+    "C19": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "pattern_recall"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "pattern_recall"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "recall_result",
+            "values": [
+              "hit",
+              "miss"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准：「完成一次召回，并（若命中）随后重算经验热度。」输出是「召回相关的历史解法与反面教训，展示给发起人；命中就列出，未命中则跳过」。召回这个动作总会发生（命中/未命中都记一行结果），故用 evidence(pattern_recall)（T1）强制这次召回留痕；『命中则重算热度』是幂等副动作，由记录内容体现而非放宽判据。"
+    },
+    "C20": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "gate_recorded"
+      },
+      "reason": "散文完成标准：「拿到『同意』这一确定信号（或读到显式预授权配置）后才放行。」这是「整个 Context 层的承重点」，散文明说「绝不能把『没人反对』当成『已同意』」，且「判断标准写死在工具里而不是靠这段散文口头约束……真正的门是工具记录的那个确认动作」。flow 中本步 gate=affirm（非 none），符合硬约束#3，故用 gate_recorded（T3）——完全从引擎的门应答状态派生，无法用一句声明伪造。预授权免门分支同样以引擎记录的门决策满足本谓词（见 notes）；『门提示前先上传方案供评审』是并行的收尾义务（topic gate-emission-upload），不属本谓词。"
+    },
+    "C21": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "schema_exposure",
+        "values": [
+          "as_expected"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "schema_exposure",
+        "values": [
+          "as_expected"
+        ]
+      },
+      "reason": "散文完成标准：「schema 暴露已审。」输出是「确认暴露面符合预期」，且「仅当改动触及会向模型暴露 schema 的那类工具时才做」。合法关闭态是『符合预期』，故用 evidence_in(values=[as_expected])（T2）把审查裁决约束为期望值。条件化（窄条件专项检查）——不触及 schema 暴露时 skip，判据不放宽。"
+    },
+    "C22": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "initial_state_row"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "initial_state_row"
+      },
+      "reason": "散文完成标准：「状态库记录行存在且可回读。」输出是「确认持久化状态库里已建好本次运行的记录行」，失败时「回读不到记录行 → 停下查状态机」，并强调「进度的唯一权威源是持久化状态库」。用 evidence(initial_state_row)（T1）强制登记一条『记录行已建好且回读通过』的确认。（没有直接『run 行存在』的派生谓词——但任何 evidence 能落库本身就以状态库存在为前提，故 T1 的回读确认是此处最诚实的可审计判据。）"
+    },
+    "C24": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "layer_summary"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "layer_summary"
+          },
+          {
+            "type": "evidence",
+            "kind": "handoff_marker"
+          }
+        ]
+      },
+      "reason": "散文完成标准：「分数已 emit，交棒给下一层。」输出是「本层的评分与交棒信号」，「把本层做了哪些、结果如何汇成一个分数发出去，并显式标记交棒」（topic layer-score-emit）。共享 kind layer_summary（本层收尾小结，标注为『已在用，勿改』）正是此处该落的记录，故用 evidence(layer_summary)（T1）。这条小结也是 C02/关 run 时 phases_summarized 检查 context 层是否收尾的凭据，形成闭环。"
+    },
+    "CF00": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "gate_recorded"
+          },
+          {
+            "type": "evidence",
+            "kind": "config"
+          }
+        ]
+      },
+      "reason": "完成标准 ②「本步的确认 gate 已记录（`affirm`，或经显式预授权的 `preauth`）」直接对应 gate_recorded——本步 gate 为 `preauth:auto_confirm_config`（非 none，符合硬约束 3）。这正是能区分「配置被人确认」与「配置被预授权自动取用」两条路径的判据：两条路径都经 gate 机器如实记录（affirm/preauth）而通过，而散文明令『绝不要从「流程已经走到这一步」推断出预授权……只要你是靠「进度」而不是靠那个配置值去走预授权路径，gate 记录就会判定为伪造并拒绝（exit 非 0），同时记一条 violation』。gate_recorded 从引擎状态派生、无法伪造，把「合法确认/合法预授权」与「靠进度蒙混」严格分开（T3）。注意完成标准是合取，另一半 ①「偏好已写盘」未被本谓词覆盖（见 notes）——承重且抗伪造的那一半是 gate，故取 gate_recorded。"
+    },
+    "CF09": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "all_of",
+        "steps": [
+          "CF00"
+        ]
+      },
+      "live_spec": {
+        "type": "all_of",
+        "steps": [
+          "CF00"
+        ]
+      },
+      "reason": "完成标准「CF00 已通过且 gate 已记录」。CF00 的判据即 gate_recorded，故「CF00 关闭」⟺「gate 已记录」，all_of {steps:[CF00]} 一条即精确覆盖完成标准全部（T3，纯引擎状态派生）。本步 gate=none，故不能用 gate_recorded（硬约束 3）；散文「恒执行——即便 CF00 走了预授权退化路径，这一步也照做」也由 all_of 自然满足：预授权路径下 CF00 的 gate 仍被记录为 preauth，CF00 照样关闭。CF00 存在、非本步自身、且同 phase 先于 CF09 运行，满足硬约束 4/5。"
+    },
+    "K01": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "reason": "散文输出是「一份可执行的工作清单（每项：文件路径 / 操作 / 锚点）」，完成标准「每一项都有明确的路径」。这份逐项文件路径清单正是爆炸半径分析所需的 change-set 输入——按任务规范『context 层没声明改动清单时 coding 层是第二个自然位置』，K01 是本层最早产出『改了哪些文件』的步骤，故在此发 change_file 喂给下游（缺它分析会惰性化）。完成标准里的『一个已验证存在的锚点』（grep 实测命中）无法用现有谓词词汇机器化校验，故封顶到 T1：强制留下可审计的文件行，锚点核验靠散文 MUST + 失败即停上报。"
+    },
+    "K02": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "code_diff"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "code_diff"
+          },
+          {
+            "type": "evidence_equals",
+            "kind": "compile_result",
+            "value": "pass"
+          }
+        ]
+      },
+      "reason": "散文输出是「符合清单的改动 + 一条 diff 证据」。这一条 diff 证据是可事后核查的内容行，故用 evidence 记录 code_diff（T1，比 attest 强，强制一个显式落盘动作）。完成标准的另一半『无编译错误』由下一步 K03 专门检查，不在本步谓词内重复。"
+    },
+    "K03": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "compile_result",
+        "values": [
+          "pass"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "compile_result",
+        "values": [
+          "pass"
+        ]
+      },
+      "reason": "散文输出是「编译结果（过 / 未过）」——一个裁决枚举，按规范『输出是枚举/裁决 → 用 evidence_in 并列出允许值』。完成标准「纯编译通过」，故通过值只列 pass（= 过）；未过则谓词为假，按散文『编译报错 → 回 K02 定点修』处理。散文『没有编译工具链的项目（如纯文档改动）可跳过』是豁免条件，按硬约束 6 由 skip 机制处理，判据照常写为『必须编译过』。"
+    },
+    "K04": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "diff_scope_result",
+        "values": [
+          "完全一致"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "diff_scope_result",
+        "values": [
+          "完全一致"
+        ]
+      },
+      "reason": "散文输出是「范围比对结果（完全一致 / 漏改 / 越界 / 完全不符）」——裁决枚举，用 evidence_in。完成标准「实际改动文件集与清单一致，或差异已被人确认接受」，机器可检的通过态是『完全一致』，故 values 只列它；漏改/越界按散文『停下问人确认』、完全不符按『退回 K02』——这些非通过裁决记录后谓词为假，正是期望行为。『差异已被人确认接受』的豁免路径按硬约束 6 走 skip，不靠放宽判据。散文明确『这道复核是引擎按前几步的证据核对的……自述在这里不算数』，与 T2『记录值必须匹配声明期望』一致。"
+    },
+    "K05": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "all_of",
+        "steps": [
+          "K01",
+          "K02",
+          "K03",
+          "K04"
+        ]
+      },
+      "live_spec": {
+        "type": "all_of",
+        "steps": [
+          "K01",
+          "K02",
+          "K03",
+          "K04"
+        ]
+      },
+      "reason": "散文完成标准直白写「K01–K04 均已通过」，逐字对应 all_of 引用这四步已关闭。这四个 id 都在本 phase 内、真实存在、且不含本步自身（无自依赖），符合硬约束 4/5。完全从引擎状态派生，无法用一句声明伪造，故 T3。"
+    },
+    "D00": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "test_plan"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "test_plan"
+      },
+      "reason": "散文完成标准逐字为「测试计划对象已产出并落盘，下游每一步都能读到它」，输出行为「一个结构化的测试计划对象……写入状态存储」。这是产出一个对象并落盘，用共享 kind test_plan 记录该对象即为 T1；散文强调『D00 一条测试都不跑，只解析出计划』，所以此处不该是 test_result 或任何裁决值。"
+    },
+    "D01": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "change_file"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "scope_vs_plan",
+            "values": [
+              "matches",
+              "deviation_explained"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准「范围清单成型，且与计划一致（或偏差已解释）」，输出行为「改动的真实表面——动了哪些文件、符号、常量、路径」。输出的核心是被改文件清单，用共享 kind change_file（爆炸半径 change-set 的消费源）逐行记录即 T1。『与计划一致』是人眼/脚本对齐判断，词汇表里没有『计划声称要改的文件』这个可比 kind，无法用 fields_agree，故停在 T1（见 notes）。"
+    },
+    "D02": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "direct_dependent"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "direct_dependent"
+      },
+      "reason": "散文完成标准「直接依赖方列举完毕」，输出「静态引用被动过符号的直接依赖方」。完成即『列举完毕』=存在被记录的直接依赖方内容行，用 evidence 记录 direct_dependent。散文『这是爆炸半径最容易查、也最不该省的一层』说明它必跑但结果是一份清单而非裁决值，故 T1 而非 evidence_in。"
+    },
+    "D03": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "old_value"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "old_value"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "old_value_residual",
+            "values": [
+              "zero",
+              "all_explained"
+            ]
+          }
+        ]
+      },
+      "reason": "输出「静态扫描看不见的引用」，输入是『被替换的旧值精确字符串』，用共享 kind old_value（爆炸半径 change-set 消费源，语义正是『一个不该在改动后残留的值』）记录所搜的完整旧值。散文完成标准「旧值在仓库里的残留 = 0，或残留都已解释」中的『残留=0』是一个 grep 计数裁断——词汇表没有『统计仓库命中数』的谓词，无法机器裁决（见 notes），故只能强制留下可审计的 old_value 记录行，停在 T1。"
+    },
+    "D04": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "graph_discovery",
+        "values": [
+          "ran",
+          "no-graph"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "graph_discovery",
+        "values": [
+          "ran",
+          "no-graph"
+        ]
+      },
+      "reason": "散文完成标准是一个明确的二选一枚举：「图谱查询跑过，或明确标注『无图谱，跳过』」，散文正文再次强调『没有就跳过——这是加分项』。输出是一个枚举/裁决 → 按 brief 指引用 evidence_in 列出允许值 ran / no-graph，记录值必须匹配其一，T2。"
+    },
+    "D05": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "test_result",
+        "values": [
+          "pass",
+          "exempt"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "test_result",
+        "values": [
+          "pass",
+          "exempt"
+        ]
+      },
+      "reason": "散文完成标准「所有必跑项通过、结果表已持久化到状态存储」，输出「逐条执行的通过/失败 + 权威测试结论（通过 / 豁免），并落盘」。权威结论是一个二值裁决『通过 / 豁免』，用共享 kind test_result（必须原样用）做 evidence_in，最新值必须 ∈ {pass, exempt} 才算做完——散文『必跑项失败 → 转入修订流程』意味着 fail 值不该关闭本步，evidence_in 恰好把 fail 挡在允许值外，T2。"
+    },
+    "D06": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "tooling_drift",
+        "values": [
+          "none",
+          "recorded"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "tooling_drift",
+        "values": [
+          "none",
+          "recorded"
+        ]
+      },
+      "reason": "散文完成标准是明确二选一：「确认工具配置未被计划外改动，或改动已被记录」，输出「改动是否悄悄动了构建/静态检查/测试的工具配置」。裁决枚举 → evidence_in，值 none（未漂移）/ recorded（漂移已记录）。散文『发现配置被动且未在计划内——标为待确认』的待确认态不在允许值内，本步保持未关闭，T2。"
+    },
+    "D07": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "optional_dep_audit",
+        "values": [
+          "trusted-or-guarded",
+          "n/a"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "optional_dep_audit",
+        "values": [
+          "trusted-or-guarded",
+          "n/a"
+        ]
+      },
+      "reason": "散文完成标准「被测模块的每个非标准库导入要么可信、要么已被守卫」是一个逐项收敛到的裁决，输出「被测模块的传递导入是否含未被守卫的可选依赖」。用 evidence_in 表达该裁决：trusted-or-guarded（全部可信或已守卫）/ n/a（无非标准库导入）。散文『模块路径解析不出→标为待人工复核』的 pending-review 值不在允许集，保持本步未关闭，T2。"
+    },
+    "D08": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "verification_check"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "verification_check"
+          },
+          {
+            "type": "evidence_all_in",
+            "kind": "check_verdict",
+            "values": [
+              "pass",
+              "fail",
+              "exempt"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准「所有点名的额外检查都跑过」，输出「这些检查的通过/失败」。用 evidence 记录每条计划点名的非框架检查（grep 锚点 / 语义断言）的执行行。『所有点名的都跑过』里的『所有』依赖计划点名集合，词汇表无法枚举该集合来做全称校验，故停在 T1（强制留下可审计的检查记录，但无法机器证明『没漏』——见 notes）。"
+    },
+    "D09": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "consistency_result",
+        "values": [
+          "aligned",
+          "n/a"
+        ]
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence_in",
+            "kind": "consistency_result",
+            "values": [
+              "aligned",
+              "n/a"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "consistency_result",
+            "claims": [
+              "n/a"
+            ],
+            "disproved_when": {
+              "fact": "checks_meaningful",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "散文完成标准「所有消费层与改动对齐」是一个裁决，输出「各消费层是否与新值/新签名对齐」。用 evidence_in：aligned（全对齐）/ n/a（本次无跨层标识符改动）。散文『发现某层仍用旧值 / 参数不匹配 → 记为阻塞项』的 blocked 值不在允许集，本步保持未关闭直到修好，T2。\n[2026-08-31 升级] 散文的完成标准是「所有消费层与改动对齐」；「n/a」是它的一个合法答案，但那是一句声称。分析器已独立判过本次改动是否给出可检查的输入（checks_meaningful），两者不能同时为真，所以「n/a」要经它核对。"
+    },
+    "D10": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "assertion_table"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "assertion_table"
+      },
+      "reason": "散文完成标准「断言表产出，且每个标『待人工』的项都由你作答」，输出「一张断言裁决表……+ 喂给决策门的结构化结果」。这正是 brief 给的范例（『断言表产出』→ evidence kind assertion_table，T1）。词汇表里没有能校验『每个待人工项都已作答』的谓词，evidence:assertion_table 只能证明表存在——散文把这条纪律的兜底放到了 D14（『一个标了待人工却没作答的项，会让决策门拒绝静默放行』），所以 T1 是词汇表在本步的天花板，真正的强制发生在 D14 门 + 本层 goal（见 notes）。"
+    },
+    "D11": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "diff_display"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "diff_display"
+      },
+      "reason": "散文完成标准「diff 已完整展示」，输出「贴出实际 diff 供人眼比对计划」，失败时明确写『（无——纯展示步）』。纯展示无裁决值也无可机器判定的『完整性』，只能用 evidence 强制留下一条『diff 已贴出』的记录行，从 T0 提到 T1；散文『成本极低却必须做——这是抓这行不该在这的最后机会』说明它不可省，evidence 强制记录动作是能做到的最强项。"
+    },
+    "D12": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "output_block"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "output_block"
+      },
+      "reason": "散文完成标准「输出块成型」，输出「汇总成本层的输出块（跑了什么、过了什么、什么被豁免）」，失败时『（无）』。『成型』=存在一条汇总记录，用 evidence 记录 output_block 即 T1。此处不复用 layer_summary——散文把本层小结的生成明确放在 D15（『通过了才生成本层小结』），D12 是给决策门的输入清单，与收尾小结是两回事。"
+    },
+    "D13": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "verification_state"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "verification_state"
+      },
+      "reason": "散文完成标准「状态已持久化」，输出「进度写入状态存储」。用 evidence 记录一条状态落库行即 T1。散文『写库失败属环境不稳，停下回报，不要无状态硬走』——落库这一物理动作本身没有裁决值可校验，evidence 强制留痕是可行的最强项（本步语义单薄，与 D15 的持久化高度重叠，见 notes）。"
+    },
+    "D14": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "gate_recorded"
+      },
+      "reason": "flow.yaml 中 D14 gate=affirm（非 none，满足 gate_recorded 使用前提）。散文完成标准逐字「门禁决策经工具记录（不只是打印在对话里），并通过本层目标校验」，散文正文『决策必须工具记录：只活在对话里的决策无法被审计』。这与 brief 范例（『确认门已记录』→ gate_recorded，T3）完全对应：gate_recorded 完全从引擎状态派生，一句声明无法伪造，是本层最高可检性所在。"
+    },
+    "D15": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "decision",
+        "values": [
+          "clean",
+          "block",
+          "warn"
+        ]
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence_in",
+            "kind": "decision",
+            "values": [
+              "clean",
+              "block",
+              "warn"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "decision",
+            "claims": [
+              "clean"
+            ],
+            "disproved_when": {
+              "fact": "blocking_count",
+              "count_gte": 1
+            }
+          }
+        ]
+      },
+      "reason": "散文完成标准「决策已落库且本层目标校验通过」，输出「决策写入状态存储」，输入是 D14 的门禁结果（干净放行 / 阻塞 / 警告）。用共享 kind decision（『一个被记录的决定值』）做 evidence_in，值必须 ∈ {clean, block, warn} 这三种合法门禁分类之一，挡掉垃圾值，T2。完成标准后半『本层目标校验通过』由本 phase 的 goal（phase_steps_closed）承载，不重复压进本步。\n[2026-08-31 升级] 散文要求裁决落库，取值来自原文的 clean/block/warn。其中「clean」是唯一不需要后续工作的答案；分类器已算出阻断项数量（blocking_count），它说有阻断时的一句 clean 与一次真正干净的裁决在日志里不可区分，所以要在声称发生处核对。"
+    },
+    "D16": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "layer_score"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "layer_score"
+          },
+          {
+            "type": "evidence",
+            "kind": "handoff_marker"
+          }
+        ]
+      },
+      "reason": "散文完成标准「评分已发出、交接完成」，输出「发出本层质量评分，交接给下一阶段」。用 evidence 记录一条 layer_score 行即 T1（分值本身是连续量，无固定枚举可做 evidence_in）。散文『仅当 D14 被阻塞时才跳过本步』是条件跳过——按 brief 硬约束 6，豁免/跳过由 skip 机制处理，判据照常写为 evidence，不放宽。"
+    },
+    "E01": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "commit_message"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "commit_message"
+          },
+          {
+            "type": "evidence_equals",
+            "kind": "subject_format_check",
+            "value": "0"
+          }
+        ]
+      },
+      "reason": "散文输出是『一条结构化提交信息（标题行 + 正文）』，完成标准『标题行符合约定格式，正文说清「改了什么、为什么」』。约定格式与正文语义无法用现有词汇精确机器校验（evidence_equals 需要精确定值），但可强制留下一条可事后审计的提交信息内容行，故用 evidence 记录 commit_message（T1，比 attest 强：强制显式记录、值可复查）。"
+    },
+    "E02": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_equals",
+        "kind": "cr_desc_lint",
+        "value": "0"
+      },
+      "live_spec": {
+        "type": "evidence_equals",
+        "kind": "cr_desc_lint",
+        "value": "0"
+      },
+      "reason": "完成标准逐字为『格式校验返回 0』，散文明写『校验器的返回码是硬闸：0 才能往下走』『校验没过禁止进入后面的推送步 …… 约束落在返回码上』。因此记录 lint 返回码并要求最新值精确等于 \"0\"，是可真正核验的 T2 判据，比只记「我跑过 lint」强。"
+    },
+    "E03": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_equals",
+        "kind": "cr_size_check",
+        "value": "pass"
+      },
+      "live_spec": {
+        "type": "evidence_equals",
+        "kind": "cr_size_check",
+        "value": "pass"
+      },
+      "reason": "完成标准『总长与每段都在配额内』，散文『每段有各自的字符配额，由校验器执行』。校验器给出的是「配额内/超限」的裁决，故记录其裁决值并要求最新值精确等于 \"pass\"（配额内），可真正核验（T2）。超限降级由渲染器按固定顺序处理，属过程细节，不放宽本判据。"
+    },
+    "E04": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "gate_recorded"
+      },
+      "reason": "flow.yaml 中 E04 gate=affirm（非 none），且散文明写这是『提交前的人工确认门』并要求两轮节奏、背书机制会检查『距上一次门之后有没有新的人类发言』、伪造会被拒（topic never-forge-a-gate）。完成标准『确认门已记录』正是 gate_recorded 的定义，完全从引擎状态派生、无法伪造（T3）。散文注明『本次无提交的纯本地交付可豁免』——豁免由 skip 机制处理，判据照常写，不放宽。"
+    },
+    "E03b": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "reviewer_suggestion"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "reviewer_suggestion"
+      },
+      "reason": "输出是『一个建议评审人 + 可选的反对证据』，完成标准『脚本输出已贴进对话供人过目』。这是自陈动作，但可强制留下可审计的建议内容行，故 evidence 记录 reviewer_suggestion（T1）。散文强调数据源是本流程自己的记录、按包名归一，属过程约束不入判据。"
+    },
+    "E05a": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "cr_config"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "gate_recorded"
+          },
+          {
+            "type": "evidence",
+            "kind": "cr_config"
+          }
+        ]
+      },
+      "reason": "输出是『一组评审配置（评审人、是否发布、是否自动合并、是否自动修复、等待策略）』，完成标准『配置已确认（或按预授权自动取用）』。注意 flow.yaml 中本步 gate=none（尽管标题带 🚦），依硬约束#3 不能用 gate_recorded（否则 exit 2），故降级为记录整组配置的 evidence(cr_config)（T1）。配置是多字段集合而非单一枚举，无法用 evidence_in 收敛。见 notes 的 gate 不一致问题。"
+    },
+    "E06": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "delivery_mode",
+        "values": [
+          "commit_and_review",
+          "commit_only",
+          "no_commit"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "delivery_mode",
+        "values": [
+          "commit_and_review",
+          "commit_only",
+          "no_commit"
+        ]
+      },
+      "reason": "散文输出是三选一的裁决：『「提交+推评审」/「只提交」/「不提交」中的哪条』，完成标准『交付方式已确定』。按 brief 指引『输出是一个枚举/裁决 → 用 evidence_in 并列出允许值』，故用 evidence_in 限定 delivery_mode ∈ 三个允许值（T2）。散文『字段缺失 → 停下来问，别默认最重的那条』——缺失即无合法记录，判据自然不通过。"
+    },
+    "E07": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "pushed_rev"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "commit_sha"
+          },
+          {
+            "type": "evidence",
+            "kind": "cr_url"
+          },
+          {
+            "type": "evidence",
+            "kind": "pushed_rev"
+          }
+        ]
+      },
+      "reason": "完成标准三合取『提交存在、评审已创建、推送已记录』分别对应 commit_sha / cr_url / pushed_rev 三个 kind，但现有词汇无「多个 kind 同时存在」的合取谓词（all_of 是对步骤而非 kind）。故单步只能钉住一个 kind：选 pushed_rev，因为散文明写『推送成功后立即把评审号与修订号记进完成不变量 …… 漏记会让后面的完成判定失败（提前完成被结构性挡住）』，且它是 observation 层 fields_agree(pushed_rev, verified_rev) 不变式的一半——漏记会让该不变式缺一个操作数而静默失效（正是本轮要根治的『静默落到默认值』失败模式）。commit_sha / cr_url 缺失属「无 CR 可合」的响亮失败、且由 cleanup 层作为下游消费者核验，故把稀缺的单谓词名额留给最易被静默吞掉的 pushed_rev（T1）。见 notes。"
+    },
+    "E07b": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "layer_summary"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "layer_summary"
+          },
+          {
+            "type": "evidence",
+            "kind": "handoff_marker"
+          }
+        ]
+      },
+      "reason": "散文本阶段末步：『跑脚本上报这一阶段的评分与关键指标，并标记交棒给下一阶段（观察）』，完成标准『评分已 emit、交棒标记已写』，输出『一条阶段评分记录』。用共享 kind layer_summary（『本层收尾小结』，已在用）记录该收尾评分行（T1）。评分数值本身与交棒动作无法用精确定值谓词表达，evidence 是可机器化的最强档。"
+    },
+    "E08": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev",
+        "absent_ok": true
+      },
+      "live_spec": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev",
+        "absent_ok": true
+      },
+      "reason": "完成标准「读到了真实状态，并把它连同修订号记进完成不变量」，输出是「一条『已验证到第几修订、什么状态』的记录」即 verified_rev。散文强调『声称通过/已合入这类终态时，得带上刚读到的页面证据』且本层不变式要求已验证修订==最新推送修订。此处不用 evidence_in(analyzer_terminal) 因为 E08 只是首读、状态可能『仍在跑』，尚不要求终态；用 fields_agree 把记录的 verified_rev 钉到 execution 层的 pushed_rev（不论通过/在跑，rev 都必须相等），比裸 evidence 强且能抓『记错修订』。absent_ok 覆盖无推送的 N/A 分支。"
+    },
+    "E09": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "decision",
+        "min_count": 1
+      },
+      "live_spec": {
+        "type": "evidence_all_in",
+        "kind": "decision",
+        "values": [
+          "actionable",
+          "inherent_noise"
+        ]
+      },
+      "reason": "完成标准「每条意见都有归类结果」，输出「每条意见归类为『该处理』或『固有噪声』，附可引用的规则号」。散文：『跑分类器给出规则号，让「我决定忽略它」变成一个可引用的决定，而不是一次无声的绕过』——归类是一次带规则号的被记录决定，故用 evidence(kind=decision) 强制留痕。无法上 T2：每条意见的归类值互不相同、无单一期望值可 evidence_equals/evidence_in。"
+    },
+    "E27": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "dry_run_status",
+        "values": [
+          "pass",
+          "fail",
+          "running"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "dry_run_status",
+        "values": [
+          "pass",
+          "fail",
+          "running"
+        ]
+      },
+      "reason": "完成标准「记录了当前试跑状态」，输出「试跑结果（通过 / 失败 / 仍在跑）」是一个三值枚举。按 brief『输出是一个枚举/裁决 → 用 evidence_in 并列出允许值』。此处 running 是合法记录值——散文明写『还在跑就记下状态，等后面的等待步去收尾』『别猜一个通过』，故枚举包含 running；evidence_in 相较裸 evidence 额外约束值落在已知集合、挡住乱填。optional 只表『无试跑可跳过』，判据未放宽（守硬约束1）。dry_run_status 为新 kind（共享表无对应项）。"
+    },
+    "E18": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "analyzer_terminal",
+        "values": [
+          "all_pass",
+          "merged",
+          "has_comments",
+          "analyzer_fail",
+          "timeout"
+        ]
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "gate_recorded"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "analyzer_terminal",
+            "values": [
+              "all_pass",
+              "merged",
+              "has_comments",
+              "analyzer_fail",
+              "timeout"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「读到确凿终态字串，或明确标注为超时后才结束这一轮」，输出「一次『已到终态』或『等待超时』的如实判定」。这是本层判断核心：散文『⚠️「还在跑」不是终态…没有红，不等于绿；它只是还没出结果』『终态必须是可校验的 —— 你读到了那个明确的状态字串（全部通过 / 已合入 / 有意见 / 失败）』『若因等待超时而结束，就明说是超时』。故 evidence_in 列出全部合法终态 + timeout 且**刻意不含 running**，从判据上区分『终态且干净/有结果』与『还没出结果』。flow gate=none 所以不能用 gate_recorded（否则 exit 2）。复用共享 kind analyzer_terminal，未改名。"
+    },
+    "E18b": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "layer_score",
+        "min_count": 1
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "layer_score",
+        "min_count": 1
+      },
+      "reason": "完成标准「评分已 emit」，输出「一条阶段评分记录」。这是一次 emit 动作、留下可审计的分数行，故 evidence(kind=layer_score)。散文注明时机（上一步以等待收尾则先不 emit、留到终态确认后补），但完成语义就是『分数记录已落盘』，evidence 恰好表达『必须存在该行才算做完』，也顺带阻止在等待中途关层。layer_score 为新 kind（共享表 layer_summary 语义是『本层收尾小结』，与评分不同，不复用以免语义混淆）。"
+    },
+    "E18-recon": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev",
+        "absent_ok": true
+      },
+      "live_spec": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev",
+        "absent_ok": true
+      },
+      "reason": "完成标准「最新修订的终态已重新读取并记录」。散文的关键不变式原文：『已验证的那个版本，必须就是最新推送的那个版本…每推一个新修订，都要对这个新修订重新观察…完成判定会硬性核对「已验证修订号 == 最新推送修订号」，两者不等就无法收尾』。故用 fields_agree(pushed_rev, verified_rev) 直接编码该不变式，堵『修完就当过』。E18-recon 覆盖『修订后重推→resume 回来』这条路径的重新钉定；E08 覆盖无 resume 的首次钉定，二者一致。optional 只表『无 resume 可跳过』，判据未放宽（守硬约束1）；跳过时 E08 的 fields_agree 已保证同一不变式。absent_ok 覆盖无推送 N/A。"
+    },
+    "E28": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "pipeline_status",
+        "min_count": 1
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "pipeline_status"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "pipeline_disposition",
+            "values": [
+              "recorded",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「状态已记录或已跳过」，输出「流水线当前状态，仅供参考」。散文『查一下它的健康状态并如实报出。纯参考、不拦流程 —— 它不作为本阶段的完成判据。没有流水线就跳过』。故运行时用 evidence(kind=pipeline_status) 强制留下一条状态行（比 attest 强）；『或已跳过』由 optional/skip 机制处理，不靠放宽判据。pipeline_status 为新 kind。"
+    },
+    "E29": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "cr_terminal",
+        "values": [
+          "merged",
+          "manual_merge"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "cr_terminal",
+        "values": [
+          "merged",
+          "manual_merge"
+        ]
+      },
+      "reason": "完成标准「评审到达合入，或已明确移交给人工合并」，输出「合入 / 等待人工合并 的终态跟踪」。散文『这一步跟踪到评审真正合入（或明确移交给人去合）为止。别在评审还开着的时候就替它宣布已合入 —— 那又回到了「把未完成当完成」的老问题上』。故 evidence_in 只允许两个真正终态 merged / manual_merge，**刻意不含 open/仍在跟踪**，从判据上挡住『评审还开着就宣布已合』。flow gate=none 故不能用 gate_recorded。cr_terminal 为新 kind（与 analyzer_terminal 的『外部检查终态』、task_state 的『外部任务状态』语义都不同，另起以免串线）。"
+    },
+    "R01": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "revision_scope"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "revision_scope"
+      },
+      "reason": "散文完成标准：「每条要处理的意见都对应到了具体文件、具体行、具体诉求」，输出是「一条明确的失败描述（什么失败了 / 在哪 / 原文是什么）」。这是一份定位描述，无固定期望值可对，故 T1 evidence 强制留下可审计的 scope 记录（含散文要求的「按哪条规则判的痕迹」用于 noise-vs-signal 分类）。比 T0 强：可事后核查每条意见的落点。"
+    },
+    "R02": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "change_file"
+      },
+      "reason": "散文完成标准：「意见指向的问题已被针对性修掉，未牵连无关代码」，输出是「针对该条目的最小改动……只动这一条意见涉及的行」。修改产生被改动的文件——复用共享 kind change_file（一行一个被改动文件路径），既留下可审计的改动记录，又保证 R08/观察阶段重跑时爆炸半径分析的 change-set 不惰性化。"
+    },
+    "R03": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "revision_recheck"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "revision_recheck"
+          },
+          {
+            "type": "evidence_equals",
+            "kind": "compile_result",
+            "value": "pass"
+          }
+        ]
+      },
+      "reason": "散文完成标准：「改动能编译、diff 只含预期内容」，输出是「编译通过 + 一次针对性的影响面确认」。「diff 只含预期内容」是一个判断而非可对齐的期望值，故 T1：强制记录一次轻量复核结论（编译结果 + 影响面确认），对应散文「最容易在这里翻车的是『修 A 的时候顺手碰了 B』」。"
+    },
+    "R04": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "revision_decision",
+        "values": [
+          "auto_cleared",
+          "human_confirmed"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "revision_decision",
+        "values": [
+          "auto_cleared",
+          "human_confirmed"
+        ]
+      },
+      "reason": "散文完成标准：「自动可放行类已确认，或需人决策类已获回复」，输出是「是否继续推送的决定」。这是一个裁决（枚举），故用 evidence_in 并列出允许值：auto_cleared（纯机械低风险自动放行）/ human_confirmed（需人拍板已获回复）。用专门 kind revision_decision 而非共享通用 kind decision，避免 evidence_in「取最新一条」语义被其它步骤写入的 decision 串号。注意：flow.yaml 里本步 gate=none，故不能用 gate_recorded（硬约束 3），见 notes。"
+    },
+    "R05": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "commit_sha"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "commit_sha"
+          },
+          {
+            "type": "evidence_equals",
+            "kind": "commit_count",
+            "value": "1"
+          }
+        ]
+      },
+      "reason": "散文完成标准：「改动已并入原提交，历史保持单条」，输出是「一个仍然单一的提交」。产出一个提交——复用共享 kind commit_sha 留下提交标识。「历史保持单条」是历史形态判断、无固定期望值可 equals，故 T1 evidence 记录 amend 后的 sha 供核查。"
+    },
+    "R06": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "pushed_rev"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "pushed_rev"
+          },
+          {
+            "type": "evidence",
+            "kind": "analysis_wait_restarted"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "cr_description_refresh",
+            "values": [
+              "refreshed",
+              "warned"
+            ]
+          }
+        ]
+      },
+      "reason": "散文完成标准：「新版已推、且描述已随之刷新、等待已重启」，输出是「新一版已推送到评审系统」。复用共享 kind pushed_rev（最新推送的修订）。散文点名本层最典型假执行：「推送后只打一行字说『回到观察阶段』，却没有任何真实推送动作——没有工具证据的『已推送』就是假执行」——T1 evidence 正是强制这条工具证据，把「已推送」从口头声明变成可审计记录。"
+    },
+    "R07": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "failure_summary"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "failure_summary"
+      },
+      "reason": "散文完成标准：「生成了可交接的失败记录，循环停止」，输出是「一份失败总结 + 转入自动调查支线」。产出一份可交接失败记录，故 T1 evidence 强制落下 failure_summary 内容行（对应散文「把已经试过什么、每次为什么没成、现在卡在哪，整理成一份可交接的记录」）。optional：仅在迭代预算耗尽时触发。"
+    },
+    "R08": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "live_spec": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "reason": "散文完成标准：「新版号已登记，且已对新版重新走完观察阶段的检查」，失败时「漏记新版号 → 完成检查会放行一个『没重新验过的版本』」。这正是共享表点名的 pushed_rev/verified_rev 不变式「二者必须相等」：fields_agree 断言最新推送版 == 最新已验证版，防止散文所述「系统会误以为旧版的验证结果还算数，放行一个其实没重新检查过的版本」。完全可检（T2），无法用声明伪造。"
+    },
+    "R15": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "analyzer_terminal",
+        "values": [
+          "all-pass"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "analyzer_terminal",
+        "values": [
+          "all-pass"
+        ]
+      },
+      "reason": "散文完成标准：「所有意见已解决且外部检查确认全绿」，且散文强调时机「这个打分……在最后一轮回到观察阶段并确认全绿之后才发」。本步唯一可机器化的核心断言是「外部检查全绿」——用 evidence_in 对共享 kind analyzer_terminal（外部检查的终态）判定其终态为绿。这比记录输出 kind layer_summary（只证『打分存在』，T1）更贴合完成标准。⚠️ 绿态取值 all-pass 是按 asis 惯例的假设，须与观察阶段实际写入的 analyzer_terminal 干净终态 token 对齐，见 notes。"
+    },
+    "R09": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "failure_trace",
+        "min_count": 3
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "failure_trace",
+        "min_count": 3
+      },
+      "reason": "散文完成标准：「三次尝试的过程都被记录下来」，输出是「完整的失败轨迹（每次迭代改了什么、检查怎么报的）」。用 evidence + min_count:3 把散文的「三次」量化为「至少 3 条 failure_trace 证据行」（每次迭代一条：改动 + 外部检查原文反馈 + 判失败理由）。min_count=3 与默认迭代预算 3 耦合，见 notes。"
+    },
+    "R10": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "investigation_plan"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "investigation_plan"
+      },
+      "reason": "散文完成标准：「文档写清了现象、已排除项、待查方向」，输出是「一份结构化的调查计划文档」。产出一份文档——T1 evidence 记录 investigation_plan 文档路径/内容，可事后核查是否写清了散文要求的三要素（现象 / 已排除 / 待查）。"
+    },
+    "R11": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "investigation_task"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "investigation_task"
+          },
+          {
+            "type": "evidence",
+            "kind": "investigation_plan_link"
+          }
+        ]
+      },
+      "reason": "散文完成标准：「任务已建、且关联了调查计划」，输出是「任务系统里的一条调查任务」。T1 evidence 记录 investigation_task（任务 id/链接），对应散文「让这件事进入正式的待办轨道，而不是停在一次聊天记录里」。"
+    },
+    "R12": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "original_task_comment"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "original_task_comment"
+      },
+      "reason": "散文完成标准：「原任务能追溯到为什么停、去哪看后续」，输出是「原任务上的一条说明 + 指向调查任务的链接」。T1 evidence 记录回写内容行，保证散文要求的「两条线索能互相追溯」可核查。"
+    },
+    "R13": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "worktree_state",
+        "values": [
+          "preserved",
+          "archived"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "worktree_state",
+        "values": [
+          "preserved",
+          "archived"
+        ]
+      },
+      "reason": "散文完成标准：「工作区不留下会误导下一次的残留」，输出明确是一个枚举状态：「一个明确的工作区状态（保留改动 / 归档）」。输出是枚举/裁决 → evidence_in 列允许值 preserved / archived（T2），比只记录「处理过了」更强：强制落到两个明确终态之一，对应散文「把当前工作区处理成一个明确、干净的状态」。"
+    },
+    "R14": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "final_report"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "final_report"
+      },
+      "reason": "散文完成标准：「人能据此判断下一步怎么走」，输出是「一份面向人的失败总结」。终点是一份面向人的报告，故 T1 evidence 记录 final_report（散文：「卡在哪、已交接到哪条调查任务、需要人做什么决定」）。这是需人阅读判断的产物，无机器可判的期望值，T1 已是最强可机器化形态。"
+    },
+    "R16": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "live_spec": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "reason": "散文完成标准：「已重基到最新主线、新版已推并重新验证、独立计数已归零」，输出是「重基后的新版 + 对新版重新对齐的完成不变量」。散文点名「重基换了底座，旧底座上的验证全部失效，必须重跑全量验证」「不要假设『重基完就全绿』」——核心可检不变式就是 pushed_rev/verified_rev 必须相等（新版已推且已对新版重新验证）。fields_agree 断言二者相等（T2），无法伪造。独立支线，不占迭代预算，见 notes。"
+    },
+    "E09g": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "gate_recorded"
+      },
+      "reason": "完成标准原文「入口门决定已记录，且记录动作被允许通过」，正是 gate_recorded 的语义。散文「这是进入收尾的门，也是本阶段第一个不可逆转换的入口」「背书不允许降级：没有真实的人类确认就直接拒」「背书机制会检查距上道门后有没有新的人类发言」。flow.yaml gate=`preauth:cleanup_entry_auto`（≠none），故 gate_recorded 合法（约束3）。"
+    },
+    "E09g-pre": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "live_spec": {
+        "type": "fields_agree",
+        "kind_a": "pushed_rev",
+        "kind_b": "verified_rev"
+      },
+      "reason": "完成标准「评审已合入、静态分析器全部到终态；或本次无评审可豁免」。散文「进收尾前自动核对一件事：这次评审是否真的已合入」「哪怕有人明确说『已经合了』，仍必须亲自去查评审状态」。词表无 merge-state kind，最强可检代理是共享不变式 pushed_rev==verified_rev（=最新推送修订已被验为终态干净，与 E13 ①同源）。本步 optional：无评审的本地交付由 skip 处理豁免（约束6），故不加 absent_ok 放宽。"
+    },
+    "E10": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_equals",
+        "kind": "task_state",
+        "value": "closed"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence_equals",
+            "kind": "task_state",
+            "value": "closed"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "close_writeback",
+            "values": [
+              "written",
+              "not_applicable"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "close_writeback",
+            "claims": [
+              "written"
+            ],
+            "disproved_when": {
+              "all_of": [
+                {
+                  "fact": "shipped_block_present",
+                  "equals": false
+                },
+                {
+                  "fact": "history_record_exists",
+                  "equals": false
+                }
+              ]
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "close_writeback",
+            "claims": [
+              "not_applicable"
+            ],
+            "disproved_when": {
+              "fact": "plan_doc_found",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "完成标准「任务状态已更新为关闭，评论已附上」。散文「在任务系统里把这条任务标记为关闭」。共享 kind task_state（cleanup 层）最新值须精确等于关闭态。无关联任务由 skip 处理。\n[2026-09-02 升级] 拆成两半，因为两半的可核实性不对等。任务系统那侧**刻意不核**：读它只有 MCP 一条路，而 provider 是子进程调不到 —— 编一个看起来在核的事实比不核更糟（schema 里合理、输出里不可证伪），强制来自 E21 gate 上的 task_close guard。可核的那半是收口写回留下的两处痕迹（## Shipped 块 + history-log 记录），所以「跑过了」不必靠自陈。"
+    },
+    "E11": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "shipped_section"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "shipped_section"
+      },
+      "reason": "完成标准「已交付段落写入，且哈希标注诚实」。散文「给方案文档追加『已交付』段」。哈希诚实（pre-merge 标注）无法机器校验，故 T1。刻意不复用共享 plan_doc——plan_doc 是「跨层引用」在 context 层就已记录，用它会被那条旧行造成假阳性；改用本步专属 kind shipped_section 绑定 E11 自己的写入动作。"
+    },
+    "E12": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "history_log"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "history_log"
+      },
+      "reason": "完成标准「记录按既定结构写入」。散文「按既定结构把这次会话的经过落一条盘：改动、波折、结论」。是留下可审计的一条结构化历史行，但结构完整性本身不可机检，故 T1。"
+    },
+    "E14": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "kb_entry"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "kb_entry"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "kb_disposition",
+            "values": [
+              "written",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「已确认写入，或显式记录跳过」。散文「整理值得沉淀的知识、经人确认后写入知识库」「跳过时必须显式记一行（如『⏭️ [E14] 不适用』），不能静默略过」。flow.yaml gate=none，故不能用 gate_recorded（约束3）；『经确认』这部分无引擎门支撑，只能 T1 记录写入/跳过行。optional 不放宽：可选=可不跑，跑了仍须留行。"
+    },
+    "E15": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "platform_quirk"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "platform_quirk"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "quirk_proposal",
+            "values": [
+              "proposed",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「已提议或显式跳过」。散文「若踩到平台差异……提议补进平台特性清单；无则显式跳过」。提议类产物只能留一条可审计行，T1。"
+    },
+    "E16": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "memory_sweep"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "memory_sweep"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "sweep_disposition",
+            "values": [
+              "proposed",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「已提议或显式跳过」。散文「用记忆库的过期/缺口/健康度数据判断是否值得清扫僵死条目……无必要则显式跳过」。散文并强调『热点记忆的重算已在前面阶段确定性完成，这里不要再手写那份文件』——故本步只记一条提议/跳过行，T1。"
+    },
+    "E17": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "failure_analysis"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "failure_analysis"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "analysis_disposition",
+            "values": [
+              "proposed",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「已提议或显式跳过」。散文「若距上次失败分析已够久、且累积问题数够多，提议做一次分析；条件不满足则显式跳过」。提议/跳过，T1。"
+    },
+    "E26": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "changelog_entry"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "changelog_entry"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "changelog_disposition",
+            "values": [
+              "written",
+              "skipped"
+            ]
+          }
+        ]
+      },
+      "reason": "完成标准「已写入或显式跳过」。散文「若改动落在需维护变更日志的范围内，起草一条、经确认后写入；未命中则显式跳过」。flow gate=none，『经确认』不可门控，T1 记录写入/跳过行。"
+    },
+    "E19": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "session_metrics"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "session_metrics"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "metrics_source",
+            "values": [
+              "runtime",
+              "own_account"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "metrics_source",
+            "claims": [
+              "runtime"
+            ],
+            "disproved_when": {
+              "fact": "metrics_available",
+              "equals": false
+            }
+          },
+          {
+            "type": "evidence_in",
+            "kind": "session_verdict",
+            "values": [
+              "green",
+              "yellow",
+              "red"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "session_verdict",
+            "claims": [
+              "green",
+              "yellow",
+              "red"
+            ],
+            "disproved_when": {
+              "fact": "slo_readable",
+              "equals": ""
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "session_verdict",
+            "claims": [
+              "green"
+            ],
+            "disproved_when": {
+              "fact": "error_violation_count",
+              "count_gte": 3
+            }
+          }
+        ]
+      },
+      "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。\n[2026-09-01 升级] 散文的完成标准是「指标已汇总」，原判据只要求有这么一行 —— 一份没人产出过的数字与一份如实抄下来的因此不可区分。运行时自己的记录可以独立算出 turns/calls/credits，所以「这些数字来自运行时」这句声称要经它核对；读不到时的诚实出口是 own_account。\n[2026-09-02 升级] 增记 session_verdict，但**刻意不要求一个合成分数**。上游声明（loop agents/quality-slo.yaml）把质量分定义为五个加权维度，而实测只有两个的输入是本引擎真正拥有的：completeness（passed/total steps）与 correctness（error/warning violations），合计 0.6。efficiency 0.2 与 cost 0.1 依赖 duration/cost 的 p50/p95，而声明里**七层全部**status: placeholder；adherence 0.1 的 note 明写「MVP: assume 1.0 for both」。把这 0.4 折进一个数字，就得到一个读起来像实测、而近一半是替身的 figure，且折算后替身不可见。所以只核两件事：任何裁决都要求读到过声明的门槛（slo_readable 非空），以及 green 由声明自己判为 critical 的情形（error_violations > 2）反驳。"
+    },
+    "E20": {
+      "tier_at_derivation": "T2",
+      "spec_at_derivation": {
+        "type": "evidence_in",
+        "kind": "close_branch",
+        "values": [
+          "auto_close",
+          "needs_human"
+        ]
+      },
+      "live_spec": {
+        "type": "evidence_in",
+        "kind": "close_branch",
+        "values": [
+          "auto_close",
+          "needs_human"
+        ]
+      },
+      "reason": "完成标准「走『自动关闭』还是『需人决定』的判定」，输出是一个枚举裁决→按指引用 evidence_in 并列允许值。散文「判断能否自动关闭……还是需人拍板。状态含糊时保守选『问人』」。最新 close_branch 值须∈两个分支枚举，T2。"
+    },
+    "E21": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "gate_recorded"
+      },
+      "live_spec": {
+        "type": "gate_recorded"
+      },
+      "reason": "完成标准「关闭决定已记录，且记录动作被允许」＝gate_recorded。散文「这是关会话的门……是不可逆动作、同样不允许降级」「关单前必须有真实的人类确认：不接受自问自答」「记录证据要写人的原话」。flow.yaml gate=`affirm`（≠none），gate_recorded 合法（约束3）。"
+    },
+    "E23": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "plan_metrics"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "plan_metrics"
+      },
+      "reason": "完成标准「指标已追加（仅关闭分支执行）」。散文「仅在走了关闭分支时执行：把最终指标追加进方案文档留档」。追加动作只能 T1 留行；用专属 kind plan_metrics 绑定本步（不复用 plan_doc/session_metrics 以免跨步假阳性）。N 分支由 skip 处理。"
+    },
+    "E24": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "final_summary"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "final_summary"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "score_persistence",
+            "values": [
+              "persisted",
+              "warned"
+            ]
+          },
+          {
+            "type": "evidence_in",
+            "kind": "fleet_report",
+            "values": [
+              "sent",
+              "unreachable",
+              "not_applicable"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "fleet_report",
+            "claims": [
+              "sent"
+            ],
+            "disproved_when": {
+              "fact": "fleet_event_count",
+              "count_lte": 0
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "fleet_report",
+            "claims": [
+              "unreachable"
+            ],
+            "disproved_when": {
+              "fact": "fleet_reachable",
+              "equals": true
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "fleet_report",
+            "claims": [
+              "not_applicable"
+            ],
+            "disproved_when": {
+              "fact": "fleet_applicable",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "完成标准原文「分数已落库，小结已给出」有两件产物，但散文失败条款明确『写分失败（会话缺数据）只记 warning、不阻断收口——分数缺失是审计信号，不是收口的拦路石』。若把完成绑到『分数落库』并纳入 goal，会让写分失败反而挡死收口，直接违背该条款。故完成绑定恒产出的『最终小结』（散文『写完再给最终小结：耗时、方案文档、评审/任务链接、知识写入数、会话得分』）；分数落库为尽力而为、不作硬门。T1。\n[2026-09-02 升级] 增记 fleet_report，且三个合法值各有一个派生事实能反驳它 —— sent 由协调方的到达计数反驳，unreachable 由「它其实答得上来」反驳，not_applicable 由「C01 记的是真任务 id」反驳。只核对 sent 会把另两个变成免费出口，而参照系统正是在那里累计了 162 次强制确认。"
+    },
+    "E25": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "no_open_violations"
+      },
+      "live_spec": {
+        "type": "no_open_violations"
+      },
+      "reason": "本步是全流程终点（会话置终态、结束）——按要点3判据应最强。完成标准「会话已关闭为『已交付』」。散文「退出会被若干完成守卫把关……任一命中都拒绝退出」「逃生口是给已知误判用的，不是给懒得补齐用的」。用 no_open_violations 断言整个 run 无任何 violation 才允许置终态，完全由引擎状态派生、不可伪造，T3。"
+    },
+    "E13": {
+      "tier_at_derivation": "T3",
+      "spec_at_derivation": {
+        "type": "phases_summarized"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "phases_summarized"
+          },
+          {
+            "type": "evidence",
+            "kind": "pre_exit_verdict",
+            "min_count": 4
+          }
+        ]
+      },
+      "reason": "完成标准「4 项 pre-exit 谓词全部为真」。词表无法把 4 路 AND 塞进单条 spec，故取其中最强且最贴合的谓词②：散文『所有收尾前的必需层都有分层小结（结构性挡住漏 emit 某层小结就宣布完成，尤其被截断的观察层）』——正是 phases_summarized。因该谓词自动排除本步所在 phase（cleanup），它恰好检查『所有收尾前 phase 都有 summary』，与②字面一致。其余三项分散承载：①（最新推送修订分析器已验终态干净）由 E09g-pre 的 fields_agree(pushed_rev,verified_rev) 表达；③（关单门已过+任务已关闭）由 E21 gate_recorded + E10 task_state=closed 表达；④（必需收尾步已过）由本 phase goal 的 all_of 表达。T3。"
+    },
+    "E22a": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "close_cleanup"
+      },
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence",
+            "kind": "close_cleanup"
+          },
+          {
+            "type": "evidence_in",
+            "kind": "worktree_disposition",
+            "values": [
+              "removed",
+              "kept_review_open",
+              "kept_dirty",
+              "no_worktree"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "worktree_disposition",
+            "claims": [
+              "no_worktree"
+            ],
+            "disproved_when": {
+              "fact": "own_worktree_exists",
+              "equals": true
+            }
+          },
+          {
+            "type": "evidence_in",
+            "kind": "plan_disposition",
+            "values": [
+              "filed",
+              "kept_open",
+              "no_plan_doc"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "plan_disposition",
+            "claims": [
+              "filed"
+            ],
+            "disproved_when": {
+              "fact": "plan_doc_dir",
+              "in": [
+                "pending",
+                "pushed",
+                "in-progress"
+              ]
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "plan_disposition",
+            "claims": [
+              "kept_open"
+            ],
+            "disproved_when": {
+              "fact": "plan_doc_dir",
+              "in": [
+                "done",
+                "shipped"
+              ]
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "plan_disposition",
+            "claims": [
+              "no_plan_doc"
+            ],
+            "disproved_when": {
+              "fact": "plan_doc_found",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。\n[2026-09-02 升级] no_worktree 这句声称经 own_worktree_exists 反驳，按 run id 匹配而非全局计数 —— 别的 session 的工作树说明不了这一个。\n[2026-09-02 升级] 增记 plan_disposition，三个取值各有反驳事实（filed / kept_open / no_plan_doc）。与工作树同一形态：agent 跑写回脚本，引擎只读核实，脚本不复制。关键实现细节：按 slug 解析而非按早先记下的路径 —— 收口的全部意义就是那个文件被移走了，读记录的路径要么找不到（把成功报成失败）、要么还在原处（把没发生的移动报成成功）。目录即状态这个不变量在真实语料上 405/406 成立。"
+    },
+    "E22b": {
+      "tier_at_derivation": "T1",
+      "spec_at_derivation": {
+        "type": "evidence",
+        "kind": "deferred_close"
+      },
+      "live_spec": {
+        "type": "evidence",
+        "kind": "deferred_close"
+      },
+      "reason": "完成标准「已给出稍后如何关闭的提示」。散文「人选择暂不关闭时走这条：不动文档、不归档，给出『稍后用某命令再关』的提示即可」，并「E22a 与 E22b 二选一、只走一个」。T1 记录延后关闭提示行。与 E22a 互斥。"
+    },
+    "C02b": {
+      "phase": "context",
+      "spec_at_derivation": "layers/1-context.md「Worktree provisioning（conditional — worktree_isolation=true 时在此发生）」一节，含 _provision_worktree 的 docstring 原文与 agent 侧三条后果。",
+      "live_spec": {
+        "type": "all_checks",
+        "checks": [
+          {
+            "type": "evidence_in",
+            "kind": "worktree_mode",
+            "values": [
+              "isolated",
+              "shared_declared"
+            ]
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "worktree_mode",
+            "claims": [
+              "isolated"
+            ],
+            "disproved_when": {
+              "fact": "worktree_path_recorded",
+              "equals": false
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "worktree_mode",
+            "claims": [
+              "isolated"
+            ],
+            "disproved_when": {
+              "fact": "in_linked_worktree",
+              "equals": false
+            }
+          },
+          {
+            "type": "claim_corroborated",
+            "kind": "worktree_mode",
+            "claims": [
+              "shared_declared"
+            ],
+            "disproved_when": {
+              "fact": "isolation_declared",
+              "equals": true
+            }
+          }
+        ]
+      },
+      "reason": "源文把这一步要消除的失效模式写成可引用的一句：provisioning「FAILS HARD on error rather than falling back to the shared tree. A silent fallback would hand back exactly the shared-working-tree behaviour the caller asked to be isolated FROM, while reporting success」。一句没人核对的「已隔离」就是同一个退回上移一层，所以两个取值各有反驳事实：isolated 由「这个目录不是链接工作树」反驳（链接工作树的 .git 是文件，源检出是目录），shared_declared 由方案文档声明的 worktree_isolation 反驳。引擎只做只读核实，效果由 agent 跑脚本完成 —— 这是 C3 类的形态。\n\n2026-09-14 — 加了第三条 check（声称 isolated 却没记下 worktree_path 则被证伪）。起因是实测：隔离工作树真实存在、`.git` 真的是文件，而这一步照样拒绝 —— 因为 provider 读的是 `scope`（源仓库），不是 run 真正工作的那个目录。两个合法取值于是同时被证伪，这一步对任何 scope 选择都无法关闭。\n\n新那条把拒绝的理由改对了：不是「那个目录不是工作树」，而是「你没说清你指的是哪个目录」。路径本来就已经存在 —— 工具打印 `WORKTREE_PATH=`、它自己的文件头写着要持久化，只是此前被记在了另一个引擎那边。用 `claim_corroborated` 表达，是因为只有**声称隔离**的 run 才欠一个路径：把它写成 C01 的完成条件会弄坏每一条本就没有工作树的非隔离 run。"
+    }
   }
- },
- "steps": {
-  "C00": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "activation_banner"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "activation_banner"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "hot_set_state",
-      "values": [
-       "loaded",
-       "empty",
-       "unavailable"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "hot_set_state",
-      "claims": [
-       "loaded"
-      ],
-      "disproved_when": {
-       "fact": "hot_set_count",
-       "count_lte": 0
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "hot_set_state",
-      "claims": [
-       "empty"
-      ],
-      "disproved_when": {
-       "fact": "hot_set_count",
-       "count_gte": 1
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "hot_set_state",
-      "claims": [
-       "unavailable"
-      ],
-      "disproved_when": {
-       "fact": "hot_banner_readable",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "散文完成标准：「横幅作为本阶段第一条叙述输出打出，且只打这一次。」输出是「一行激活横幅，末尾带上本次加载的历史经验条数，并逐条列出经验 id」。「第一条叙述 / 只打一次」这种叙述顺序无法用现有任何谓词机器化，但散文强调「条数必须来自脚本对库的实际计数」（topic hot-set-fabrication）——所以最强可机检项是强制留下一条可审计的横幅内容行（条数 + id 明细），故用 evidence(activation_banner)（T1）而非 attest。顺序/唯一性的缺口见 notes。\n[2026-09-02 升级] 增记 hot_set_state，三个取值各有反驳事实。散文的完成标准要求横幅带上加载条数并逐条列出 id；而「查了确实是空」与「压根没查到」都渲染成 0，源系统的常驻指令只能靠散文说「命令失败不是编造 Hot Set: 0 的许可」。现在由 hot_set_count 的两个方向与 hot_banner_readable 各守一个取值。"
-  },
-  "C01": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "plan_doc"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "plan_doc"
-     },
-     {
-      "type": "evidence",
-      "kind": "fleet_task"
-     }
-    ]
-   },
-   "reason": "散文完成标准：「找到方案文档并完成状态迁移。」输出是「方案文档状态从『已排期』迁到『进行中』，并移动到对应目录」。共享 kind plan_doc（方案文档路径，跨层引用）正是此处该落的记录；记下 plan_doc 路径即证明「找到方案文档」这一前提成立。optional 步骤但按硬约束#1不放宽——evidence（T1）是留痕而非放宽。状态迁移本身的目标态由散文/skip 处理。\n[2026-09-02 升级] 增记 fleet_task —— 「这个 run 服务的是哪个被派发的任务」以前无处可读，于是收尾处「已上报」这句声称没有可核对的对象。记在开头而不是收尾：收尾时才声明是否适用，等于让想跳过上报的人自己决定适用性。值是任务 id 或 local。"
-  },
-  "C02": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "phases_summarized",
-    "exclude": [
-     "context"
-    ]
-   },
-   "live_spec": {
-    "type": "phases_summarized",
-    "exclude": [
-     "context"
-    ]
-   },
-   "reason": "散文完成标准：「无并发冲突，且（若续跑）已补齐所有『到达过但没收尾』的层。」散文点名续跑边界是漏报重灾区，「强制用确定性对账取代记忆重建」（topic resume-underreport）。phases_summarized 恰好检查「已到达的 phase 都有 summary 行」= 已补齐所有到达过但没收尾的层，完全从引擎状态派生（T3）。exclude=[context] 是因为 context 是当前进行中的 phase、其 summary 要到本层末步 C24 才 emit，不排除会误判自己未收尾；排除后：新跑时无其它已到达 phase → 真空为真可关闭，续跑时前序层缺小结 → 被强制补齐。并发检测（防双跑，靠锁文件）无对应谓词，见 notes。"
-  },
-  "C03": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "contract_age_verdict",
-    "values": [
-     "fresh",
-     "spot_check",
-     "expired"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "contract_age_verdict",
-    "values": [
-     "fresh",
-     "spot_check",
-     "expired"
-    ]
-   },
-   "reason": "散文完成标准：「给出时效判定并据此决定下一步。」输出是「一个判定——这些事实此刻可信 / 需抽查 / 已过期」。散文把规则写死为三档：「核实时间在一天内直接信任；一天到一周之间，抽查关键路径；超过一周，停下」。这是一个枚举裁决，故用 evidence_in 并列出三个允许值（T2），记录的判定值必须落在这三档之一。"
-  },
-  "C04": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "code_sync_state",
-    "values": [
-     "synced",
-     "up_to_date"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "code_sync_state",
-    "values": [
-     "synced",
-     "up_to_date"
-    ]
-   },
-   "reason": "散文完成标准：「工作区不落后于远端，或确认无需同步。」输出是「落后就同步到最新，本来就干净则跳过」。两种合法终态——已同步 / 本来就最新——是一个枚举结果，故用 evidence_in（T2）把记录值约束在这两个允许值内，而非只留痕。"
-  },
-  "C05": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "verified_fact"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "verified_fact"
-     },
-     {
-      "type": "evidence_all_in",
-      "kind": "fact_verdict",
-      "values": [
-       "hit"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准：「清单全部命中。」输出是「逐条去代码里查证，全部命中才算过」。共享 kind verified_fact（一条『此刻仍成立』的前置事实校验结论，消费者标注为 context 层）正是为此步准备的——每条关键路径核验命中即一条 verified_fact 行。用 evidence(verified_fact)（T1）强制留下逐条可审计的核验结论。「全部命中」这种完整性断言无枚举/相等谓词可表达，min_count 只能保证 ≥N，故止步 T1。"
-  },
-  "C06": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "platform_quirk"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "platform_quirk"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "quirk_lookup",
-      "values": [
-       "hit",
-       "miss"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准：「完成一次查表，命中则缓存。」输出是「命中已知平台特性时，把编译/测试命令的覆盖值缓存给后续层用」。查表这个动作总会发生（命中与否都记一行结果，未命中即『无特性、走默认』），故用 evidence(platform_quirk)（T1）强制这次查表留痕；「命中则缓存」是条件动作，由记录内容体现而非放宽判据。"
-  },
-  "C07": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "dependency_check",
-    "values": [
-     "all_ready",
-     "no_dependencies"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "dependency_check",
-    "values": [
-     "all_ready",
-     "no_dependencies"
-    ]
-   },
-   "reason": "散文完成标准：「所有上游依赖状态为已就绪。」输入是「方案里声明的上游依赖（若有）」，失败时「任一上游未就绪 → 停下」。散文并强调「只认方案文档和任务系统里的状态字段」（topic stale-dependency-snapshot）。用 evidence_in（T2）把聚合裁决约束为 all_ready（确认全部就绪后才可如实记）或 no_dependencies（『若有』的无依赖分支），二者都是显式匹配的期望值，比只留痕更可检。"
-  },
-  "C07b": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "diagnosis_challenge",
-    "values": [
-     "survived"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "diagnosis_challenge",
-    "values": [
-     "survived"
-    ]
-   },
-   "reason": "散文完成标准：「诊断挺过了 M1/M2/M3 三轮质疑。」输出是「经过质疑、被证伪过一轮的诊断结论」，失败时「诊断经不起挑战，就退回去重新查」。合法关闭态只有『挺过质疑』，故用 evidence_in(values=[survived])（T2）——记录的挑战结论必须等于 survived。optional（仅复杂任务）但按硬约束#1不放宽：非复杂任务用 skip 处理，判据照写强的。"
-  },
-  "C08": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "diagnosis"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "diagnosis"
-   },
-   "reason": "散文完成标准：「三要素清晰、有证据支撑。」输出是「现象、根因、影响面（附查证结果）」。这是一份需落盘的诊断对象，故用 evidence(diagnosis)（T1）强制留下带查证结果的诊断记录。三要素齐全/证据充分属内容质量，无枚举或相等关系可机检，止步 T1。"
-  },
-  "C09": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "solution_choice"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "solution_choice"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "solution_form",
-      "values": [
-       "single",
-       "compared"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准：「方案唯一确定，或对比清单已备好待确认。」输出是「多解法时列出对比；确定性修复可跳过」。用 evidence(solution_choice)（T1）强制记录选定方案/对比清单。刻意不复用通用 kind decision——decision 被多步共用，min_count=1 会被任意别处的 decision 行满足而造成跨步串味，故起一个专名 solution_choice。"
-  },
-  "C10": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "reason": "散文完成标准：「每处改动都能对应到具体位置。」输出是「一张改动表（路径 / 操作 / 锚点 / 手动还是自动）」——改动表里的『路径』列就是被改动的文件清单。change_file 是共享表里点名的爆炸半径 change-set 输入（缺它整个分析惰性化），context 层正是『声明改动清单的自然位置』，而 C10 就是这张清单本身，故用 evidence(change_file)（T1）强制它存在。改动表的『手动/自动』列中的自动行同时在此登记 auto_generated（生成产物 glob），若改动含契约常量则一并登记 api_constant——这两个是条件化的同表副记录，见 notes。"
-  },
-  "C11": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "old_value"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "old_value"
-   },
-   "reason": "散文完成标准：「同类点已穷尽、数值有依据。」触发条件是「只要方案里出现『一共 N 处』这类数值断言，就必须穷尽查一遍」（topic investigation-rigor）。去硬编码/改值场景下，『穷尽的同类点』正是那个『不该在改动后残留的值』的全部落点，故把爆炸半径 change-set 输入 old_value 落在此步：evidence(old_value)（T1）强制把所有待清除的旧值落点登记下来，供下游 grep 校验『改后不残留』。本步条件化——方案无数值断言/无旧值时按硬约束#6用 skip 处理，判据不放宽。"
-  },
-  "C12": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "parser_sample_verdict",
-    "values": [
-     "as_expected"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "parser_sample_verdict",
-    "values": [
-     "as_expected"
-    ]
-   },
-   "reason": "散文完成标准：「规则在样本上表现符合预期。」输出是「拿真实样本喂一遍，确认匹配范围既不多也不少」，失败时「样本里出现误伤或漏匹配 → 收紧规则再验」。合法关闭态是『符合预期』，故用 evidence_in(values=[as_expected])（T2）把样本核验裁决约束为期望值。条件化（仅当改动用到正则/批量替换）——无正则时 skip。"
-  },
-  "C13": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "self_loop_check",
-    "values": [
-     "independent"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "self_loop_check",
-    "values": [
-     "independent"
-    ]
-   },
-   "reason": "散文完成标准：「验证与改动相互独立。」输出是「确认『被改的东西』和『用来验证的东西』不是同一个」，防的是「用改过的尺子量改过的布」（topic self-loop-guard）。注意这是要求两者『不相等』——fields_agree 只能表达『相等』方向不适用，故改用 evidence_in(values=[independent])（T2）：把自环检查裁决约束为『独立』这一期望值。"
-  },
-  "C14": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "direction_source_agreement",
-    "values": [
-     "aligned"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "direction_source_agreement",
-    "values": [
-     "aligned"
-    ]
-   },
-   "reason": "散文完成标准：「改动方向与权威来源一致。」输出是「明确『事实来源』和总体改动方向」，失败时「方向和事实来源对不上就停下来核」。这是一个『方向 vs 权威来源』的一致性裁决，故用 evidence_in(values=[aligned])（T2）把该裁决约束为『一致』。当权威来源本身是契约常量时，在此步一并登记爆炸半径 change-set 输入 api_constant（条件化副记录，见 notes——因 C14 是每次都跑的强制步而 api_constant 只在契约常量改动时才有，不能拿它当强制谓词，否则非契约改动永远关不掉，违反硬约束#1/#6）。"
-  },
-  "C15": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "module_under_test"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "module_under_test"
-   },
-   "reason": "散文完成标准：「下游影响已列全。」输出是「一张下游依赖状态表——谁会因此受影响」。下游受影响的对象正是测试应当覆盖的模块，故把爆炸半径 change-set 输入 module_under_test 落在此步：evidence(module_under_test)（T1）强制列出这些模块，供验证层核对测试覆盖。任何改动至少含被改模块本身，min_count=1 恒可满足。"
-  },
-  "C16": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "risk"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "risk"
-   },
-   "reason": "散文完成标准：「风险与回退都写明。」输出是「风险点 + 每个风险的回退路径」，失败时「想不出回退路径的风险，要显式标为『不可逆』」。用 evidence(risk)（T1）强制每条风险连同其回退/不可逆标注留痕；风险条目内容质量无枚举可机检，止步 T1。"
-  },
-  "C17": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "fuzzy_logic_point"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "fuzzy_logic_point"
-   },
-   "reason": "散文完成标准：「模糊判定点已全部点名。」输出是「把这些『非确定』逻辑显式标出来」，失败时「拿不准某段逻辑是否属于此类时，宁可标出来」。用 evidence(fuzzy_logic_point)（T1）强制把每个模糊/阈值/启发式判定点登记下来。条件化（仅当改动涉及此类逻辑）——无此类逻辑时 skip，判据不放宽。"
-  },
-  "C18": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "disambiguated_target"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "disambiguated_target"
-   },
-   "reason": "散文完成标准：「目标路径唯一、无歧义。」输出是「明确这次到底改的是哪一处」，失败时「分不清目标路径就别下手，先消歧」。用 evidence(disambiguated_target)（T1）强制把消歧后的唯一目标落点登记下来。条件化（仅当一个符号/名字在代码里有多处落点）——无歧义时 skip。"
-  },
-  "C19": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "pattern_recall"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "pattern_recall"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "recall_result",
-      "values": [
-       "hit",
-       "miss"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准：「完成一次召回，并（若命中）随后重算经验热度。」输出是「召回相关的历史解法与反面教训，展示给发起人；命中就列出，未命中则跳过」。召回这个动作总会发生（命中/未命中都记一行结果），故用 evidence(pattern_recall)（T1）强制这次召回留痕；『命中则重算热度』是幂等副动作，由记录内容体现而非放宽判据。"
-  },
-  "C20": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "gate_recorded"
-   },
-   "reason": "散文完成标准：「拿到『同意』这一确定信号（或读到显式预授权配置）后才放行。」这是「整个 Context 层的承重点」，散文明说「绝不能把『没人反对』当成『已同意』」，且「判断标准写死在工具里而不是靠这段散文口头约束……真正的门是工具记录的那个确认动作」。flow 中本步 gate=affirm（非 none），符合硬约束#3，故用 gate_recorded（T3）——完全从引擎的门应答状态派生，无法用一句声明伪造。预授权免门分支同样以引擎记录的门决策满足本谓词（见 notes）；『门提示前先上传方案供评审』是并行的收尾义务（topic gate-emission-upload），不属本谓词。"
-  },
-  "C21": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "schema_exposure",
-    "values": [
-     "as_expected"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "schema_exposure",
-    "values": [
-     "as_expected"
-    ]
-   },
-   "reason": "散文完成标准：「schema 暴露已审。」输出是「确认暴露面符合预期」，且「仅当改动触及会向模型暴露 schema 的那类工具时才做」。合法关闭态是『符合预期』，故用 evidence_in(values=[as_expected])（T2）把审查裁决约束为期望值。条件化（窄条件专项检查）——不触及 schema 暴露时 skip，判据不放宽。"
-  },
-  "C22": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "initial_state_row"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "initial_state_row"
-   },
-   "reason": "散文完成标准：「状态库记录行存在且可回读。」输出是「确认持久化状态库里已建好本次运行的记录行」，失败时「回读不到记录行 → 停下查状态机」，并强调「进度的唯一权威源是持久化状态库」。用 evidence(initial_state_row)（T1）强制登记一条『记录行已建好且回读通过』的确认。（没有直接『run 行存在』的派生谓词——但任何 evidence 能落库本身就以状态库存在为前提，故 T1 的回读确认是此处最诚实的可审计判据。）"
-  },
-  "C24": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "layer_summary"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "layer_summary"
-     },
-     {
-      "type": "evidence",
-      "kind": "handoff_marker"
-     }
-    ]
-   },
-   "reason": "散文完成标准：「分数已 emit，交棒给下一层。」输出是「本层的评分与交棒信号」，「把本层做了哪些、结果如何汇成一个分数发出去，并显式标记交棒」（topic layer-score-emit）。共享 kind layer_summary（本层收尾小结，标注为『已在用，勿改』）正是此处该落的记录，故用 evidence(layer_summary)（T1）。这条小结也是 C02/关 run 时 phases_summarized 检查 context 层是否收尾的凭据，形成闭环。"
-  },
-  "CF00": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "gate_recorded"
-     },
-     {
-      "type": "evidence",
-      "kind": "config"
-     }
-    ]
-   },
-   "reason": "完成标准 ②「本步的确认 gate 已记录（`affirm`，或经显式预授权的 `preauth`）」直接对应 gate_recorded——本步 gate 为 `preauth:auto_confirm_config`（非 none，符合硬约束 3）。这正是能区分「配置被人确认」与「配置被预授权自动取用」两条路径的判据：两条路径都经 gate 机器如实记录（affirm/preauth）而通过，而散文明令『绝不要从「流程已经走到这一步」推断出预授权……只要你是靠「进度」而不是靠那个配置值去走预授权路径，gate 记录就会判定为伪造并拒绝（exit 非 0），同时记一条 violation』。gate_recorded 从引擎状态派生、无法伪造，把「合法确认/合法预授权」与「靠进度蒙混」严格分开（T3）。注意完成标准是合取，另一半 ①「偏好已写盘」未被本谓词覆盖（见 notes）——承重且抗伪造的那一半是 gate，故取 gate_recorded。"
-  },
-  "CF09": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "all_of",
-    "steps": [
-     "CF00"
-    ]
-   },
-   "live_spec": {
-    "type": "all_of",
-    "steps": [
-     "CF00"
-    ]
-   },
-   "reason": "完成标准「CF00 已通过且 gate 已记录」。CF00 的判据即 gate_recorded，故「CF00 关闭」⟺「gate 已记录」，all_of {steps:[CF00]} 一条即精确覆盖完成标准全部（T3，纯引擎状态派生）。本步 gate=none，故不能用 gate_recorded（硬约束 3）；散文「恒执行——即便 CF00 走了预授权退化路径，这一步也照做」也由 all_of 自然满足：预授权路径下 CF00 的 gate 仍被记录为 preauth，CF00 照样关闭。CF00 存在、非本步自身、且同 phase 先于 CF09 运行，满足硬约束 4/5。"
-  },
-  "K01": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "reason": "散文输出是「一份可执行的工作清单（每项：文件路径 / 操作 / 锚点）」，完成标准「每一项都有明确的路径」。这份逐项文件路径清单正是爆炸半径分析所需的 change-set 输入——按任务规范『context 层没声明改动清单时 coding 层是第二个自然位置』，K01 是本层最早产出『改了哪些文件』的步骤，故在此发 change_file 喂给下游（缺它分析会惰性化）。完成标准里的『一个已验证存在的锚点』（grep 实测命中）无法用现有谓词词汇机器化校验，故封顶到 T1：强制留下可审计的文件行，锚点核验靠散文 MUST + 失败即停上报。"
-  },
-  "K02": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "code_diff"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "code_diff"
-     },
-     {
-      "type": "evidence_equals",
-      "kind": "compile_result",
-      "value": "pass"
-     }
-    ]
-   },
-   "reason": "散文输出是「符合清单的改动 + 一条 diff 证据」。这一条 diff 证据是可事后核查的内容行，故用 evidence 记录 code_diff（T1，比 attest 强，强制一个显式落盘动作）。完成标准的另一半『无编译错误』由下一步 K03 专门检查，不在本步谓词内重复。"
-  },
-  "K03": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "compile_result",
-    "values": [
-     "pass"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "compile_result",
-    "values": [
-     "pass"
-    ]
-   },
-   "reason": "散文输出是「编译结果（过 / 未过）」——一个裁决枚举，按规范『输出是枚举/裁决 → 用 evidence_in 并列出允许值』。完成标准「纯编译通过」，故通过值只列 pass（= 过）；未过则谓词为假，按散文『编译报错 → 回 K02 定点修』处理。散文『没有编译工具链的项目（如纯文档改动）可跳过』是豁免条件，按硬约束 6 由 skip 机制处理，判据照常写为『必须编译过』。"
-  },
-  "K04": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "diff_scope_result",
-    "values": [
-     "完全一致"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "diff_scope_result",
-    "values": [
-     "完全一致"
-    ]
-   },
-   "reason": "散文输出是「范围比对结果（完全一致 / 漏改 / 越界 / 完全不符）」——裁决枚举，用 evidence_in。完成标准「实际改动文件集与清单一致，或差异已被人确认接受」，机器可检的通过态是『完全一致』，故 values 只列它；漏改/越界按散文『停下问人确认』、完全不符按『退回 K02』——这些非通过裁决记录后谓词为假，正是期望行为。『差异已被人确认接受』的豁免路径按硬约束 6 走 skip，不靠放宽判据。散文明确『这道复核是引擎按前几步的证据核对的……自述在这里不算数』，与 T2『记录值必须匹配声明期望』一致。"
-  },
-  "K05": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "all_of",
-    "steps": [
-     "K01",
-     "K02",
-     "K03",
-     "K04"
-    ]
-   },
-   "live_spec": {
-    "type": "all_of",
-    "steps": [
-     "K01",
-     "K02",
-     "K03",
-     "K04"
-    ]
-   },
-   "reason": "散文完成标准直白写「K01–K04 均已通过」，逐字对应 all_of 引用这四步已关闭。这四个 id 都在本 phase 内、真实存在、且不含本步自身（无自依赖），符合硬约束 4/5。完全从引擎状态派生，无法用一句声明伪造，故 T3。"
-  },
-  "D00": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "test_plan"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "test_plan"
-   },
-   "reason": "散文完成标准逐字为「测试计划对象已产出并落盘，下游每一步都能读到它」，输出行为「一个结构化的测试计划对象……写入状态存储」。这是产出一个对象并落盘，用共享 kind test_plan 记录该对象即为 T1；散文强调『D00 一条测试都不跑，只解析出计划』，所以此处不该是 test_result 或任何裁决值。"
-  },
-  "D01": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "change_file"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "scope_vs_plan",
-      "values": [
-       "matches",
-       "deviation_explained"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准「范围清单成型，且与计划一致（或偏差已解释）」，输出行为「改动的真实表面——动了哪些文件、符号、常量、路径」。输出的核心是被改文件清单，用共享 kind change_file（爆炸半径 change-set 的消费源）逐行记录即 T1。『与计划一致』是人眼/脚本对齐判断，词汇表里没有『计划声称要改的文件』这个可比 kind，无法用 fields_agree，故停在 T1（见 notes）。"
-  },
-  "D02": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "direct_dependent"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "direct_dependent"
-   },
-   "reason": "散文完成标准「直接依赖方列举完毕」，输出「静态引用被动过符号的直接依赖方」。完成即『列举完毕』=存在被记录的直接依赖方内容行，用 evidence 记录 direct_dependent。散文『这是爆炸半径最容易查、也最不该省的一层』说明它必跑但结果是一份清单而非裁决值，故 T1 而非 evidence_in。"
-  },
-  "D03": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "old_value"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "old_value"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "old_value_residual",
-      "values": [
-       "zero",
-       "all_explained"
-      ]
-     }
-    ]
-   },
-   "reason": "输出「静态扫描看不见的引用」，输入是『被替换的旧值精确字符串』，用共享 kind old_value（爆炸半径 change-set 消费源，语义正是『一个不该在改动后残留的值』）记录所搜的完整旧值。散文完成标准「旧值在仓库里的残留 = 0，或残留都已解释」中的『残留=0』是一个 grep 计数裁断——词汇表没有『统计仓库命中数』的谓词，无法机器裁决（见 notes），故只能强制留下可审计的 old_value 记录行，停在 T1。"
-  },
-  "D04": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "graph_discovery",
-    "values": [
-     "ran",
-     "no-graph"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "graph_discovery",
-    "values": [
-     "ran",
-     "no-graph"
-    ]
-   },
-   "reason": "散文完成标准是一个明确的二选一枚举：「图谱查询跑过，或明确标注『无图谱，跳过』」，散文正文再次强调『没有就跳过——这是加分项』。输出是一个枚举/裁决 → 按 brief 指引用 evidence_in 列出允许值 ran / no-graph，记录值必须匹配其一，T2。"
-  },
-  "D05": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "test_result",
-    "values": [
-     "pass",
-     "exempt"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "test_result",
-    "values": [
-     "pass",
-     "exempt"
-    ]
-   },
-   "reason": "散文完成标准「所有必跑项通过、结果表已持久化到状态存储」，输出「逐条执行的通过/失败 + 权威测试结论（通过 / 豁免），并落盘」。权威结论是一个二值裁决『通过 / 豁免』，用共享 kind test_result（必须原样用）做 evidence_in，最新值必须 ∈ {pass, exempt} 才算做完——散文『必跑项失败 → 转入修订流程』意味着 fail 值不该关闭本步，evidence_in 恰好把 fail 挡在允许值外，T2。"
-  },
-  "D06": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "tooling_drift",
-    "values": [
-     "none",
-     "recorded"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "tooling_drift",
-    "values": [
-     "none",
-     "recorded"
-    ]
-   },
-   "reason": "散文完成标准是明确二选一：「确认工具配置未被计划外改动，或改动已被记录」，输出「改动是否悄悄动了构建/静态检查/测试的工具配置」。裁决枚举 → evidence_in，值 none（未漂移）/ recorded（漂移已记录）。散文『发现配置被动且未在计划内——标为待确认』的待确认态不在允许值内，本步保持未关闭，T2。"
-  },
-  "D07": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "optional_dep_audit",
-    "values": [
-     "trusted-or-guarded",
-     "n/a"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "optional_dep_audit",
-    "values": [
-     "trusted-or-guarded",
-     "n/a"
-    ]
-   },
-   "reason": "散文完成标准「被测模块的每个非标准库导入要么可信、要么已被守卫」是一个逐项收敛到的裁决，输出「被测模块的传递导入是否含未被守卫的可选依赖」。用 evidence_in 表达该裁决：trusted-or-guarded（全部可信或已守卫）/ n/a（无非标准库导入）。散文『模块路径解析不出→标为待人工复核』的 pending-review 值不在允许集，保持本步未关闭，T2。"
-  },
-  "D08": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "verification_check"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "verification_check"
-     },
-     {
-      "type": "evidence_all_in",
-      "kind": "check_verdict",
-      "values": [
-       "pass",
-       "fail",
-       "exempt"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准「所有点名的额外检查都跑过」，输出「这些检查的通过/失败」。用 evidence 记录每条计划点名的非框架检查（grep 锚点 / 语义断言）的执行行。『所有点名的都跑过』里的『所有』依赖计划点名集合，词汇表无法枚举该集合来做全称校验，故停在 T1（强制留下可审计的检查记录，但无法机器证明『没漏』——见 notes）。"
-  },
-  "D09": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "consistency_result",
-    "values": [
-     "aligned",
-     "n/a"
-    ]
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence_in",
-      "kind": "consistency_result",
-      "values": [
-       "aligned",
-       "n/a"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "consistency_result",
-      "claims": [
-       "n/a"
-      ],
-      "disproved_when": {
-       "fact": "checks_meaningful",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "散文完成标准「所有消费层与改动对齐」是一个裁决，输出「各消费层是否与新值/新签名对齐」。用 evidence_in：aligned（全对齐）/ n/a（本次无跨层标识符改动）。散文『发现某层仍用旧值 / 参数不匹配 → 记为阻塞项』的 blocked 值不在允许集，本步保持未关闭直到修好，T2。\n[2026-08-31 升级] 散文的完成标准是「所有消费层与改动对齐」；「n/a」是它的一个合法答案，但那是一句声称。分析器已独立判过本次改动是否给出可检查的输入（checks_meaningful），两者不能同时为真，所以「n/a」要经它核对。"
-  },
-  "D10": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "assertion_table"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "assertion_table"
-   },
-   "reason": "散文完成标准「断言表产出，且每个标『待人工』的项都由你作答」，输出「一张断言裁决表……+ 喂给决策门的结构化结果」。这正是 brief 给的范例（『断言表产出』→ evidence kind assertion_table，T1）。词汇表里没有能校验『每个待人工项都已作答』的谓词，evidence:assertion_table 只能证明表存在——散文把这条纪律的兜底放到了 D14（『一个标了待人工却没作答的项，会让决策门拒绝静默放行』），所以 T1 是词汇表在本步的天花板，真正的强制发生在 D14 门 + 本层 goal（见 notes）。"
-  },
-  "D11": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "diff_display"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "diff_display"
-   },
-   "reason": "散文完成标准「diff 已完整展示」，输出「贴出实际 diff 供人眼比对计划」，失败时明确写『（无——纯展示步）』。纯展示无裁决值也无可机器判定的『完整性』，只能用 evidence 强制留下一条『diff 已贴出』的记录行，从 T0 提到 T1；散文『成本极低却必须做——这是抓这行不该在这的最后机会』说明它不可省，evidence 强制记录动作是能做到的最强项。"
-  },
-  "D12": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "output_block"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "output_block"
-   },
-   "reason": "散文完成标准「输出块成型」，输出「汇总成本层的输出块（跑了什么、过了什么、什么被豁免）」，失败时『（无）』。『成型』=存在一条汇总记录，用 evidence 记录 output_block 即 T1。此处不复用 layer_summary——散文把本层小结的生成明确放在 D15（『通过了才生成本层小结』），D12 是给决策门的输入清单，与收尾小结是两回事。"
-  },
-  "D13": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "verification_state"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "verification_state"
-   },
-   "reason": "散文完成标准「状态已持久化」，输出「进度写入状态存储」。用 evidence 记录一条状态落库行即 T1。散文『写库失败属环境不稳，停下回报，不要无状态硬走』——落库这一物理动作本身没有裁决值可校验，evidence 强制留痕是可行的最强项（本步语义单薄，与 D15 的持久化高度重叠，见 notes）。"
-  },
-  "D14": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "gate_recorded"
-   },
-   "reason": "flow.yaml 中 D14 gate=affirm（非 none，满足 gate_recorded 使用前提）。散文完成标准逐字「门禁决策经工具记录（不只是打印在对话里），并通过本层目标校验」，散文正文『决策必须工具记录：只活在对话里的决策无法被审计』。这与 brief 范例（『确认门已记录』→ gate_recorded，T3）完全对应：gate_recorded 完全从引擎状态派生，一句声明无法伪造，是本层最高可检性所在。"
-  },
-  "D15": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "decision",
-    "values": [
-     "clean",
-     "block",
-     "warn"
-    ]
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence_in",
-      "kind": "decision",
-      "values": [
-       "clean",
-       "block",
-       "warn"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "decision",
-      "claims": [
-       "clean"
-      ],
-      "disproved_when": {
-       "fact": "blocking_count",
-       "count_gte": 1
-      }
-     }
-    ]
-   },
-   "reason": "散文完成标准「决策已落库且本层目标校验通过」，输出「决策写入状态存储」，输入是 D14 的门禁结果（干净放行 / 阻塞 / 警告）。用共享 kind decision（『一个被记录的决定值』）做 evidence_in，值必须 ∈ {clean, block, warn} 这三种合法门禁分类之一，挡掉垃圾值，T2。完成标准后半『本层目标校验通过』由本 phase 的 goal（phase_steps_closed）承载，不重复压进本步。\n[2026-08-31 升级] 散文要求裁决落库，取值来自原文的 clean/block/warn。其中「clean」是唯一不需要后续工作的答案；分类器已算出阻断项数量（blocking_count），它说有阻断时的一句 clean 与一次真正干净的裁决在日志里不可区分，所以要在声称发生处核对。"
-  },
-  "D16": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "layer_score"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "layer_score"
-     },
-     {
-      "type": "evidence",
-      "kind": "handoff_marker"
-     }
-    ]
-   },
-   "reason": "散文完成标准「评分已发出、交接完成」，输出「发出本层质量评分，交接给下一阶段」。用 evidence 记录一条 layer_score 行即 T1（分值本身是连续量，无固定枚举可做 evidence_in）。散文『仅当 D14 被阻塞时才跳过本步』是条件跳过——按 brief 硬约束 6，豁免/跳过由 skip 机制处理，判据照常写为 evidence，不放宽。"
-  },
-  "E01": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "commit_message"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "commit_message"
-     },
-     {
-      "type": "evidence_equals",
-      "kind": "subject_format_check",
-      "value": "0"
-     }
-    ]
-   },
-   "reason": "散文输出是『一条结构化提交信息（标题行 + 正文）』，完成标准『标题行符合约定格式，正文说清「改了什么、为什么」』。约定格式与正文语义无法用现有词汇精确机器校验（evidence_equals 需要精确定值），但可强制留下一条可事后审计的提交信息内容行，故用 evidence 记录 commit_message（T1，比 attest 强：强制显式记录、值可复查）。"
-  },
-  "E02": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_equals",
-    "kind": "cr_desc_lint",
-    "value": "0"
-   },
-   "live_spec": {
-    "type": "evidence_equals",
-    "kind": "cr_desc_lint",
-    "value": "0"
-   },
-   "reason": "完成标准逐字为『格式校验返回 0』，散文明写『校验器的返回码是硬闸：0 才能往下走』『校验没过禁止进入后面的推送步 …… 约束落在返回码上』。因此记录 lint 返回码并要求最新值精确等于 \"0\"，是可真正核验的 T2 判据，比只记「我跑过 lint」强。"
-  },
-  "E03": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_equals",
-    "kind": "cr_size_check",
-    "value": "pass"
-   },
-   "live_spec": {
-    "type": "evidence_equals",
-    "kind": "cr_size_check",
-    "value": "pass"
-   },
-   "reason": "完成标准『总长与每段都在配额内』，散文『每段有各自的字符配额，由校验器执行』。校验器给出的是「配额内/超限」的裁决，故记录其裁决值并要求最新值精确等于 \"pass\"（配额内），可真正核验（T2）。超限降级由渲染器按固定顺序处理，属过程细节，不放宽本判据。"
-  },
-  "E04": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "gate_recorded"
-   },
-   "reason": "flow.yaml 中 E04 gate=affirm（非 none），且散文明写这是『提交前的人工确认门』并要求两轮节奏、背书机制会检查『距上一次门之后有没有新的人类发言』、伪造会被拒（topic never-forge-a-gate）。完成标准『确认门已记录』正是 gate_recorded 的定义，完全从引擎状态派生、无法伪造（T3）。散文注明『本次无提交的纯本地交付可豁免』——豁免由 skip 机制处理，判据照常写，不放宽。"
-  },
-  "E03b": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "reviewer_suggestion"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "reviewer_suggestion"
-   },
-   "reason": "输出是『一个建议评审人 + 可选的反对证据』，完成标准『脚本输出已贴进对话供人过目』。这是自陈动作，但可强制留下可审计的建议内容行，故 evidence 记录 reviewer_suggestion（T1）。散文强调数据源是本流程自己的记录、按包名归一，属过程约束不入判据。"
-  },
-  "E05a": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "cr_config"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "gate_recorded"
-     },
-     {
-      "type": "evidence",
-      "kind": "cr_config"
-     }
-    ]
-   },
-   "reason": "输出是『一组评审配置（评审人、是否发布、是否自动合并、是否自动修复、等待策略）』，完成标准『配置已确认（或按预授权自动取用）』。注意 flow.yaml 中本步 gate=none（尽管标题带 🚦），依硬约束#3 不能用 gate_recorded（否则 exit 2），故降级为记录整组配置的 evidence(cr_config)（T1）。配置是多字段集合而非单一枚举，无法用 evidence_in 收敛。见 notes 的 gate 不一致问题。"
-  },
-  "E06": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "delivery_mode",
-    "values": [
-     "commit_and_review",
-     "commit_only",
-     "no_commit"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "delivery_mode",
-    "values": [
-     "commit_and_review",
-     "commit_only",
-     "no_commit"
-    ]
-   },
-   "reason": "散文输出是三选一的裁决：『「提交+推评审」/「只提交」/「不提交」中的哪条』，完成标准『交付方式已确定』。按 brief 指引『输出是一个枚举/裁决 → 用 evidence_in 并列出允许值』，故用 evidence_in 限定 delivery_mode ∈ 三个允许值（T2）。散文『字段缺失 → 停下来问，别默认最重的那条』——缺失即无合法记录，判据自然不通过。"
-  },
-  "E07": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "pushed_rev"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "commit_sha"
-     },
-     {
-      "type": "evidence",
-      "kind": "cr_url"
-     },
-     {
-      "type": "evidence",
-      "kind": "pushed_rev"
-     }
-    ]
-   },
-   "reason": "完成标准三合取『提交存在、评审已创建、推送已记录』分别对应 commit_sha / cr_url / pushed_rev 三个 kind，但现有词汇无「多个 kind 同时存在」的合取谓词（all_of 是对步骤而非 kind）。故单步只能钉住一个 kind：选 pushed_rev，因为散文明写『推送成功后立即把评审号与修订号记进完成不变量 …… 漏记会让后面的完成判定失败（提前完成被结构性挡住）』，且它是 observation 层 fields_agree(pushed_rev, verified_rev) 不变式的一半——漏记会让该不变式缺一个操作数而静默失效（正是本轮要根治的『静默落到默认值』失败模式）。commit_sha / cr_url 缺失属「无 CR 可合」的响亮失败、且由 cleanup 层作为下游消费者核验，故把稀缺的单谓词名额留给最易被静默吞掉的 pushed_rev（T1）。见 notes。"
-  },
-  "E07b": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "layer_summary"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "layer_summary"
-     },
-     {
-      "type": "evidence",
-      "kind": "handoff_marker"
-     }
-    ]
-   },
-   "reason": "散文本阶段末步：『跑脚本上报这一阶段的评分与关键指标，并标记交棒给下一阶段（观察）』，完成标准『评分已 emit、交棒标记已写』，输出『一条阶段评分记录』。用共享 kind layer_summary（『本层收尾小结』，已在用）记录该收尾评分行（T1）。评分数值本身与交棒动作无法用精确定值谓词表达，evidence 是可机器化的最强档。"
-  },
-  "E08": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev",
-    "absent_ok": true
-   },
-   "live_spec": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev",
-    "absent_ok": true
-   },
-   "reason": "完成标准「读到了真实状态，并把它连同修订号记进完成不变量」，输出是「一条『已验证到第几修订、什么状态』的记录」即 verified_rev。散文强调『声称通过/已合入这类终态时，得带上刚读到的页面证据』且本层不变式要求已验证修订==最新推送修订。此处不用 evidence_in(analyzer_terminal) 因为 E08 只是首读、状态可能『仍在跑』，尚不要求终态；用 fields_agree 把记录的 verified_rev 钉到 execution 层的 pushed_rev（不论通过/在跑，rev 都必须相等），比裸 evidence 强且能抓『记错修订』。absent_ok 覆盖无推送的 N/A 分支。"
-  },
-  "E09": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "decision",
-    "min_count": 1
-   },
-   "live_spec": {
-    "type": "evidence_all_in",
-    "kind": "decision",
-    "values": [
-     "actionable",
-     "inherent_noise"
-    ]
-   },
-   "reason": "完成标准「每条意见都有归类结果」，输出「每条意见归类为『该处理』或『固有噪声』，附可引用的规则号」。散文：『跑分类器给出规则号，让「我决定忽略它」变成一个可引用的决定，而不是一次无声的绕过』——归类是一次带规则号的被记录决定，故用 evidence(kind=decision) 强制留痕。无法上 T2：每条意见的归类值互不相同、无单一期望值可 evidence_equals/evidence_in。"
-  },
-  "E27": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "dry_run_status",
-    "values": [
-     "pass",
-     "fail",
-     "running"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "dry_run_status",
-    "values": [
-     "pass",
-     "fail",
-     "running"
-    ]
-   },
-   "reason": "完成标准「记录了当前试跑状态」，输出「试跑结果（通过 / 失败 / 仍在跑）」是一个三值枚举。按 brief『输出是一个枚举/裁决 → 用 evidence_in 并列出允许值』。此处 running 是合法记录值——散文明写『还在跑就记下状态，等后面的等待步去收尾』『别猜一个通过』，故枚举包含 running；evidence_in 相较裸 evidence 额外约束值落在已知集合、挡住乱填。optional 只表『无试跑可跳过』，判据未放宽（守硬约束1）。dry_run_status 为新 kind（共享表无对应项）。"
-  },
-  "E18": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "analyzer_terminal",
-    "values": [
-     "all_pass",
-     "merged",
-     "has_comments",
-     "analyzer_fail",
-     "timeout"
-    ]
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "gate_recorded"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "analyzer_terminal",
-      "values": [
-       "all_pass",
-       "merged",
-       "has_comments",
-       "analyzer_fail",
-       "timeout"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「读到确凿终态字串，或明确标注为超时后才结束这一轮」，输出「一次『已到终态』或『等待超时』的如实判定」。这是本层判断核心：散文『⚠️「还在跑」不是终态…没有红，不等于绿；它只是还没出结果』『终态必须是可校验的 —— 你读到了那个明确的状态字串（全部通过 / 已合入 / 有意见 / 失败）』『若因等待超时而结束，就明说是超时』。故 evidence_in 列出全部合法终态 + timeout 且**刻意不含 running**，从判据上区分『终态且干净/有结果』与『还没出结果』。flow gate=none 所以不能用 gate_recorded（否则 exit 2）。复用共享 kind analyzer_terminal，未改名。"
-  },
-  "E18b": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "layer_score",
-    "min_count": 1
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "layer_score",
-    "min_count": 1
-   },
-   "reason": "完成标准「评分已 emit」，输出「一条阶段评分记录」。这是一次 emit 动作、留下可审计的分数行，故 evidence(kind=layer_score)。散文注明时机（上一步以等待收尾则先不 emit、留到终态确认后补），但完成语义就是『分数记录已落盘』，evidence 恰好表达『必须存在该行才算做完』，也顺带阻止在等待中途关层。layer_score 为新 kind（共享表 layer_summary 语义是『本层收尾小结』，与评分不同，不复用以免语义混淆）。"
-  },
-  "E18-recon": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev",
-    "absent_ok": true
-   },
-   "live_spec": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev",
-    "absent_ok": true
-   },
-   "reason": "完成标准「最新修订的终态已重新读取并记录」。散文的关键不变式原文：『已验证的那个版本，必须就是最新推送的那个版本…每推一个新修订，都要对这个新修订重新观察…完成判定会硬性核对「已验证修订号 == 最新推送修订号」，两者不等就无法收尾』。故用 fields_agree(pushed_rev, verified_rev) 直接编码该不变式，堵『修完就当过』。E18-recon 覆盖『修订后重推→resume 回来』这条路径的重新钉定；E08 覆盖无 resume 的首次钉定，二者一致。optional 只表『无 resume 可跳过』，判据未放宽（守硬约束1）；跳过时 E08 的 fields_agree 已保证同一不变式。absent_ok 覆盖无推送 N/A。"
-  },
-  "E28": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "pipeline_status",
-    "min_count": 1
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "pipeline_status"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "pipeline_disposition",
-      "values": [
-       "recorded",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「状态已记录或已跳过」，输出「流水线当前状态，仅供参考」。散文『查一下它的健康状态并如实报出。纯参考、不拦流程 —— 它不作为本阶段的完成判据。没有流水线就跳过』。故运行时用 evidence(kind=pipeline_status) 强制留下一条状态行（比 attest 强）；『或已跳过』由 optional/skip 机制处理，不靠放宽判据。pipeline_status 为新 kind。"
-  },
-  "E29": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "cr_terminal",
-    "values": [
-     "merged",
-     "manual_merge"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "cr_terminal",
-    "values": [
-     "merged",
-     "manual_merge"
-    ]
-   },
-   "reason": "完成标准「评审到达合入，或已明确移交给人工合并」，输出「合入 / 等待人工合并 的终态跟踪」。散文『这一步跟踪到评审真正合入（或明确移交给人去合）为止。别在评审还开着的时候就替它宣布已合入 —— 那又回到了「把未完成当完成」的老问题上』。故 evidence_in 只允许两个真正终态 merged / manual_merge，**刻意不含 open/仍在跟踪**，从判据上挡住『评审还开着就宣布已合』。flow gate=none 故不能用 gate_recorded。cr_terminal 为新 kind（与 analyzer_terminal 的『外部检查终态』、task_state 的『外部任务状态』语义都不同，另起以免串线）。"
-  },
-  "R01": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "revision_scope"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "revision_scope"
-   },
-   "reason": "散文完成标准：「每条要处理的意见都对应到了具体文件、具体行、具体诉求」，输出是「一条明确的失败描述（什么失败了 / 在哪 / 原文是什么）」。这是一份定位描述，无固定期望值可对，故 T1 evidence 强制留下可审计的 scope 记录（含散文要求的「按哪条规则判的痕迹」用于 noise-vs-signal 分类）。比 T0 强：可事后核查每条意见的落点。"
-  },
-  "R02": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "change_file"
-   },
-   "reason": "散文完成标准：「意见指向的问题已被针对性修掉，未牵连无关代码」，输出是「针对该条目的最小改动……只动这一条意见涉及的行」。修改产生被改动的文件——复用共享 kind change_file（一行一个被改动文件路径），既留下可审计的改动记录，又保证 R08/观察阶段重跑时爆炸半径分析的 change-set 不惰性化。"
-  },
-  "R03": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "revision_recheck"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "revision_recheck"
-     },
-     {
-      "type": "evidence_equals",
-      "kind": "compile_result",
-      "value": "pass"
-     }
-    ]
-   },
-   "reason": "散文完成标准：「改动能编译、diff 只含预期内容」，输出是「编译通过 + 一次针对性的影响面确认」。「diff 只含预期内容」是一个判断而非可对齐的期望值，故 T1：强制记录一次轻量复核结论（编译结果 + 影响面确认），对应散文「最容易在这里翻车的是『修 A 的时候顺手碰了 B』」。"
-  },
-  "R04": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "revision_decision",
-    "values": [
-     "auto_cleared",
-     "human_confirmed"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "revision_decision",
-    "values": [
-     "auto_cleared",
-     "human_confirmed"
-    ]
-   },
-   "reason": "散文完成标准：「自动可放行类已确认，或需人决策类已获回复」，输出是「是否继续推送的决定」。这是一个裁决（枚举），故用 evidence_in 并列出允许值：auto_cleared（纯机械低风险自动放行）/ human_confirmed（需人拍板已获回复）。用专门 kind revision_decision 而非共享通用 kind decision，避免 evidence_in「取最新一条」语义被其它步骤写入的 decision 串号。注意：flow.yaml 里本步 gate=none，故不能用 gate_recorded（硬约束 3），见 notes。"
-  },
-  "R05": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "commit_sha"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "commit_sha"
-     },
-     {
-      "type": "evidence_equals",
-      "kind": "commit_count",
-      "value": "1"
-     }
-    ]
-   },
-   "reason": "散文完成标准：「改动已并入原提交，历史保持单条」，输出是「一个仍然单一的提交」。产出一个提交——复用共享 kind commit_sha 留下提交标识。「历史保持单条」是历史形态判断、无固定期望值可 equals，故 T1 evidence 记录 amend 后的 sha 供核查。"
-  },
-  "R06": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "pushed_rev"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "pushed_rev"
-     },
-     {
-      "type": "evidence",
-      "kind": "analysis_wait_restarted"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "cr_description_refresh",
-      "values": [
-       "refreshed",
-       "warned"
-      ]
-     }
-    ]
-   },
-   "reason": "散文完成标准：「新版已推、且描述已随之刷新、等待已重启」，输出是「新一版已推送到评审系统」。复用共享 kind pushed_rev（最新推送的修订）。散文点名本层最典型假执行：「推送后只打一行字说『回到观察阶段』，却没有任何真实推送动作——没有工具证据的『已推送』就是假执行」——T1 evidence 正是强制这条工具证据，把「已推送」从口头声明变成可审计记录。"
-  },
-  "R07": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "failure_summary"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "failure_summary"
-   },
-   "reason": "散文完成标准：「生成了可交接的失败记录，循环停止」，输出是「一份失败总结 + 转入自动调查支线」。产出一份可交接失败记录，故 T1 evidence 强制落下 failure_summary 内容行（对应散文「把已经试过什么、每次为什么没成、现在卡在哪，整理成一份可交接的记录」）。optional：仅在迭代预算耗尽时触发。"
-  },
-  "R08": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "live_spec": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "reason": "散文完成标准：「新版号已登记，且已对新版重新走完观察阶段的检查」，失败时「漏记新版号 → 完成检查会放行一个『没重新验过的版本』」。这正是共享表点名的 pushed_rev/verified_rev 不变式「二者必须相等」：fields_agree 断言最新推送版 == 最新已验证版，防止散文所述「系统会误以为旧版的验证结果还算数，放行一个其实没重新检查过的版本」。完全可检（T2），无法用声明伪造。"
-  },
-  "R15": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "analyzer_terminal",
-    "values": [
-     "all-pass"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "analyzer_terminal",
-    "values": [
-     "all-pass"
-    ]
-   },
-   "reason": "散文完成标准：「所有意见已解决且外部检查确认全绿」，且散文强调时机「这个打分……在最后一轮回到观察阶段并确认全绿之后才发」。本步唯一可机器化的核心断言是「外部检查全绿」——用 evidence_in 对共享 kind analyzer_terminal（外部检查的终态）判定其终态为绿。这比记录输出 kind layer_summary（只证『打分存在』，T1）更贴合完成标准。⚠️ 绿态取值 all-pass 是按 asis 惯例的假设，须与观察阶段实际写入的 analyzer_terminal 干净终态 token 对齐，见 notes。"
-  },
-  "R09": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "failure_trace",
-    "min_count": 3
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "failure_trace",
-    "min_count": 3
-   },
-   "reason": "散文完成标准：「三次尝试的过程都被记录下来」，输出是「完整的失败轨迹（每次迭代改了什么、检查怎么报的）」。用 evidence + min_count:3 把散文的「三次」量化为「至少 3 条 failure_trace 证据行」（每次迭代一条：改动 + 外部检查原文反馈 + 判失败理由）。min_count=3 与默认迭代预算 3 耦合，见 notes。"
-  },
-  "R10": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "investigation_plan"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "investigation_plan"
-   },
-   "reason": "散文完成标准：「文档写清了现象、已排除项、待查方向」，输出是「一份结构化的调查计划文档」。产出一份文档——T1 evidence 记录 investigation_plan 文档路径/内容，可事后核查是否写清了散文要求的三要素（现象 / 已排除 / 待查）。"
-  },
-  "R11": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "investigation_task"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "investigation_task"
-     },
-     {
-      "type": "evidence",
-      "kind": "investigation_plan_link"
-     }
-    ]
-   },
-   "reason": "散文完成标准：「任务已建、且关联了调查计划」，输出是「任务系统里的一条调查任务」。T1 evidence 记录 investigation_task（任务 id/链接），对应散文「让这件事进入正式的待办轨道，而不是停在一次聊天记录里」。"
-  },
-  "R12": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "original_task_comment"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "original_task_comment"
-   },
-   "reason": "散文完成标准：「原任务能追溯到为什么停、去哪看后续」，输出是「原任务上的一条说明 + 指向调查任务的链接」。T1 evidence 记录回写内容行，保证散文要求的「两条线索能互相追溯」可核查。"
-  },
-  "R13": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "worktree_state",
-    "values": [
-     "preserved",
-     "archived"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "worktree_state",
-    "values": [
-     "preserved",
-     "archived"
-    ]
-   },
-   "reason": "散文完成标准：「工作区不留下会误导下一次的残留」，输出明确是一个枚举状态：「一个明确的工作区状态（保留改动 / 归档）」。输出是枚举/裁决 → evidence_in 列允许值 preserved / archived（T2），比只记录「处理过了」更强：强制落到两个明确终态之一，对应散文「把当前工作区处理成一个明确、干净的状态」。"
-  },
-  "R14": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "final_report"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "final_report"
-   },
-   "reason": "散文完成标准：「人能据此判断下一步怎么走」，输出是「一份面向人的失败总结」。终点是一份面向人的报告，故 T1 evidence 记录 final_report（散文：「卡在哪、已交接到哪条调查任务、需要人做什么决定」）。这是需人阅读判断的产物，无机器可判的期望值，T1 已是最强可机器化形态。"
-  },
-  "R16": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "live_spec": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "reason": "散文完成标准：「已重基到最新主线、新版已推并重新验证、独立计数已归零」，输出是「重基后的新版 + 对新版重新对齐的完成不变量」。散文点名「重基换了底座，旧底座上的验证全部失效，必须重跑全量验证」「不要假设『重基完就全绿』」——核心可检不变式就是 pushed_rev/verified_rev 必须相等（新版已推且已对新版重新验证）。fields_agree 断言二者相等（T2），无法伪造。独立支线，不占迭代预算，见 notes。"
-  },
-  "E09g": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "gate_recorded"
-   },
-   "reason": "完成标准原文「入口门决定已记录，且记录动作被允许通过」，正是 gate_recorded 的语义。散文「这是进入收尾的门，也是本阶段第一个不可逆转换的入口」「背书不允许降级：没有真实的人类确认就直接拒」「背书机制会检查距上道门后有没有新的人类发言」。flow.yaml gate=`preauth:cleanup_entry_auto`（≠none），故 gate_recorded 合法（约束3）。"
-  },
-  "E09g-pre": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "live_spec": {
-    "type": "fields_agree",
-    "kind_a": "pushed_rev",
-    "kind_b": "verified_rev"
-   },
-   "reason": "完成标准「评审已合入、静态分析器全部到终态；或本次无评审可豁免」。散文「进收尾前自动核对一件事：这次评审是否真的已合入」「哪怕有人明确说『已经合了』，仍必须亲自去查评审状态」。词表无 merge-state kind，最强可检代理是共享不变式 pushed_rev==verified_rev（=最新推送修订已被验为终态干净，与 E13 ①同源）。本步 optional：无评审的本地交付由 skip 处理豁免（约束6），故不加 absent_ok 放宽。"
-  },
-  "E10": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_equals",
-    "kind": "task_state",
-    "value": "closed"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence_equals",
-      "kind": "task_state",
-      "value": "closed"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "close_writeback",
-      "values": [
-       "written",
-       "not_applicable"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "close_writeback",
-      "claims": [
-       "written"
-      ],
-      "disproved_when": {
-       "all_of": [
-        {
-         "fact": "shipped_block_present",
-         "equals": false
-        },
-        {
-         "fact": "history_record_exists",
-         "equals": false
-        }
-       ]
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "close_writeback",
-      "claims": [
-       "not_applicable"
-      ],
-      "disproved_when": {
-       "fact": "plan_doc_found",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "完成标准「任务状态已更新为关闭，评论已附上」。散文「在任务系统里把这条任务标记为关闭」。共享 kind task_state（cleanup 层）最新值须精确等于关闭态。无关联任务由 skip 处理。\n[2026-09-02 升级] 拆成两半，因为两半的可核实性不对等。任务系统那侧**刻意不核**：读它只有 MCP 一条路，而 provider 是子进程调不到 —— 编一个看起来在核的事实比不核更糟（schema 里合理、输出里不可证伪），强制来自 E21 gate 上的 task_close guard。可核的那半是收口写回留下的两处痕迹（## Shipped 块 + history-log 记录），所以「跑过了」不必靠自陈。"
-  },
-  "E11": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "shipped_section"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "shipped_section"
-   },
-   "reason": "完成标准「已交付段落写入，且哈希标注诚实」。散文「给方案文档追加『已交付』段」。哈希诚实（pre-merge 标注）无法机器校验，故 T1。刻意不复用共享 plan_doc——plan_doc 是「跨层引用」在 context 层就已记录，用它会被那条旧行造成假阳性；改用本步专属 kind shipped_section 绑定 E11 自己的写入动作。"
-  },
-  "E12": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "history_log"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "history_log"
-   },
-   "reason": "完成标准「记录按既定结构写入」。散文「按既定结构把这次会话的经过落一条盘：改动、波折、结论」。是留下可审计的一条结构化历史行，但结构完整性本身不可机检，故 T1。"
-  },
-  "E14": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "kb_entry"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "kb_entry"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "kb_disposition",
-      "values": [
-       "written",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「已确认写入，或显式记录跳过」。散文「整理值得沉淀的知识、经人确认后写入知识库」「跳过时必须显式记一行（如『⏭️ [E14] 不适用』），不能静默略过」。flow.yaml gate=none，故不能用 gate_recorded（约束3）；『经确认』这部分无引擎门支撑，只能 T1 记录写入/跳过行。optional 不放宽：可选=可不跑，跑了仍须留行。"
-  },
-  "E15": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "platform_quirk"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "platform_quirk"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "quirk_proposal",
-      "values": [
-       "proposed",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「已提议或显式跳过」。散文「若踩到平台差异……提议补进平台特性清单；无则显式跳过」。提议类产物只能留一条可审计行，T1。"
-  },
-  "E16": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "memory_sweep"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "memory_sweep"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "sweep_disposition",
-      "values": [
-       "proposed",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「已提议或显式跳过」。散文「用记忆库的过期/缺口/健康度数据判断是否值得清扫僵死条目……无必要则显式跳过」。散文并强调『热点记忆的重算已在前面阶段确定性完成，这里不要再手写那份文件』——故本步只记一条提议/跳过行，T1。"
-  },
-  "E17": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "failure_analysis"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "failure_analysis"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "analysis_disposition",
-      "values": [
-       "proposed",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「已提议或显式跳过」。散文「若距上次失败分析已够久、且累积问题数够多，提议做一次分析；条件不满足则显式跳过」。提议/跳过，T1。"
-  },
-  "E26": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "changelog_entry"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "changelog_entry"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "changelog_disposition",
-      "values": [
-       "written",
-       "skipped"
-      ]
-     }
-    ]
-   },
-   "reason": "完成标准「已写入或显式跳过」。散文「若改动落在需维护变更日志的范围内，起草一条、经确认后写入；未命中则显式跳过」。flow gate=none，『经确认』不可门控，T1 记录写入/跳过行。"
-  },
-  "E19": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "session_metrics"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "session_metrics"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "metrics_source",
-      "values": [
-       "runtime",
-       "own_account"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "metrics_source",
-      "claims": [
-       "runtime"
-      ],
-      "disproved_when": {
-       "fact": "metrics_available",
-       "equals": false
-      }
-     },
-     {
-      "type": "evidence_in",
-      "kind": "session_verdict",
-      "values": [
-       "green",
-       "yellow",
-       "red"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "session_verdict",
-      "claims": [
-       "green",
-       "yellow",
-       "red"
-      ],
-      "disproved_when": {
-       "fact": "slo_readable",
-       "equals": ""
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "session_verdict",
-      "claims": [
-       "green"
-      ],
-      "disproved_when": {
-       "fact": "error_violation_count",
-       "count_gte": 3
-      }
-     }
-    ]
-   },
-   "reason": "完成标准「指标已汇总」。散文「把本次指标汇到一起：走了哪些层与步、耗时、改了几个文件、评审链接。是给人看清全貌，不是评分」。汇总对象是一份指标产物，T1。散文『数据不全→据实写不全，别补零』说明不宜对具体值做等值检查。\n[2026-09-01 升级] 散文的完成标准是「指标已汇总」，原判据只要求有这么一行 —— 一份没人产出过的数字与一份如实抄下来的因此不可区分。运行时自己的记录可以独立算出 turns/calls/credits，所以「这些数字来自运行时」这句声称要经它核对；读不到时的诚实出口是 own_account。\n[2026-09-02 升级] 增记 session_verdict，但**刻意不要求一个合成分数**。上游声明（loop agents/quality-slo.yaml）把质量分定义为五个加权维度，而实测只有两个的输入是本引擎真正拥有的：completeness（passed/total steps）与 correctness（error/warning violations），合计 0.6。efficiency 0.2 与 cost 0.1 依赖 duration/cost 的 p50/p95，而声明里**七层全部**status: placeholder；adherence 0.1 的 note 明写「MVP: assume 1.0 for both」。把这 0.4 折进一个数字，就得到一个读起来像实测、而近一半是替身的 figure，且折算后替身不可见。所以只核两件事：任何裁决都要求读到过声明的门槛（slo_readable 非空），以及 green 由声明自己判为 critical 的情形（error_violations > 2）反驳。"
-  },
-  "E20": {
-   "tier_at_derivation": "T2",
-   "spec_at_derivation": {
-    "type": "evidence_in",
-    "kind": "close_branch",
-    "values": [
-     "auto_close",
-     "needs_human"
-    ]
-   },
-   "live_spec": {
-    "type": "evidence_in",
-    "kind": "close_branch",
-    "values": [
-     "auto_close",
-     "needs_human"
-    ]
-   },
-   "reason": "完成标准「走『自动关闭』还是『需人决定』的判定」，输出是一个枚举裁决→按指引用 evidence_in 并列允许值。散文「判断能否自动关闭……还是需人拍板。状态含糊时保守选『问人』」。最新 close_branch 值须∈两个分支枚举，T2。"
-  },
-  "E21": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "gate_recorded"
-   },
-   "live_spec": {
-    "type": "gate_recorded"
-   },
-   "reason": "完成标准「关闭决定已记录，且记录动作被允许」＝gate_recorded。散文「这是关会话的门……是不可逆动作、同样不允许降级」「关单前必须有真实的人类确认：不接受自问自答」「记录证据要写人的原话」。flow.yaml gate=`affirm`（≠none），gate_recorded 合法（约束3）。"
-  },
-  "E23": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "plan_metrics"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "plan_metrics"
-   },
-   "reason": "完成标准「指标已追加（仅关闭分支执行）」。散文「仅在走了关闭分支时执行：把最终指标追加进方案文档留档」。追加动作只能 T1 留行；用专属 kind plan_metrics 绑定本步（不复用 plan_doc/session_metrics 以免跨步假阳性）。N 分支由 skip 处理。"
-  },
-  "E24": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "final_summary"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "final_summary"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "score_persistence",
-      "values": [
-       "persisted",
-       "warned"
-      ]
-     },
-     {
-      "type": "evidence_in",
-      "kind": "fleet_report",
-      "values": [
-       "sent",
-       "unreachable",
-       "not_applicable"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "fleet_report",
-      "claims": [
-       "sent"
-      ],
-      "disproved_when": {
-       "fact": "fleet_event_count",
-       "count_lte": 0
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "fleet_report",
-      "claims": [
-       "unreachable"
-      ],
-      "disproved_when": {
-       "fact": "fleet_reachable",
-       "equals": true
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "fleet_report",
-      "claims": [
-       "not_applicable"
-      ],
-      "disproved_when": {
-       "fact": "fleet_applicable",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "完成标准原文「分数已落库，小结已给出」有两件产物，但散文失败条款明确『写分失败（会话缺数据）只记 warning、不阻断收口——分数缺失是审计信号，不是收口的拦路石』。若把完成绑到『分数落库』并纳入 goal，会让写分失败反而挡死收口，直接违背该条款。故完成绑定恒产出的『最终小结』（散文『写完再给最终小结：耗时、方案文档、评审/任务链接、知识写入数、会话得分』）；分数落库为尽力而为、不作硬门。T1。\n[2026-09-02 升级] 增记 fleet_report，且三个合法值各有一个派生事实能反驳它 —— sent 由协调方的到达计数反驳，unreachable 由「它其实答得上来」反驳，not_applicable 由「C01 记的是真任务 id」反驳。只核对 sent 会把另两个变成免费出口，而参照系统正是在那里累计了 162 次强制确认。"
-  },
-  "E25": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "no_open_violations"
-   },
-   "live_spec": {
-    "type": "no_open_violations"
-   },
-   "reason": "本步是全流程终点（会话置终态、结束）——按要点3判据应最强。完成标准「会话已关闭为『已交付』」。散文「退出会被若干完成守卫把关……任一命中都拒绝退出」「逃生口是给已知误判用的，不是给懒得补齐用的」。用 no_open_violations 断言整个 run 无任何 violation 才允许置终态，完全由引擎状态派生、不可伪造，T3。"
-  },
-  "E13": {
-   "tier_at_derivation": "T3",
-   "spec_at_derivation": {
-    "type": "phases_summarized"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "phases_summarized"
-     },
-     {
-      "type": "evidence",
-      "kind": "pre_exit_verdict",
-      "min_count": 4
-     }
-    ]
-   },
-   "reason": "完成标准「4 项 pre-exit 谓词全部为真」。词表无法把 4 路 AND 塞进单条 spec，故取其中最强且最贴合的谓词②：散文『所有收尾前的必需层都有分层小结（结构性挡住漏 emit 某层小结就宣布完成，尤其被截断的观察层）』——正是 phases_summarized。因该谓词自动排除本步所在 phase（cleanup），它恰好检查『所有收尾前 phase 都有 summary』，与②字面一致。其余三项分散承载：①（最新推送修订分析器已验终态干净）由 E09g-pre 的 fields_agree(pushed_rev,verified_rev) 表达；③（关单门已过+任务已关闭）由 E21 gate_recorded + E10 task_state=closed 表达；④（必需收尾步已过）由本 phase goal 的 all_of 表达。T3。"
-  },
-  "E22a": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "close_cleanup"
-   },
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence",
-      "kind": "close_cleanup"
-     },
-     {
-      "type": "evidence_in",
-      "kind": "worktree_disposition",
-      "values": [
-       "removed",
-       "kept_review_open",
-       "kept_dirty",
-       "no_worktree"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "worktree_disposition",
-      "claims": [
-       "no_worktree"
-      ],
-      "disproved_when": {
-       "fact": "own_worktree_exists",
-       "equals": true
-      }
-     },
-     {
-      "type": "evidence_in",
-      "kind": "plan_disposition",
-      "values": [
-       "filed",
-       "kept_open",
-       "no_plan_doc"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "plan_disposition",
-      "claims": [
-       "filed"
-      ],
-      "disproved_when": {
-       "fact": "plan_doc_dir",
-       "in": [
-        "pending",
-        "pushed",
-        "in-progress"
-       ]
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "plan_disposition",
-      "claims": [
-       "kept_open"
-      ],
-      "disproved_when": {
-       "fact": "plan_doc_dir",
-       "in": [
-        "done",
-        "shipped"
-       ]
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "plan_disposition",
-      "claims": [
-       "no_plan_doc"
-      ],
-      "disproved_when": {
-       "fact": "plan_doc_found",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "完成标准「文档已归位，工作树按策略处理完毕」。散文「人选择关闭时走这条：方案状态转『完成』、文档移入完成区……在这里按配置条件拆除」，且『工作树里若有未提交改动，脚本会拒绝删除……那是预期结果，不是失败』。收口动作只能 T1 留一条 close_cleanup 行。与 E22b 互斥（见 goal 的 any_of 组）。\n[2026-09-02 升级] no_worktree 这句声称经 own_worktree_exists 反驳，按 run id 匹配而非全局计数 —— 别的 session 的工作树说明不了这一个。\n[2026-09-02 升级] 增记 plan_disposition，三个取值各有反驳事实（filed / kept_open / no_plan_doc）。与工作树同一形态：agent 跑写回脚本，引擎只读核实，脚本不复制。关键实现细节：按 slug 解析而非按早先记下的路径 —— 收口的全部意义就是那个文件被移走了，读记录的路径要么找不到（把成功报成失败）、要么还在原处（把没发生的移动报成成功）。目录即状态这个不变量在真实语料上 405/406 成立。"
-  },
-  "E22b": {
-   "tier_at_derivation": "T1",
-   "spec_at_derivation": {
-    "type": "evidence",
-    "kind": "deferred_close"
-   },
-   "live_spec": {
-    "type": "evidence",
-    "kind": "deferred_close"
-   },
-   "reason": "完成标准「已给出稍后如何关闭的提示」。散文「人选择暂不关闭时走这条：不动文档、不归档，给出『稍后用某命令再关』的提示即可」，并「E22a 与 E22b 二选一、只走一个」。T1 记录延后关闭提示行。与 E22a 互斥。"
-  },
-  "C02b": {
-   "phase": "context",
-   "spec_at_derivation": "layers/1-context.md「Worktree provisioning（conditional — worktree_isolation=true 时在此发生）」一节，含 _provision_worktree 的 docstring 原文与 agent 侧三条后果。",
-   "live_spec": {
-    "type": "all_checks",
-    "checks": [
-     {
-      "type": "evidence_in",
-      "kind": "worktree_mode",
-      "values": [
-       "isolated",
-       "shared_declared"
-      ]
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "worktree_mode",
-      "claims": [
-       "isolated"
-      ],
-      "disproved_when": {
-       "fact": "in_linked_worktree",
-       "equals": false
-      }
-     },
-     {
-      "type": "claim_corroborated",
-      "kind": "worktree_mode",
-      "claims": [
-       "shared_declared"
-      ],
-      "disproved_when": {
-       "fact": "isolation_declared",
-       "equals": true
-      }
-     }
-    ]
-   },
-   "reason": "源文把这一步要消除的失效模式写成可引用的一句：provisioning「FAILS HARD on error rather than falling back to the shared tree. A silent fallback would hand back exactly the shared-working-tree behaviour the caller asked to be isolated FROM, while reporting success」。一句没人核对的「已隔离」就是同一个退回上移一层，所以两个取值各有反驳事实：isolated 由「这个目录不是链接工作树」反驳（链接工作树的 .git 是文件，源检出是目录），shared_declared 由方案文档声明的 worktree_isolation 反驳。引擎只做只读核实，效果由 agent 跑脚本完成 —— 这是 C3 类的形态。"
-  }
- }
 }

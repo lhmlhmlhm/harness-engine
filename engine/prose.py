@@ -216,3 +216,29 @@ def coverage(flow) -> dict:
         "own_section": own_anchor,
         "topics_cited": len(flow.all_cited_topics()),
     }
+
+def dangling_topics(flow) -> list:
+    """Inline topic references in prose BODIES that resolve to no file.
+
+    The declared side (`topics:` on a step) was already checked and was already clean. This reads the
+    other side — the pointers written INTO the prose — because those are the ones a driver actually
+    follows mid-step, and a pointer to nothing sends it looking elsewhere.
+
+    Returns (path, lineno, name) for each dangling reference, in file order. Empty means every
+    pointer resolves.
+    """
+    if flow.prose_root is None or not flow.prose_root.is_dir():
+        return []
+    pat = re.compile(flow.topic_ref_pattern)
+    out = []
+    for path in sorted(flow.prose_root.glob("*.md")):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for lineno, line in enumerate(lines, 1):
+            for m in pat.finditer(line):
+                name = m.group("name")
+                if not flow.topic_path(name).is_file():
+                    out.append((path, lineno, name))
+    return out

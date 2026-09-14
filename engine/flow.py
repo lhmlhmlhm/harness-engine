@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -261,6 +262,11 @@ class Step:
     # the engine and returned. NOT a criterion — see engine/outputs.py for why a channel whose
     # content comes from the driver must never be able to satisfy one.
     output: dict | None = None
+    # WHO PRODUCES THIS STEP'S EFFECT, when the effect is one the engine refuses to perform.
+    # A pointer and nothing else: the tool's own header is the single source of truth for how to
+    # call it, and a copy of its argument shape in here would drift the first time a flag moved.
+    # Absent producers are reported by `validate`, never fatal at load — see this module's header.
+    produced_by: str | None = None
     # A step that may legitimately run more than once — a fix/re-check cycle.
     repeatable: bool = False
     # How many attempts the budget allows. 0 = unlimited.
@@ -375,6 +381,10 @@ class Flow:
     prose_root: Path | None
     topics_dir: str
     anchor_pattern: str
+    # How a prose BODY spells an inline reference to a topic. Declared rather than known, for the
+    # same reason `anchor_pattern` is: the engine must not own one project's punctuation. Must
+    # capture a group named `name`.
+    topic_ref_pattern: str
     phase_goals: dict    # phase id -> completion spec that ACCEPTS the phase (may be absent)
     phase_guides: dict   # phase id -> guide pointer
     stage_guides: dict   # (phase id, stage id) -> guide pointer
@@ -567,6 +577,7 @@ class Flow:
 # another appends a duplicate registration without a uniqueness check. Cheap to
 # prevent here, expensive to debug later.
 STEP_KEYS = {"variants", "id", "phase", "stage", "title", "deps", "gate", "completion", "directive",
+             "produced_by",
              "output",
              "autonomy", "optional", "strict_witness", "guide", "topics",
              "repeatable", "budget"}
@@ -574,7 +585,13 @@ TOP_KEYS = {"role", "when", "uses", "scope_match", "requires", "variants", "vers
             "config", "exclusive_groups", "prose", "facts", "hooks"}
 PHASE_KEYS = {"id", "title", "stages", "guide", "goal"}
 STAGE_KEYS = {"id", "guide"}
-PROSE_KEYS = {"root", "topics_dir", "anchor_pattern"}
+PROSE_KEYS = {"root", "topics_dir", "anchor_pattern", "topic_ref_pattern"}
+# Fields that address a READER and constrain nothing. Stripped before the digest is taken, so an
+# open run is not told "step semantics may have moved" because a sentence was reworded. Everything
+# not named here IS hashed — the list says what to EXCLUDE on purpose: an include-list would stop
+# covering any key added later, which is exactly how a real change slips past a check that looks
+# like it is watching.
+DIGEST_PROSE_FIELDS = {"title", "when", "directive"}
 FACTS_KEYS = {"provider", "providers"}
 VARIANT_KEYS = {"values", "default", "fact"}
 # HOW A RUN MAY END. Same shape as `variants` on purpose — values plus an explicit default —
@@ -741,11 +758,11 @@ def load(ability: str) -> Flow:
         )
     load_extensions(ability)
     raw_text = path.read_text(encoding="utf-8")
-    digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:16]
     try:
         raw = yaml.safe_load(raw_text) or {}
     except yaml.YAMLError as exc:
         raise FlowError(f"{path}: not valid YAML — {exc}") from None
+    digest = _digest(raw)
     return _build(ability, raw, digest, path)
 
 
@@ -778,6 +795,36 @@ def _resolve_completion(spec: dict, where: str, ability: str,
         if isinstance(sub, dict) and "type" in sub:
             _resolve_completion(sub, f"{where} checks[{i}]", ability, requires, predicates)
     return kind
+
+
+def _digest(raw) -> str:
+    """A fingerprint of what this spec ENFORCES.
+
+    Taken over the parsed structure with `DIGEST_PROSE_FIELDS` removed at every depth, so that
+    reformatting, a comment, or a reworded directive does not tell an open run its criteria moved —
+    while a changed `completion`, `deps`, `gate`, `guards` or goal still does.
+
+    Keys are sorted so an author reordering a mapping does not read as a change either. Reordering a
+    LIST is preserved, because `steps:` order is the declared order and `exclusive_groups` entries
+    are sets whose membership matters.
+    """
+    def strip(node):
+        if isinstance(node, dict):
+            # Sorted and compared as STRINGS, and serialised with `default=str`, because this runs
+            # BEFORE the spec is validated and therefore must never raise on a malformed one. A
+            # reserved YAML key is the concrete case: `on:` parses to the boolean True, and sorting
+            # a mapping that mixes True with str keys is a TypeError — which would surface as a
+            # crash (exit 5) where the author needs a legible refusal (exit 2). There is a test
+            # pinning exactly that, and it caught this.
+            return {str(k): strip(v) for k, v in sorted(node.items(), key=lambda kv: str(kv[0]))
+                    if str(k) not in DIGEST_PROSE_FIELDS}
+        if isinstance(node, list):
+            return [strip(x) for x in node]
+        return node
+
+    canon = json.dumps(strip(raw), sort_keys=False, ensure_ascii=False,
+                       separators=(",", ":"), default=str)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
 
 def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
@@ -1069,6 +1116,17 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             if cap is not None:
                 output["max_bytes"] = int(cap)
 
+        prod_raw = s.get("produced_by")
+        produced_by = None
+        if prod_raw is not None:
+            if not isinstance(prod_raw, str) or not prod_raw.strip():
+                raise FlowError(
+                    f"{path}: step '{sid}' has 'produced_by' that is not a non-empty string.\n"
+                    f"  It names the tool that produces this step's effect — one path, nothing "
+                    f"else. How to call it belongs in that tool's own header, not here."
+                )
+            produced_by = prod_raw.strip()
+
         topics_raw = s.get("topics") or []
         if not isinstance(topics_raw, list):
             raise FlowError(f"{path}: step '{sid}' has 'topics' that is not a list")
@@ -1092,6 +1150,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             guide=guide,
             topics=topics,
             output=output,
+            produced_by=produced_by,
             optional=optional,
             strict_witness=strict,
         )
@@ -1299,6 +1358,18 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             )
     topics_dir = str(prose_raw.get("topics_dir", "topics"))
     anchor_pattern = str(prose_raw.get("anchor_pattern", r"^#{1,6}\s.*\b{step_id}\b"))
+    topic_ref_pattern = str(prose_raw.get("topic_ref_pattern",
+                                         r"topic\s+`(?P<name>[A-Za-z0-9][\w-]*)`"))
+    if "(?P<name>" not in topic_ref_pattern:
+        raise FlowError(
+            f"{path}: prose.topic_ref_pattern must capture a group named 'name' — that group is "
+            f"what names the topic being pointed at.\n"
+            f"  got: {topic_ref_pattern}"
+        )
+    try:
+        re.compile(topic_ref_pattern)
+    except re.error as exc:
+        raise FlowError(f"{path}: prose.topic_ref_pattern is not a valid regex: {exc}") from exc
     if "{step_id}" not in anchor_pattern:
         raise FlowError(
             f"{path}: prose.anchor_pattern must contain the placeholder '{{step_id}}' — "
@@ -1454,6 +1525,7 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
         prose_root=prose_root,
         topics_dir=topics_dir,
         anchor_pattern=anchor_pattern,
+        topic_ref_pattern=topic_ref_pattern,
         phase_goals=phase_goals,
         phase_guides=phase_guides,
         stage_guides=stage_guides,
@@ -1498,6 +1570,10 @@ ENGINE_CAPABILITIES: dict = {
     # actually means, and a detector that cannot tell DECLARED from DEFAULTED makes the
     # whole cross-check demand a declaration for something nobody opted into.
     "facts": lambda f: bool(f.facts_schema),
+    # A flow whose steps point at the tools that produce their effects. Detected from the steps
+    # rather than from a top-level block, because the pointer belongs to the step that owes the
+    # effect — and `uses:` then makes the declaration bidirectional like every other capability.
+    "producers": lambda f: any(st.produced_by for st in f.steps.values()),
     "variants": lambda f: bool(f.variant_spec),
     "hooks": lambda f: bool(f.hooks),
     "obligations": lambda f: any(h.obligation for h in f.hooks),

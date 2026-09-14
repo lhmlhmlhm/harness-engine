@@ -22,7 +22,7 @@ results:
 # 这条 flow 依赖的引擎机制。加载期与 flow 实际做的事**双向核对**：
 # 声明了没用 -> 拒；用了没声明 -> 拒。它不是开关（可关掉的强制不是强制），
 # 而是这条 flow 的表面 + 一份会指名缺了什么的引擎版本契约。
-uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, repeatable, results, stages]
+uses: [exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, producers, prose, repeatable, results, stages]
 
 when: |
   任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（102 步），
@@ -466,12 +466,19 @@ steps:
         fact: hot_banner_readable
         equals: true
 - id: C01
+  # 隔离工作树由这个工具开出来，引擎只事后只读核实。指针而已：怎么调用看它自己的文件头。
+  produced_by: ~/.kiro/skills/ship-check/scripts/worktree-setup.sh
   phase: context
+  topics:
+  - worktree-isolation
   stage: resume
   title: Plan doc lifecycle transition
   directive: |
     产出：方案文档状态从「已排期」迁到「进行中」，并移动到对应目录
     完成：找到方案文档并完成状态迁移
+    方案声明了工作区隔离时：还要开出隔离工作树，并把工具打印的 WORKTREE_PATH= 记成
+          evidence kind=worktree_path。不记的话 C02b 核实的是 scope 而不是你真正工作的
+          目录 —— 一件做对了的事会被判成错的
   optional: true
   completion:
     type: all_checks
@@ -502,8 +509,11 @@ steps:
   directive: |
     产出：本次 run 的工作树形态 —— 隔离到专属工作树，或按方案声明留在共享树
     完成：形态已记录，且与方案声明一致；隔离形态经只读 git 独立核实
+    隔离时：C01 必须已记下 worktree_path，否则核实的是 scope 而不是你真正工作的目录
     注意：不要 `git checkout -b` —— 隔离分支已存在且工作树已 checkout 在它上面，
           切分支反而破坏隔离
+  topics:
+  - worktree-isolation
   deps:
   - C01
   completion:
@@ -518,7 +528,18 @@ steps:
       values:
       - isolated
       - shared_declared
-    - type: claim_corroborated       # 说隔离了 -> 但这个目录不是链接工作树
+    - type: claim_corroborated       # 说隔离了 -> 但没说清是哪个目录
+      # 这一条先于下一条被读到才有意义：隔离时 run 并不在自己的 scope 里工作，而在一个
+      # 路径要等 C01 跑完才知道的工作树里。没有记下那个路径时，「不是链接工作树」这个
+      # 反驳其实是在说 scope，而不是在说这次工作 —— 于是一件做对了的事会被判成错的。
+      # 实测过一次：工作树真的存在、`.git` 真的是文件，而这一步照样拒绝。
+      kind: worktree_mode
+      claims:
+      - isolated
+      disproved_when:
+        fact: worktree_path_recorded
+        equals: false
+    - type: claim_corroborated       # 说隔离了 -> 那个目录不是链接工作树
       kind: worktree_mode
       claims:
       - isolated
@@ -2084,6 +2105,8 @@ steps:
       kind: pre_exit_verdict
       min_count: 4
 - id: E22a
+  # 拆除同样是效果：脚本会在评审仍活着或有未提交改动时拒绝删除，那是预期结果。
+  produced_by: ~/.kiro/skills/ship-check/scripts/worktree-teardown.sh
   phase: cleanup
   stage: close
   title: Y 分支完整 cleanup

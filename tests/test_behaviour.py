@@ -9182,3 +9182,215 @@ steps:
         assert fragment in out.stderr, out.stderr
     finally:
         _rm(d)
+
+
+# ══════════════════ a step may name the tool that produces its effect ══════════════════
+#
+# The engine had exactly one tool-declaration mechanism and it pointed the other way:
+# `requires={"cmd"/"file"}` on a provider says what the ENGINE needs in order to LOOK. Nothing said
+# what the AGENT must RUN — yet a whole class of steps demands an effect the engine deliberately
+# refuses to perform. `providers.py` says it outright: "The engine performs none of it. The agent
+# runs the tool." So the agent was told an effect was mandatory, told it would be independently
+# verified, and left to find the producer by grep. For a flow transcribed from a system that is
+# still installed, grepping finds that system — a whole second engine rather than one tool.
+
+
+def test_a_step_may_name_the_tool_that_produces_its_effect(env, tmp_path):
+    from engine import flow as flowmod
+    tool = tmp_path / "make-it.sh"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    d = _spec(env, "__prod__", f"""
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: {tool}
+""")
+    try:
+        f = flowmod.load("__prod__")
+        assert f.steps["A"].produced_by == str(tool)
+        # Detected as a capability, so `uses:` must declare it — the same bidirectional rule every
+        # other capability gets, rather than a key nothing cross-checks.
+        assert "producers" in flowmod.capabilities_used(f)
+    finally:
+        _rm(d)
+
+
+def test_a_producer_pointer_is_a_path_and_refuses_to_be_empty(env):
+    """A pointer, never an invocation: the tool's own header is how to call it.
+
+    A copy of its argument shape in the spec would drift the first time a flag was renamed, and the
+    reason this key exists is that a driver should not have to hunt for the producer. Handing it a
+    stale invocation is worse than handing it nothing.
+    """
+    from engine import flow as flowmod
+    d = _spec(env, "__prod2__", """
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: "   "
+""")
+    try:
+        with pytest.raises(flowmod.FlowError) as e:
+            flowmod.load("__prod2__")
+        assert "produced_by" in str(e.value)
+    finally:
+        _rm(d)
+
+
+def test_an_absent_producer_is_reported_by_validate_and_is_not_fatal(env):
+    """Load ACCEPTS a tool this machine lacks; `validate` is where absence gets named.
+
+    The same arrangement a provider's `requires` already has: one missing tool must not make a spec
+    unreadable on a machine that was only trying to read it. But "can this machine run this flow" is
+    a question asked BEFORE opening a run, and until this line existed the only way to answer it was
+    to walk the flow until something failed — by which point the failure reads as the flow's.
+    """
+    from engine import flow as flowmod
+    d = _spec(env, "__prod3__", """
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: ~/definitely/not/here/tool.sh
+""")
+    try:
+        flowmod.load("__prod3__")                     # readable
+        out = run(["validate", "__prod3__"], env).stdout
+        assert "producers: 1 declared, 1 absent" in out, out
+    finally:
+        _rm(d)
+
+
+# ══════════════════ a topic pointer written INTO prose must resolve ══════════════════
+#
+# Measured on the largest installed flow before this check existed: 16 topic names referenced inside
+# prose BODIES, 4 files, 12 dangling — while `validate` printed `topics cited 4`, because the
+# DECLARED side was the only side it read and the declared side was flawless. The tiering doctrine
+# ("fetch a topic only when you need it") is load-bearing precisely because a mature flow's guidance
+# cannot be preloaded, so a 75% dangling rate silently turns the on-demand tier into dead ends — and
+# a driver at a dead end goes looking somewhere else.
+
+
+def test_a_topic_referenced_in_prose_with_no_file_fails_validate(env):
+    from engine import flow as flowmod, prose as prosemod
+    d = _spec(env, "__topic__", """
+uses: [prose]
+prose:
+  root: prose/
+phases:
+  - id: p
+    guide: p.md
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        (d / "prose").mkdir(exist_ok=True)
+        (d / "prose" / "p.md").write_text(
+            "## Step: A\n\n照着做，理由见 topic `nowhere-to-be-found`。\n", encoding="utf-8")
+        f = flowmod.load("__topic__")
+        assert [n for _, _, n in prosemod.dangling_topics(f)] == ["nowhere-to-be-found"]
+        r = run(["validate", "__topic__"], env)
+        assert r.returncode == BAD_SPEC
+        assert "nowhere-to-be-found" in r.stdout
+    finally:
+        # rmtree rather than the usual `_rm`: this spec has a `prose/` subdirectory.
+        __import__("shutil").rmtree(d, ignore_errors=True)
+
+
+def test_the_prose_reference_spelling_is_declared_rather_than_known(env):
+    """``topic `x` `` is one project's punctuation, so the engine takes it as a DECLARATION.
+
+    The same treatment `anchor_pattern` already gets. The placeholder is checked because a pattern
+    with no `name` group would scan every file, capture nothing, and report that all pointers
+    resolve — a check that passes by finding nothing is the failure this whole area is about.
+    """
+    from engine import flow as flowmod
+    d = _spec(env, "__topic2__", """
+uses: [prose]
+prose:
+  root: prose/
+  topic_ref_pattern: 'see <<([a-z-]+)>>'
+phases:
+  - id: p
+    guide: p.md
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        (d / "prose").mkdir(exist_ok=True)
+        (d / "prose" / "p.md").write_text("## Step: A\n\nx\n", encoding="utf-8")
+        with pytest.raises(flowmod.FlowError) as e:
+            flowmod.load("__topic2__")
+        assert "name" in str(e.value)
+    finally:
+        # rmtree rather than the usual `_rm`: this spec has a `prose/` subdirectory, and `_rm`
+        # rmdir's a directory it expects to hold only flow.yaml.
+        __import__("shutil").rmtree(d, ignore_errors=True)
+
+
+# ══════════════════ the spec fingerprint means what its warning says ══════════════════
+
+
+def test_rewording_prose_does_not_tell_an_open_run_its_criteria_moved(env):
+    """The digest covers what ENFORCES, so "step semantics may have moved" is true when it fires.
+
+    It used to be `sha256` of the whole file. Editing one sentence of `when:` — a line addressed to a
+    reader, constraining nothing — flagged every open run with an assertion about its criteria. That
+    happened for real, during unrelated work. A warning that fires on cosmetics is read as noise, and
+    then the one that matters is read as noise too.
+    """
+    from engine import flow as flowmod
+    shape = """
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    title: %s
+    completion:
+      type: %s
+    directive: |
+      %s
+      done
+"""
+    d = _spec(env, "__dig__", shape % ("First", "attest", "do"))
+    try:
+        first = flowmod.load("__dig__").digest
+        _spec(env, "__dig__", shape % ("Renamed", "attest", "do it some other way"))
+        assert flowmod.load("__dig__").digest == first, "prose moved the fingerprint"
+        _spec(env, "__dig__", shape % ("First", "no_open_violations", "do"))
+        assert flowmod.load("__dig__").digest != first, "a criterion change did NOT move it"
+    finally:
+        _rm(d)
+
+
+def test_the_digest_survives_a_spec_it_cannot_understand(env):
+    """It is taken BEFORE validation, so a malformed spec must still get a legible refusal.
+
+    Concretely: `on:` parses to the boolean True under YAML 1.1, and sorting a mapping that mixes
+    True with str keys raises TypeError. That would surface as a crash where the author needs a
+    refusal — turning "your spec has a reserved key" into "the engine broke". An existing test pins
+    that exit code, and it is what caught this while the digest was being changed.
+    """
+    d = _spec(env, "__dig2__", """
+on: something
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        assert run(["validate", "__dig2__"], env).returncode == BAD_SPEC
+    finally:
+        _rm(d)

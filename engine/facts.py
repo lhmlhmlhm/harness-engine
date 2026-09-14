@@ -157,6 +157,17 @@ def capabilities(name: str) -> tuple:
     return tuple(_PROVIDERS[name]["requires"])
 
 
+def file_present(arg: str, base: Path) -> bool:
+    """Is this file there — asked exactly the way a `requires={"file": ...}` capability asks it.
+
+    Public so a step's `produced_by` pointer resolves by the SAME rule as a provider's declared
+    file: `~` expanded, absolute taken as given, relative read against the ability's own directory.
+    A second resolver would eventually disagree with this one, and the disagreement would surface as
+    "your tool is missing" on a machine where it is not.
+    """
+    return _probe("file", str(arg), base)
+
+
 def probe_capabilities(name: str) -> list:
     """Which of a provider's declared capabilities are ABSENT. Empty means all present."""
     entry = _PROVIDERS[name]
