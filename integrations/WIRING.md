@@ -97,6 +97,43 @@ harness brief | sed -n '/Tools the runtime hook must cover/,$p'
 
 ### 换一个 agent：不要重新发明契约
 
+### 一个配置里不该出现 checkout 的路径
+
+上面那个 `command` 里的路径能用，而它**每多一个 matcher、每多一个 agent 就多一份**。实测过一次：
+两个 agent 配置各写了 4 个 matcher 加 1 个 `resources` 条目，再加 shim 一处 —— **同一个目录名
+出现了 11 次**。每一处都是对的，而每一处只在那一台机器的那一个目录下是对的。
+
+代价不是「搬家麻烦」。**漏改一处的失效是静默的**：一个 `command` 解析不到的 hook 会什么都不跑、
+什么都不拦，而从外面看，那和「本来就没什么要拦」一模一样。
+
+所以让配置**一个路径都不写**：
+
+```jsonc
+{ "matcher": "shell", "command": "harness-hook", "timeout_ms": 8000 }
+```
+
+`harness-hook` 是 PATH 上的一个几行的包装，它问另一个包装「引擎在哪」，后者读**唯一一份记录**
+（可被 `HARNESS_ENGINE_HOME` 覆盖，于是云桌面可以在 plist 或 profile 里声明而不改任何文件）。
+
+`resources` 是个例外 —— `file://` URI 没法向谁提问，所以它指向状态目录里一个**稳定路径**，
+而那个路径是一个指进 checkout 的链接：
+
+```jsonc
+"resources": ["file://$HOME/.local/state/harness-engine/CAPABILITIES.md"]
+```
+
+用链接而不是拷贝：**拷贝会静默过期**，而那正是 agent 读到上个月的能力地图的方式。
+
+于是搬家变成一条命令重指全部，而它**验证而不是假设** —— 特别是验证那个包装真的在 PATH 上，
+因为「hook 够不到」是这里唯一一种从外面看不见的失效。
+
+**这个间接层是可选的。** 只有一个 agent、且 checkout 不会动，就直接写路径 —— 上面那种写法更少
+文件。它值得做的时候是：配置多于一个，或者这棵树会去别的机器。
+
+**包装里的退出码不是自由选择。** 解析失败时它必须**放行**（exit 0）并大声说，因为
+`kiro-pretooluse.py` 的铁律就是 fail-open：只有引擎明确的 exit 4 才变成拦截。一个在解析失败时
+`exit 1` 的包装，是在用一个**未定义**的码拼写同一个「放行」，然后把「1 是什么意思」留给运行时决定。
+
 `kiro-pretooluse.py` 是 kiro-cli 方言的翻译层（stdin JSON + exit 2）。别的运行时方言不同，
 适配器**天生一个方言一份**、语言各异，生成不了。但**它必须满足的用例可以发布**：
 

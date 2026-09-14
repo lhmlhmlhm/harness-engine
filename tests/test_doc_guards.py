@@ -60,6 +60,10 @@ FOREIGN = {
                             "across, which is the point being made",
     "LIFECYCLE_TRANSITION_GATES": "same source system, second of those three tables",
     "STEP_PRECONDITIONS": "same source system, where its deps came from",
+    "HARNESS_ENGINE_HOME": "belongs to the MACHINE's wiring, not the engine: it tells a PATH "
+                           "wrapper which checkout to hand a call to, and the engine resolves its "
+                           "own root from __file__ and must never read it. Adding it to engine "
+                           "source purely to satisfy this guard would be the doc wagging the code",
 }
 
 
@@ -263,8 +267,13 @@ def test_every_path_env_and_constant_a_doc_names_exists(doc):
             if not ok:
                 bad.append(f"{doc}:{lineno} path does not exist: {raw}")
         for m in re.finditer(r"\bHARNESS_[A-Z_]+\b", line):
-            if m.group(0) not in src:
-                bad.append(f"{doc}:{lineno} env var in no source file: {m.group(0)}")
+            # `FOREIGN` applies here for the same reason it applies to constants below: this doc's
+            # subject includes wiring that is deliberately NOT the engine's, and a variable owned by
+            # that wiring cannot be satisfied by adding it to engine source. Undeclared still fails.
+            if m.group(0) in FOREIGN or m.group(0) in src:
+                continue
+            bad.append(f"{doc}:{lineno} env var in no source file and not declared foreign: "
+                       f"{m.group(0)}")
         for m in re.finditer(r"`([A-Z][A-Z0-9_]{4,})`", line):
             name = m.group(1)
             if name in FOREIGN or re.search(rf"\b{re.escape(name)}\b", src):
