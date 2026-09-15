@@ -166,29 +166,91 @@ def discover(start: str) -> tuple[tuple[dict, ...], tuple[str, ...]]:
     return (), tuple(problems)
 
 
+def _render_entry(e) -> str:
+    row = [e["ability"], e["scope_key"]]
+    if e.get("strict"):
+        row.append("strict")
+    return "\t".join(row)
+
+
+HEADER = (
+    "# harness-engine — where a flow is MANDATORY on this machine.",
+    "# One line per requirement: <ability>\\t<scope key>\\t[strict]",
+    "#",
+    "# With no entries the guard behaves exactly as it did before this file existed: it",
+    "# enforces the gates inside an open run and allows everything when nothing is open.",
+    "#",
+    "# `strict` changes only what happens when the named flow cannot be READ (its spec is",
+    "# invalid, or its extension code is not approved here): by default the guard says so",
+    "# loudly and allows, because one unreadable file must not stop all work in a scope.",
+    "# With `strict` it refuses instead — for a scope where you would rather stop than",
+    "# proceed unchecked.",
+    "#",
+    "# Edit or delete freely: it is your policy, and the engine only reads it.",
+)
+
+
 def _write(entries) -> None:
+    """Rewrite the record IN PLACE, keeping every comment and blank line already in the file.
+
+    It used to render the file from `entries` plus a fixed header, which deleted any comment its
+    reader had written — in a file whose own header says "edit or delete freely". A note saying WHY
+    a scope is mandatory is exactly what someone writes there, and losing it on the next `--add`
+    teaches people not to touch the file they were told is theirs. Nothing reported the loss,
+    because `read()` never looked at comments in the first place.
+
+    A surviving entry keeps its ORIGINAL text, so a key typed as `~/x` is not silently rewritten to
+    an absolute path, and a comment sitting above an entry stays above it. New entries are appended.
+    A removed entry takes only its own line: a comment that explained it is left where it is rather
+    than guessed at, because deciding that a comment "belonged to" a line is exactly the guess that
+    would delete the wrong one.
+
+    Two deliberate consequences. Entries are no longer sorted — position now carries meaning that
+    sorting would break — so the file's order is the order things were declared. And the header is
+    only written for a file that does not exist yet: re-adding it to a file where someone deleted it
+    would be this function overruling the same edit it now exists to preserve.
+    """
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "# harness-engine — where a flow is MANDATORY on this machine.",
-        "# One line per requirement: <ability>\\t<scope key>\\t[strict]",
-        "#",
-        "# With no entries the guard behaves exactly as it did before this file existed: it",
-        "# enforces the gates inside an open run and allows everything when nothing is open.",
-        "#",
-        "# `strict` changes only what happens when the named flow cannot be READ (its spec is",
-        "# invalid, or its extension code is not approved here): by default the guard says so",
-        "# loudly and allows, because one unreadable file must not stop all work in a scope.",
-        "# With `strict` it refuses instead — for a scope where you would rather stop than",
-        "# proceed unchecked.",
-        "#",
-        "# Edit or delete freely: it is your policy, and the engine only reads it.",
-    ]
-    for e in sorted(entries, key=lambda x: (x["ability"], x["scope_key"])):
-        row = [e["ability"], e["scope_key"]]
-        if e.get("strict"):
-            row.append("strict")
-        lines.append("\t".join(row))
+    wanted = {(e["ability"], e["scope_key"]): e for e in entries}
+
+    try:
+        existing = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        existing = None
+
+    if existing is None:
+        lines = [*HEADER, *(_render_entry(e) for e in entries)]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    lines: list[str] = []
+    seen: set = set()
+    for line in existing:
+        bare = line.strip()
+        if not bare or bare.startswith("#"):
+            lines.append(line)
+            continue
+        parts = [x.strip() for x in bare.split("\t") if x.strip() != ""]
+        if len(parts) < 2:
+            # Not an entry as `read()` parses it, so it is not this function's to interpret —
+            # and certainly not its to delete.
+            lines.append(line)
+            continue
+        key = (parts[0], parts[1])
+        if key not in wanted or key in seen:
+            continue                      # removed, or a duplicate of a line already kept
+        seen.add(key)
+        e = wanted[key]
+        was_strict = len(parts) > 2 and parts[2].lower() == "strict"
+        # Only touch the line when the flag actually changed; otherwise the author's own spelling
+        # (tilde form, spacing) survives.
+        lines.append(line if was_strict == bool(e.get("strict")) else _render_entry(e))
+
+    for key, e in wanted.items():
+        if key not in seen:
+            lines.append(_render_entry(e))
+
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

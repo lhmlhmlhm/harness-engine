@@ -9635,3 +9635,76 @@ def test_the_worktree_tool_refuses_when_it_cannot_see_its_own_ability(tmp_path):
     )
     assert out.returncode == 3, (out.returncode, out.stdout, out.stderr)
     assert "HARNESS_WORKTREE_ROOT" in out.stderr, out.stderr
+
+
+# ---------------------------------------------------------------------------
+# The mandatory-flow record is EDITED, not regenerated. Its own header says "edit or delete
+# freely", and for a while the next `--add` quietly falsified that.
+# ---------------------------------------------------------------------------
+def _policy(env) -> str:
+    return (Path(env["HARNESS_STATE_DIR"]) / "required-flows").read_text(encoding="utf-8")
+
+
+# Parseable but deliberately not canonical: `read()` strips each field, so an entry re-rendered from
+# what it parsed comes back without this padding. That difference is the only observable evidence
+# that a surviving line was kept rather than rewritten.
+PADDED_ENTRY = "delivery\t  ~/workplace/keepme  "
+
+
+def test_a_hand_written_comment_in_the_record_survives_an_add(env, tmp_path):
+    """The file invites editing, so an edit has to outlive the next write.
+
+    A note saying WHY a scope is mandatory is the thing someone writes there, and it was deleted
+    with nothing reporting the loss — `read()` never looks at comments, so no test noticed either.
+    Also pinned: the LINE the author typed, byte for byte. `read()` strips each field, so
+    re-rendering a surviving entry silently reformats it — alignment someone added on purpose
+    disappears. (A `~` survives either way: the engine stores the key unexpanded and expands only
+    when comparing, so that is not what this guards.)
+    """
+    assert rc(["require", "--add", "delivery", "--scope-key", str(tmp_path / "aaa")], env) == OK
+    pol = Path(env["HARNESS_STATE_DIR"]) / "required-flows"
+    pol.write_text(pol.read_text(encoding="utf-8")
+                   + "\n# WHY: the release repo, kept mandatory after the 09-02 incident\n"
+                   + PADDED_ENTRY + "\n\n# trailing note\n", encoding="utf-8")
+
+    assert rc(["require", "--add", "authoring", "--scope-key", str(tmp_path / "bbb")], env) == OK
+    got = _policy(env)
+    assert "WHY: the release repo" in got, got
+    assert "# trailing note" in got, got
+    assert PADDED_ENTRY in got.splitlines(), (
+        "the author's own line was reformatted — re-rendering a surviving entry drops the "
+        "whitespace they typed:\n" + got)
+    assert str(tmp_path / "bbb") in got, got
+
+
+def test_removing_a_requirement_takes_only_its_own_line(env, tmp_path):
+    """A comment above a removed entry stays.
+
+    Deciding a comment "belonged to" the line below it is a guess, and a wrong guess here deletes
+    prose nothing can recover. Leaving an orphaned note is the recoverable direction.
+    """
+    key = str(tmp_path / "ccc")
+    assert rc(["require", "--add", "delivery", "--scope-key", key], env) == OK
+    pol = Path(env["HARNESS_STATE_DIR"]) / "required-flows"
+    pol.write_text(pol.read_text(encoding="utf-8").replace(
+        f"delivery\t{key}", f"# explains the entry below\ndelivery\t{key}"), encoding="utf-8")
+
+    assert rc(["require", "--remove", "delivery", "--scope-key", key], env) == OK
+    got = _policy(env)
+    assert "# explains the entry below" in got, got
+    assert key not in got, "the entry itself should be gone:\n" + got
+
+
+def test_a_deleted_header_is_not_put_back(env, tmp_path):
+    """Re-adding the header would be the write overruling the same edit it exists to preserve.
+
+    The header is comments, and the file says comments are the reader's. Writing it only for a file
+    that does not exist yet keeps one rule instead of two.
+    """
+    assert rc(["require", "--add", "delivery", "--scope-key", str(tmp_path / "ddd")], env) == OK
+    pol = Path(env["HARNESS_STATE_DIR"]) / "required-flows"
+    kept = [l for l in pol.read_text(encoding="utf-8").splitlines() if not l.startswith("#")]
+    pol.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
+    assert rc(["require", "--add", "authoring", "--scope-key", str(tmp_path / "eee")], env) == OK
+    assert "harness-engine — where a flow is MANDATORY" not in _policy(env), _policy(env)

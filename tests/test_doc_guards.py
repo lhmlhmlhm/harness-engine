@@ -64,6 +64,10 @@ FOREIGN = {
                            "wrapper which checkout to hand a call to, and the engine resolves its "
                            "own root from __file__ and must never read it. Adding it to engine "
                            "source purely to satisfy this guard would be the doc wagging the code",
+    "HARNESS_WIRE_NO_POLICY": "belongs to the MACHINE's wiring too: it opts the wiring command out "
+                              "of maintaining the mandatory-flow record. The engine only READS that "
+                              "record and must not know that something else writes it, so this name "
+                              "cannot live in engine source without inverting the ownership",
 }
 
 
@@ -232,10 +236,16 @@ def _ground_truth():
     subs = [a for a in p._actions if isinstance(a, argparse._SubParsersAction)][0]
     flags = {name: {o for a in sub._actions for o in getattr(a, "option_strings", [])}
              for name, sub in subs.choices.items()}
-    src = "\n".join(f.read_text(encoding="utf-8") for f in sorted(
+    # Python AND the shell tools that ship with it. The scan used to be python-only, so a variable
+    # read by `abilities/*/tools/*.sh` looked absent and the only way to green the doc was to declare
+    # it FOREIGN — which would have been false, and a false exemption is how an exemption list stops
+    # meaning anything. Derived by existing, like the shipped-surface scan in test_portability.
+    src = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in sorted(
         list((REPO / "engine").glob("*.py"))
         + list((REPO / "integrations").glob("*.py"))
-        + list((REPO / "abilities").glob("*/*.py"))))
+        + list((REPO / "abilities").glob("*/*.py"))
+        + [f for f in (REPO / "bin").glob("*") if f.is_file()]
+        + [f for f in (REPO / "abilities").glob("*/tools/*") if f.is_file()]))
     return set(subs.choices), flags, src
 
 
