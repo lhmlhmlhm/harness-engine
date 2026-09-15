@@ -634,7 +634,17 @@ def _all_checks(conn, run_id, step, spec, facts_fn=None) -> tuple[bool, str]:
         # as a real contradiction.
         ok, why = check(conn, run_id, step, sub, facts_fn)
         oks.append(ok)
-        whys.append(("✔" if ok else "✘") + f" {sub['type']}: {why.splitlines()[0]}")
+        lines = why.splitlines() or [""]
+        head = ("✔" if ok else "✘") + f" {sub['type']}: {lines[0]}"
+        # A FAILING check keeps its remaining lines. Only the first was kept before, and the
+        # comment above says a fact-consulting check's normal home is right here — so the trace
+        # naming WHICH fact contradicted the record, and its actual value, was discarded exactly
+        # where it is produced. The refusal then ended on "an independent fact says otherwise:"
+        # with nothing after the colon: a message that promises the reason and withholds it, which
+        # sends the reader to the source to find out what the engine already knew.
+        # A passing check stays one line — nobody needs the trace for something that held, and the
+        # success branch below renders these inline.
+        whys.append(head if ok else "\n      ".join([head, *("  " + ln for ln in lines[1:])]))
     if all(oks):
         return True, f"all {len(checks)} checks passed — " + "; ".join(
             w[2:] for w in whys)

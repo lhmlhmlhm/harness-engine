@@ -8,3 +8,18 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# PERSONAL ABILITY SETS. `workspace/<name>/` is where someone's own abilities live — their own git
+# repository, nested inside this checkout on purpose: the trust boundary is an ENGINE_TREE prefix
+# check, so an ability set here is implicitly trusted (their own code) while one outside the tree
+# must be approved file by file. Measured: moving the same nine abilities to a sibling directory
+# made 9 of 12 fail load with "code from outside this engine's own tree".
+#
+# Ignored, never tracked: this repository ships the engine and its samples. A guard in tests/
+# asserts nothing under here is tracked, because the failure is one accidental `git add -A`.
+# workspace/
+
+# Run output inside the shipped sample directory. The folders are tracked (a sample whose declared
+# capability reports absent on a fresh clone is a bad first sentence); what a run writes into them is
+# not — it is state, and it would show up as a dirty tree after every walk of the sample flow.
+abilities/sample-lib/sample/*/*.json

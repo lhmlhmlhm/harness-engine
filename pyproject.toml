@@ -53,3 +53,11 @@ engine = ["schema.sql"]
 
 [tool.setuptools.dynamic]
 version = { attr = "engine.__version__" }
+
+[tool.pytest.ini_options]
+# THE PUBLIC SUITE'S SCOPE IS `tests/`, and naming it is load-bearing rather than tidy. pytest
+# recurses from the rootdir, so with no `testpaths` it collected `workspace/<name>/tests/` too — a
+# personal ability set's own suite, running inside the engine's. That silently undid the split: the
+# engine appeared to pass or fail on tests whose subject is somebody's private flow, which is the one
+# thing this separation exists to prevent. Measured: 20 private tests joined the public run.
+testpaths = ["tests"]

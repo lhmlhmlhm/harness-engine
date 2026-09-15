@@ -60,7 +60,7 @@ harness history        # list runs that have ended
 ## What `next` gives you
 
 Read the requirement lines and the directive. The guide and topic lines are POINTERS
-— fetch them only when you need them (`harness show --run <id> --step C00`).
+— fetch them only when you need them (`harness show --run <id> --step I01`).
 
 ## Some steps hand something back
 
@@ -110,12 +110,6 @@ POINTERS to a longer guide and to named topics. Fetch those on demand.
 Some steps may legitimately never run. Record that decision rather than leaving them
 open, or the run cannot be closed.
 
-## Repeatable steps
-
-Some steps may run more than once — a fix-and-recheck cycle. Some carry a budget; when
-it is exhausted the engine records that fact rather than letting the loop continue
-silently.
-
 ## Mutually exclusive steps
 
 Some steps come in groups where exactly one member ever runs. Closing one satisfies the
@@ -135,12 +129,8 @@ runtime hosting you.
 
 ## What is installed, and when to reach for it
 
-- **`cr-audit`** — 要回看一段时间内自己（或指定 login）已经合入的 commit / CR，按 package 分组，
-- **`cr-reviewer`** — 用户给出一个评审链接/编号，或说「review 一下这个」「有哪些评审等我看」「帮我看看这个 CR」。
-- **`cr-to-task`** — 用户给出一个迭代链接/编号或一段时间范围，说「把我这个迭代的 CR 整理成 task」
-- **`plan`** — 要为**还没开始做**的事出一份结构化方案。产出是一份待推送的方案文档，不是代码。
-- **`push`** — 手上有一份方案文档要推成任务，或要收尾一条已推送的方案（关任务 / 归档）。
-- **`shipcheck-asis`** — 任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是**最重的一条流程**（步数见
+- **`sample-change`** — A worked example. Reach for it to SEE how a flow is put together — two human gates, a variant that
+- **`sample-note`** — A worked example for the after-the-fact shape: something already happened and needs recording. Use
 
 ## Judgment
 
@@ -213,9 +203,6 @@ list is never checked, and that failure is silent — the declaration looks fine
 hook is simply never asked.
 
 ```sh
-CRAddComment
-TaskeiCreateTask
-TaskeiUpdateTask
 shell
 ```
 
@@ -225,6 +212,5 @@ ASKS — `harness guard` — which means they depend on the driver choosing to a
 
 ```sh
 delivery  close_task
-delivery  commit
 delivery  publish
 ```

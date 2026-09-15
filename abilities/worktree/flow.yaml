@@ -12,6 +12,9 @@ title: Worktree isolation facts
 # that sentence to every agent reading the list for a choice. A hint that says "not this"
 # is still an entry; the only thing stopping a mis-route was the agent reading to the end.
 # The engine now refuses a `when:` here, so unroutability is a property rather than a plea.
+# 工具刻意不在这里。供应脚本有 15% 是 brazil 工作区骨架的逻辑（`packageInfo` / `env/` / `src/<Pkg>`），
+# 而这里的 provider 一处都没提到 brazil —— 事实是通用的 git 与目录问题，供应不是。所以脚本跟着它
+# 唯一的消费方走，本 ability 只留可被任何 ship 借用的那一半。
 role: library
 
 # NOT MEANT TO BE OPENED. This ability exists so a ship-like flow can `requires: [worktree]` and
@@ -55,7 +58,7 @@ steps:
       step`）。如果你正在读这条 directive，说明有人开了一个不该开的 run —— 关掉它，去开真正
       拥有该生命周期的那个 flow。
 
-      本 ability 的价值全部在 `providers.py` 注册的 `worktree_state`，由别的 flow 通过
+      本 ability 只有事实，没有工具：`providers.py` 注册的 `worktree_state` 由别的 flow 通过
       `requires: [worktree]` + `facts.providers: [worktree.worktree_state]` 借用。
     completion:
       type: evidence

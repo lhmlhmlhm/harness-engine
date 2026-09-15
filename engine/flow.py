@@ -1335,8 +1335,28 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
                     raise FlowError(
                         f"{path}: guard '{action}' matches[{j}] pattern is not a valid "
                         f"regex: {exc}") from None
-                compiled.append({"tool": tool,
-                                 "field": str(rule["field"]) if rule.get("field") else None,
+                field = str(rule["field"]) if rule.get("field") else None
+                # A START-ANCHORED PATTERN WITH NO FIELD CAN NEVER MATCH, so it is refused rather
+                # than compiled. With no field the haystack is the whole payload serialised as
+                # JSON, and that text begins with a brace and quotes every value — so `^` sits
+                # behind a quote character and the rule silently allows every call it was written
+                # to refuse. Measured: four rules written that way in one sitting, each of which
+                # read as protection and enforced nothing.
+                #
+                # Refused at load rather than warned at match time, because the failure is
+                # INVISIBLE at match time: "no rule matched" and "the only rule cannot match"
+                # produce the same silence, and the second one is a false promise.
+                if field is None and re.search(r"(?<!\\)\^", pat):
+                    raise FlowError(
+                        f"{path}: guard '{action}' matches[{j}] anchors at '^' but names no "
+                        f"'field', so it is matched against the whole payload as JSON — where "
+                        f"the start of the text is a brace, never this pattern.\n"
+                        f"    Such a rule can never fire: it reads as protection and allows "
+                        f"everything.\n"
+                        f"    Name the field the pattern is for (e.g. `field: <the string "
+                        f"argument>`), or drop the anchor if you really mean anywhere in the "
+                        f"payload.")
+                compiled.append({"tool": tool, "field": field,
                                  "regex": rx, "pattern": pat})
             if compiled:
                 guard_matches[str(action)] = tuple(compiled)

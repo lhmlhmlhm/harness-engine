@@ -64,6 +64,13 @@ FOREIGN = {
                            "wrapper which checkout to hand a call to, and the engine resolves its "
                            "own root from __file__ and must never read it. Adding it to engine "
                            "source purely to satisfy this guard would be the doc wagging the code",
+    "HARNESS_WORKTREE_ROOT": "belongs to a PERSONAL ability set, not the engine. The tool that "
+                             "reads it provisions brazil-flavoured worktrees and lives in "
+                             "`workspace/<name>/abilities/`, outside this repository — which is the "
+                             "whole point of the split. The doc names it because the wiring it "
+                             "describes is the machine's, and a reader wiring their own set needs "
+                             "the name; adding it to engine source to satisfy this guard would put "
+                             "a personal concern back into the engine",
     "HARNESS_WIRE_NO_POLICY": "belongs to the MACHINE's wiring too: it opts the wiring command out "
                               "of maintaining the mandatory-flow record. The engine only READS that "
                               "record and must not know that something else writes it, so this name "

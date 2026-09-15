@@ -108,7 +108,25 @@ config:
 # actually has a gate: a guard pointing at an ungated step could never refuse, and
 # shipping one would be a false promise.
 guards:
-  commit: D02
+  # TWO SHAPES ON PURPOSE, and the difference is what a runtime adapter has to be told about.
+  #
+  # `publish` / `close_task` name only a gate step: the engine refuses the action when asked, and
+  # the asking is the agent's to do. `commit` also declares `matches` — a tool name and a pattern —
+  # which is what lets a runtime hook recognise the action IN A TOOL CALL and refuse it before it
+  # happens, without the agent volunteering.
+  #
+  # The matcher lives on the SAMPLE deliberately. `harness adapter-contract` derives its
+  # `end_to_end` case from a flow that declares one, and with none installed that case came back
+  # `null` — a published engine handing an adapter author a contract with a hole in exactly the
+  # place they cannot guess (a payload that matches a pattern this installation declares). Measured
+  # when the personal ability set moved out of this tree: the contract went to null and the wiring
+  # doc's renderer crashed on it.
+  commit:
+    step: D02
+    matches:
+      - tool: shell
+        field: command
+        pattern: (^|[;&|]\s*)git\b[^;&|]*?\s+commit\b
   publish: D02
   close_task: E02
 

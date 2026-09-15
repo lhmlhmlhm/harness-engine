@@ -172,3 +172,95 @@ def test_a_fixture_ability_reaches_outside_its_own_directory_for_nothing():
         + "\n".join(f"  {rel}:{i}  {t}" for rel, i, t in bad)
         + "\n  A shipped sample has to run for someone who has none of the author's files."
     )
+
+
+def test_a_vendored_tool_does_not_point_back_at_where_it_came_from():
+    """A copy that still names its ORIGIN is a copy in name only.
+
+    Measured, on the copy this test was written for: three vendored shell scripts carried
+    `DIR="$HOME/.kiro/tools/cr-watch"` and a python helper read the origin's `resolved.jsonl`. The
+    vendored poller would therefore have executed the ORIGINAL scripts and written the ORIGINAL
+    state — every path resolved, nothing errored, and the move would have been cosmetic with nothing
+    saying so. `state/` under an ability is git-ignored, so not even a stray file would have shown.
+
+    Scoped to `~/.kiro/tools/` and `~/.kiro/skills/` — the two places tools get vendored FROM. Other
+    `~/.kiro/` reads are legitimate and declared (a runtime's session store, its MCP settings), and
+    banning those would turn this into an exemption list. Comments are exempt: a line recording
+    where a file came from is history, and deleting history to green a guard is the wrong trade.
+    """
+    import re
+    origin = re.compile(r"(~|\$HOME|\$\{HOME\})/\.kiro/(tools|skills)/")
+    bad = []
+    for tools in sorted((REPO / "abilities").glob("*/tools")):
+        for f in sorted(tools.rglob("*")):
+            if not f.is_file() or not _is_source(f):
+                continue
+            for i, line in _lines(f):
+                if line.lstrip().startswith(("#", "//")):
+                    continue
+                m = origin.search(line)
+                if not m:
+                    continue
+                # Backticked = this tree's convention for TALKING ABOUT a path (docstrings explain
+                # the layout that made a bug possible). Bare = using it. Checking the convention
+                # rather than listing exemptions is what keeps the guard from becoming a list.
+                before, after = line[:m.start()], line[m.end():]
+                if before.count("`") % 2 == 1 and "`" in after:
+                    continue
+                # An OVERRIDABLE default is declared, not baked in: `${VAR:-<path>}` is the form the
+                # rest of this tree uses for "here unless you say otherwise", and a copy that can be
+                # pointed elsewhere is not a copy that resolves back to its origin.
+                if re.search(r"\$\{[A-Z_]+:-[^}]*$", before):
+                    continue
+                bad.append(f"  {f.relative_to(REPO)}:{i}  {line.strip()[:74]}")
+    assert not bad, (
+        "a vendored tool resolves back to the tree it was copied from:\n" + "\n".join(bad)
+        + "\n  Resolve from `$0` / `__file__` instead — otherwise the copy runs the original."
+    )
+
+
+def test_no_personal_ability_set_is_tracked():
+    """`workspace/<name>/` holds somebody's OWN abilities. This repository ships the engine.
+
+    The two live in one checkout deliberately — the trust boundary is an `ENGINE_TREE` prefix check,
+    so an ability set nested here is implicitly trusted (it is its owner's own code) while the same
+    files in a sibling directory must be approved one at a time and re-approved on every edit.
+    Measured before choosing the layout: nine of twelve abilities failed to load out of tree.
+
+    The cost of that convenience is exactly one accidental `git add -A`, which is what this catches.
+    Checked through git rather than by reading `.gitignore`, because an ignore rule added AFTER a
+    file was tracked does not untrack it — and that is the state this would be silent in.
+    """
+    import subprocess
+    out = subprocess.run(["git", "ls-files", "workspace"], cwd=str(REPO),
+                         capture_output=True, text=True)
+    tracked = [l for l in out.stdout.splitlines() if l.strip()]
+    assert not tracked, (
+        "this repository is tracking somebody's personal ability set:\n"
+        + "\n".join("  " + t for t in tracked[:20])
+        + "\n  `git rm --cached` them; `workspace/` is ignored for this reason."
+    )
+
+
+def test_the_public_suite_does_not_collect_a_personal_one():
+    """pytest recurses from the rootdir, so `workspace/<name>/tests/` joins the run unless scoped.
+
+    Measured the day the split landed: twenty tests whose subject is a personal flow ran inside the
+    engine's suite, and the engine's own pass/fail number silently included them. That is the exact
+    coupling the split exists to remove, and it comes back with one deleted line of config.
+
+    Asserted by ASKING pytest what it would collect, not by reading the config: `testpaths` can be
+    overridden on the command line, and a suite that only checks the file has checked the wrong thing.
+    """
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                          "-p", "no:cacheprovider"],
+                         cwd=str(REPO), capture_output=True, text=True)
+    leaked = sorted({l.split("::")[0] for l in out.stdout.splitlines()
+                     if l.startswith("workspace/")})
+    assert not leaked, (
+        "the engine's suite is collecting a personal ability set's tests:\n"
+        + "\n".join("  " + f for f in leaked)
+        + "\n  `testpaths` in pyproject.toml scopes this; see the comment there for what it cost."
+    )

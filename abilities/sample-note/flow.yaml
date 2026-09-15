@@ -1,0 +1,156 @@
+version: 2
+ability: sample-note
+title: Sample lifecycle — record a note about something that already happened
+
+# THE SECOND SAMPLE, and small on purpose. `sample-change` is the full one; this is here for the two
+# properties a single flow cannot show:
+#
+#   1. A NON-LOCATION SCOPE. `sample-change`'s scope is a directory, so the runtime can attribute an
+#      action to the run by where it happened. This one's scope is an identifier that appears in the
+#      action's PAYLOAD — a different attribution path, and the one an ability about a review, a
+#      ticket or a record has to use. An engine that only ever demonstrated the location path would
+#      leave the other half undemonstrated to anyone reading the samples.
+#   2. A SECOND PRODUCTION FLOW AT ALL. The load-time cross-check "every production flow declares
+#      exactly what it uses" is only meaningful across more than one, and with a single sample it was
+#      unexercised.
+role: production
+
+when: |
+  A worked example for the after-the-fact shape: something already happened and needs recording. Use
+  it to SEE how a flow whose scope is an identifier rather than a directory attributes an action, and
+  how a two-value outcome is kept countable. It carries no real work.
+
+scope_kind: sample_ref
+# The scope is an identifier, so it cannot be matched by location. `in_payload` means the runtime
+# recognises the run by finding the scope key inside the action itself.
+scope_match: in_payload
+
+# `facts` is in here because the ENGINE says this spec exercises it: variant resolution runs through
+# the facts machinery even when the value is explicit. Derived rather than guessed — an incomplete
+# `uses` list is worse than none, because it reads as a complete surface.
+uses: [exclusive_groups, facts, gates, guards, phase_goals, prose, results, variants]
+
+# EXPLICITLY RESOLVED, and that is the whole reason this block is here rather than another `fact:`.
+# `sample-change` derives its variant from the world, which is right when the scope IS the thing the
+# mode depends on. Here nothing on disk can tell a brief note from a full one — it is the author's
+# call — so the caller passes `--variant` and the engine reports the value as `(explicit)` or, when
+# omitted, `(default)`.
+#
+# Both resolution paths therefore ship, and an engine that only ever demonstrated one would leave a
+# reader unable to tell which shape their own flow wants. The rule: derive when the world knows,
+# ask when only the author knows. Deriving what only the author knows produces a value that
+# silently disagrees with the intent; asking what the world already knows produces drift.
+variants:
+  values: [brief, full]
+  default: brief
+
+prose:
+  root: prose/
+  topics_dir: topics
+  anchor_pattern: ^#{1,6}\s+Step:\s+{step_id}\b
+
+results:
+  values: [completed, abandoned]
+  default: completed
+
+exclusive_groups:
+  - [N03keep, N03drop]
+
+guards:
+  # Attributed by the SCOPE KEY IN THE PAYLOAD, not by where the call was made. That is the whole
+  # reason this sample exists next to the other one.
+  publish_note:
+    step: N02
+    matches:
+      # TWO ANCHORED RULES RATHER THAN ONE LOOSE ONE, and the difference is measurable in both
+      # directions. Anchoring only at a command boundary misses `bash <path>/publish-note` — an
+      # interpreter reaching the same action by a different first word. Loosening the anchor to any
+      # whitespace boundary fixes that miss and takes the protection with it: it then also blocks
+      # `echo 'run publish-note later'`, because this engine's matcher has NO quote awareness and
+      # cannot tell a command from a mention of one. Interpreters are ENUMERABLE; mentions are not.
+      # So: enumerate the interpreters, keep the anchor.
+      - tool: shell
+        field: command
+        pattern: (^|[;&|]\s*)\S*publish-note\b
+      - tool: shell
+        field: command
+        pattern: (^|[;&|]\s*)(bash|sh|zsh|dash|ksh|python3?)\s+\S*publish-note\b
+
+phases:
+  - id: gather
+    title: gather
+    guide: note.md
+    goal:
+      type: phase_steps_closed
+  - id: decide
+    title: decide
+    guide: note.md
+    goal:
+      type: no_open_violations
+
+steps:
+  - id: N01
+    phase: gather
+    title: Say what happened
+    directive: |
+      Output: the thing being recorded, as evidence.
+      Complete: one `sample_note` row.
+    completion:
+      type: evidence
+      kind: sample_note
+
+  - id: N02
+    phase: gather
+    title: 🚦 Agree the note is right (gate)
+    deps: [N01]
+    gate: affirm
+    directive: |
+      Output: a person's answer, in their words.
+      Complete: `gate_recorded`.
+
+      Ask, then END THE TURN. The `publish_note` action is guarded by this gate and refused at the
+      tool call until it exists.
+    completion:
+      type: gate_recorded
+
+  - id: N02full
+    phase: gather
+    title: Full note — say what it changes
+    deps: [N01]
+    variants: [full]
+    directive: |
+      Output: what the recorded thing changes for whoever reads it later.
+      Complete: one `sample_impact` row.
+
+      Only under `--variant full`. Under `brief` this step reports "not part of this flow", and that
+      refusal is correct rather than a bug.
+    completion:
+      type: evidence
+      kind: sample_impact
+
+  - id: N03keep
+    phase: decide
+    title: Keep the note
+    deps: [N02]
+    directive: |
+      Output: the note kept.
+      Complete: one `sample_verdict` row reading `kept`.
+    completion:
+      type: evidence_in
+      kind: sample_verdict
+      values: [kept]
+
+  - id: N03drop
+    phase: decide
+    title: Drop the note
+    deps: [N02]
+    directive: |
+      Output: the note dropped, and why.
+      Complete: one `sample_verdict` row reading `dropped`.
+
+      Exclusive with `N03keep`: taking either retires the other, so "exactly one of these happened"
+      is a fact rather than an inference from which step was left open.
+    completion:
+      type: evidence_in
+      kind: sample_verdict
+      values: [dropped]

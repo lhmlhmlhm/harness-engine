@@ -77,7 +77,12 @@ def facts() -> dict:
         "directive_median_lines": sorted(len(d) for d in directives)[len(directives) // 2],
         "translation_cases": len(contract["translation"]),
         "resilience_cases": len(contract["resilience"]),
-        "end_to_end_cases": len(contract["end_to_end"]),
+        # `end_to_end` is None when no installed flow declares a guard with a TOOL matcher — the
+        # contract cannot invent a payload that matches a pattern nobody declared. Reported as 0
+        # rather than crashing: this renderer runs on a published tree, and a `len(None)` there turns
+        # "your samples declare no tool matcher" into a traceback that names this file instead.
+        # Measured the day the personal ability set moved out of this tree.
+        "end_to_end_cases": len(contract["end_to_end"] or ()),
         "default_state_dir": "$XDG_STATE_HOME/harness-engine",
         "default_state_dir_fallback": "~/.local/state/harness-engine",
     }

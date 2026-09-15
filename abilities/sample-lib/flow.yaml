@@ -1,0 +1,48 @@
+version: 2
+ability: sample-lib
+title: Sample facts, for a flow to borrow
+
+# BORROWED, NEVER ROUTED. `library`: `requires:`-able like a production ability, absent from the
+# routing roster like a fixture, excluded from the criteria-strength report because the single step
+# below exists only to satisfy the engine's "at least one step" rule.
+#
+# WHY IT SHIPS. The engine's own tests need to prove that borrowing WORKS — that a namespaced
+# provider resolves across abilities, that `requires:` is enforced, that a net-dependent provider can
+# declare a host without touching credentials. Those proofs used to run against a personal ability
+# set, so cloning this repository got an engine whose borrowing machinery had nothing to demonstrate
+# it on. This is the demonstration, and it is deliberately about nothing: a directory, a counter, a
+# host that does not exist.
+role: library
+
+scope_kind: sample_probe
+
+uses: [phase_goals, results]
+
+results:
+  values: [abandoned]
+  default: abandoned
+
+phases:
+  - id: facts
+    title: Facts only
+    goal:
+      type: all_of
+      steps: [L00]
+
+steps:
+  - id: L00
+    phase: facts
+    title: Placeholder — this ability is borrowed, not walked
+    directive: |
+      Nothing to produce, nothing to complete.
+
+      This step exists because the engine requires every flow to declare at least one. If you are
+      reading this directive, a run was opened that should not have been — close it and open the
+      flow that owns the lifecycle you are actually driving.
+
+      What is here is in `providers.py`: `sample_state` (a directory, a counter and a reachability
+      verdict) and `sample_reach` (a host, declared but never credentialed). Borrow them with
+      `requires: [sample-lib]` plus `facts.providers: [sample-lib.sample_state]`.
+    completion:
+      type: evidence
+      kind: sample_probe_noop

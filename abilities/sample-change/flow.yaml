@@ -1,0 +1,358 @@
+version: 2
+ability: sample-change
+title: Sample lifecycle — take an item from intake to a settled outcome
+
+# THE SHIPPED SAMPLE, and the reason it exists is measurable. Until it did, every mechanism this
+# engine has that only appears in a REAL flow — two human gates in one run, a preauthorised gate, a
+# variant that excludes steps, an exclusive pair where taking one skips the other, an obligation
+# raised from a derived fact that then blocks `close-run` — was demonstrated only on somebody's
+# private ability set. Measured the day that set moved out of this tree: 31 of the engine's own tests
+# had no material left to run on.
+#
+# So this flow is deliberately FULL rather than minimal. The two `role: fixture` flows next to it are
+# small on purpose (a mechanism test wants the cheapest possible substrate); this one is the opposite
+# — it is what a reader clones the repository to read, and what the engine's composition tests drive.
+#
+# ITS SUBJECT MATTER IS NOTHING. An "item" moves between directories and ends up settled. No build
+# system, no review tool, no ticket tracker: a sample that needed one would teach the reader about
+# that instead of about the engine.
+role: production
+
+when: |
+  A worked example. Reach for it to SEE how a flow is put together — two human gates, a variant that
+  changes which steps apply, an exclusive pair, and an obligation that refuses a close — without
+  reading the engine's source. It carries no real work: the "item" it moves is a json file in a
+  scratch directory.
+
+scope_kind: sample_tree
+# The scope is a location, so actions in its subdirectories belong to the run. Declared rather than
+# defaulted, because the default is `exact` and widening it is each ability's own decision.
+scope_match: path_prefix
+
+requires: [sample-lib]
+
+uses: [ability_deps, exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, results, variants]
+
+variants:
+  values: [quick, full]
+  default: quick
+  # DERIVED from a fact, not asked. The scope IS the thing the mode depends on here, so the engine can
+  # resolve it at open time — and a value the caller types drifts from the world silently.
+  fact: sample_mode
+
+facts:
+  # Borrowed (qualified) + own (bare). The engine refuses a self-qualified name: keeping the
+  # borrowing form for your own registration would make an ability look like its own dependency.
+  providers: [sample-lib.sample_state, sample_mode]
+
+prose:
+  root: prose/
+  topics_dir: topics
+  anchor_pattern: ^#{1,6}\s+Step:\s+{step_id}\b
+
+results:
+  values: [completed, abandoned]
+  default: completed
+
+# ONE OF THESE TWO, and the engine keeps the count honest. Declared at the top rather than per step,
+# because the group is a relationship BETWEEN steps — a per-step flag would let two steps each claim
+# membership in a group the other never joined.
+exclusive_groups:
+  - [Z02a, Z02b]
+
+guards:
+  # A TOOL-MATCHED guard: the runtime hook can recognise this action inside a tool call and refuse it
+  # before it happens, without the agent volunteering to ask. The other shape (a gate step with no
+  # `matches`) is what `settle` uses below — both ship, because an adapter author has to handle both
+  # and `harness adapter-contract` derives its end-to-end case from the matched one.
+  move_item:
+    # Points at the INTAKE gate, not at the step that moves. A guard names the gate that must already
+    # be recorded before the action may happen — the engine refuses one that points at an ungated step,
+    # because such a guard could never refuse and is a false promise.
+    step: I02
+    matches:
+      - tool: shell
+        # `field` NAMES THE STRING THE PATTERN IS FOR, and leaving it out is not a smaller version
+        # of the same thing. With no field the engine matches the whole payload dumped as JSON, where
+        # this pattern's `^` anchor sits behind a quote character and can therefore never match — a
+        # guard that reads as protection and silently allows everything. Measured, on this very rule.
+        field: command
+        pattern: (^|[;&|]\s*)mv\b.*\bintake/.*\breview/
+  # A TOOL MATCHER here too, and not for symmetry — because the engine MEASURES it. A production
+  # flow whose guard has no matcher can only fire when the driver volunteers to ask, which is
+  # protection that depends on the protected party's cooperation. The short `action: STEP` form stays
+  # legal (it is the only possible mechanism for something a human does in a UI no tool call touches)
+  # and the `delivery` fixture keeps it exercised — but a shipped production sample relying on it
+  # would be exactly the drift that check exists to catch. It caught this one.
+  settle:
+    step: Z01
+    matches:
+      - tool: shell
+        field: command
+        pattern: (^|[;&|]\s*)mv\b.*\breview/.*\bsettled/
+
+hooks:
+  # Fires when the borrowed fact says something failed. An OBLIGATION rather than a reminder: a
+  # reminder can be discharged by saying so, and this one must be answered before the run can close.
+  - id: failures-need-an-answer
+    trigger: phase_end
+    phase: work
+    when:
+      fact: assertions_failed
+      count_gte: 1
+    mode: contract
+    obligation: true
+    contract: |
+      The borrowed sample state reports {{fact.assertions_failed}} failure(s):
+      {{fact.failed_assertions}}. Say what you did about them — by name, not as a total — then:
+        harness discharge --run {{run_id}} --hook failures-need-an-answer \
+          --evidence "<what you did about them>"
+  # Fires when the reader could not look at all. NOT an obligation: nothing was found to answer for,
+  # and an obligation over an unreadable store would make "the tool was missing" the cheapest pass.
+  - id: state-unreadable
+    trigger: phase_end
+    phase: work
+    when:
+      fact: analysis_ran
+      equals: false
+    mode: contract
+    obligation: false
+    contract: |
+      The sample state could not be read, so the failure count above means nothing. Fix the
+      directory the borrowed provider looks in, or say why it does not apply — do not record a
+      zero you did not observe.
+
+phases:
+  - id: intake
+    title: intake
+    # The guide pointer is declared at the PHASE, so each step resolves to its own anchored
+    # section in this file and falls back to the whole document only if the anchor is missing.
+    guide: intake.md
+    goal:
+      type: phase_steps_closed
+  - id: work
+    title: work
+    # The guide pointer is declared at the PHASE, so each step resolves to its own anchored
+    # section in this file and falls back to the whole document only if the anchor is missing.
+    guide: work.md
+    goal:
+      type: all_of
+      steps: [W01]
+      any_of:
+        - [W02quick, W02full]
+        - [W04quick, W04full]
+  - id: settle
+    title: settle
+    # The guide pointer is declared at the PHASE, so each step resolves to its own anchored
+    # section in this file and falls back to the whole document only if the anchor is missing.
+    guide: settle.md
+    goal:
+      type: no_open_violations
+
+steps:
+  - id: I01
+    phase: intake
+    title: Name the item
+    directive: |
+      Produce: the item this run is about, recorded as evidence.
+      Complete: one `sample_item` row.
+
+      The borrowed fact reads the run's OWN recorded item, so nothing else here works until this
+      is recorded.
+    completion:
+      type: evidence
+      kind: sample_item
+
+  - id: I02
+    phase: intake
+    title: 🚦 Agree the item is worth moving (gate)
+    deps: [I01]
+    gate: affirm
+    topics: [a-gate-you-record-yourself]
+    directive: |
+      Produce: a human's answer, in their words.
+      Complete: `gate_recorded`.
+
+      Stop here and END THE TURN. Recording this gate in the same turn you asked for it is refused
+      by the witness — see the topic.
+    completion:
+      type: gate_recorded
+
+  - id: W01
+    phase: work
+    title: Read what the world says about the item
+    deps: [I02]
+    directive: |
+      Produce: the borrowed state, consulted.
+      Complete: a `sample_read` row, corroborated against the borrowed fact.
+
+      Recording `found` while the item is nowhere on disk is refused: the claim is checked against
+      `item_found`, not accepted on its own word.
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: sample_read
+          values: [found, absent]
+        - type: claim_corroborated
+          kind: sample_read
+          claims: [found]
+          disproved_when:
+            fact: item_found
+            equals: false
+
+  - id: W02quick
+    phase: work
+    title: Quick path — accept the item as it stands
+    deps: [W01]
+    variants: [quick]
+    directive: |
+      Produce: a one-line judgement.
+      Complete: one `sample_judgement` row.
+    completion:
+      type: evidence
+      kind: sample_judgement
+
+  - id: W02full
+    phase: work
+    title: Full path — judge the item against the settled set
+    deps: [W01]
+    variants: [full]
+    directive: |
+      Produce: a judgement plus the reason it is not the quick one.
+      Complete: a `sample_judgement` row whose value is in the declared set.
+    completion:
+      type: evidence_in
+      kind: sample_judgement
+      values: [accept, revise, reject]
+
+  - id: W04quick
+    phase: work
+    title: Quick path — record the judgement and move on
+    deps: [W02quick]
+    variants: [quick]
+    directive: |
+      Output: the judgement, recorded as final for this path.
+      Complete: one `sample_settled` row.
+
+      The SECOND step this variant owns. One-step variants make the mechanism look like a coin flip;
+      a variant that owns a short sequence is what the construct is actually for — and it is what
+      lets the engine check that the shared core stays the majority rather than the exception.
+    completion:
+      type: evidence
+      kind: sample_settled
+
+  - id: W04full
+    phase: work
+    title: Full path — record the judgement with its reason
+    deps: [W02full]
+    variants: [full]
+    directive: |
+      Output: the judgement plus the reason the quick path was not enough.
+      Complete: one `sample_settled` row.
+
+      The second step this variant owns. Note it depends on `W02full`, not on `W02quick` — a
+      cross-variant dependency would be applicable under a variant that never runs the step it
+      depends on, which the engine refuses at load time.
+    completion:
+      type: evidence
+      kind: sample_settled
+
+  - id: D01
+    phase: work
+    title: Optional — gather more before judging
+    deps: [W01]
+    optional: true
+    directive: |
+      Produce: whatever extra reading the item needs, or a recorded reason it needs none.
+      Complete: one `sample_research` row — or skip this step with a reason.
+
+      Optional means SKIPPABLE, and a skip is recorded rather than silent: `harness skip --run <id>
+      --step D01 --reason "<why>"`.
+    completion:
+      type: evidence
+      kind: sample_research
+
+  - id: W03
+    phase: work
+    title: Move the item to review
+    # Depends on the SHARED core, not on either variant's steps. A dep on `W04quick` would be
+    # unreachable under `full` and the engine refuses it at load time — which is the right place to
+    # find out, rather than halfway through a run. What makes the variant steps still mandatory is the
+    # phase goal's `any_of`, not a dependency.
+    deps: [W01]
+    directive: |
+      Produce: the item, moved from `intake/` to `review/`.
+      Complete: the recorded status agrees with the directory the item is actually in.
+
+      The move is GUARDED: a `mv` that matches this action is refused by the runtime hook until the
+      INTAKE gate (`I02`) is recorded. That is not an obstacle to route around — it is the point.
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: sample_status
+          values: [review]
+        - type: claim_corroborated
+          kind: sample_status
+          claims: [review]
+          disproved_when:
+            fact: item_dir
+            matches_none: [review]
+
+  - id: Z01
+    phase: settle
+    title: 🚦 Settle the item (gate)
+    deps: [W03]
+    gate: affirm
+    topics: [a-gate-you-record-yourself]
+    directive: |
+      Produce: a human's decision to settle, in their words.
+      Complete: `gate_recorded`.
+
+      The second human gate in one run, and the reason there are two: a witness that only ever sees
+      one gate cannot show that it counts turns BETWEEN gates.
+    completion:
+      type: gate_recorded
+
+  - id: Z02a
+    phase: settle
+    title: Settle by accepting
+    deps: [Z01]
+    directive: |
+      Produce: the item recorded as accepted.
+      Complete: one `sample_outcome` row reading `accepted`.
+    completion:
+      type: evidence_in
+      kind: sample_outcome
+      values: [accepted]
+
+  - id: Z02b
+    phase: settle
+    title: Settle by withdrawing
+    deps: [Z01]
+    directive: |
+      Produce: the item recorded as withdrawn.
+      Complete: one `sample_outcome` row reading `withdrawn`.
+
+      Taking this step SKIPS its sibling — an exclusive group is how a flow says "one of these, and
+      the engine keeps the count honest" instead of leaving both open forever.
+    completion:
+      type: evidence_in
+      kind: sample_outcome
+      values: [withdrawn]
+
+  - id: Z03
+    phase: settle
+    title: Close out with nothing open
+    deps: [Z02a, Z02b]
+    gate: preauth:autosettle
+    directive: |
+      Produce: nothing new — this step is the check itself.
+      Complete: no violation is still open.
+
+      A PREAUTHORISED gate: a config key may stand in for the human here, because closing out with
+      nothing open is not a decision somebody needs to make twice. Set it with
+      `harness config --run <id> --set autosettle=true`.
+    completion:
+      type: no_open_violations
