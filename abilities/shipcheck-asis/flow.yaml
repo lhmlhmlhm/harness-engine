@@ -25,12 +25,15 @@ results:
 # The worktree facts live in their own ability: git-and-filesystem knowledge that must stay
 # correct when this lifecycle changes, and portable when the tree moves. The STEPS that consult
 # them stay here — they are four points in a ship, not a lifecycle of their own.
-requires: [worktree]
+requires: [worktree, memory]
 uses: [ability_deps, exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, producers, prose, repeatable, results, stages]
 
+# 步数刻意不写在这句话里。它写过「101 步」，改成「102 步」，然后 E07n/E09n/E18n 落地又变成
+# 104 —— 两次漂移，两次都是散文抄了一个可派生的数字。真实步数由 `harness abilities` / `validate`
+# 从 spec 数出来，而「最重的一条」不随步数变。
 when: |
-  任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是最重的一条流程（102 步），
-  但它的重量正对应交付的不可逆性；轻量改动也走它，只是很多步会被 skip。
+  任务要改代码、要提交、要发评审 —— 交付**自己的**改动。这是**最重的一条流程**（步数见
+  `harness abilities`），但它的重量正对应交付的不可逆性；轻量改动也走它，只是很多步会被 skip。
 # 本 ability 的 scope 就是一个代码库位置，所以运行时在其子目录里发生的动作属于本 run。
 # 默认是 exact —— 放宽是**每个 ability 显式声明**的，因为误判比漏判更糟：
 # 被要求去满足一个不属于自己工作的门，会让伪造那个门成为唯一出路。
@@ -46,7 +49,7 @@ facts:
   - review_comments
   - run_metrics
   - fleet_central
-  - hot_set
+  - memory.hot_set
   - worktree.worktree_state
   - plan_writeback
   - quality_slo
@@ -346,9 +349,12 @@ exclusive_groups:
   - E09n
 - - E18
   - E18n
+# 阶段标题里也不写步数。实测四处已经漂了（context 25→26、execution 9→10、
+# observation 8→10、cleanup 19→18），和 `when:` 那处同一个缺陷：散文抄了一个
+# 可派生的数字，而没有任何机制让它保持真实。`harness next` 每一步都打真实进度。
 phases:
 - id: context
-  title: context（25 步）
+  title: context
   guide: context.md
   stages:
   - activation
@@ -359,21 +365,21 @@ phases:
   goal:
     type: phase_steps_closed
 - id: config
-  title: config（2 步）
+  title: config
   guide: config.md
   stages:
   - config-collect
   goal:
     type: phase_steps_closed
 - id: coding
-  title: coding（5 步）
+  title: coding
   guide: coding.md
   stages:
   - implementation
   goal:
     type: phase_steps_closed
 - id: verification
-  title: verification（17 步）
+  title: verification
   guide: verification.md
   stages:
   - test-execution
@@ -382,7 +388,7 @@ phases:
   goal:
     type: phase_steps_closed
 - id: execution
-  title: execution（9 步）
+  title: execution
   guide: execution.md
   stages:
   - commit-prep
@@ -390,7 +396,7 @@ phases:
   goal:
     type: phase_steps_closed
 - id: observation
-  title: observation（8 步）
+  title: observation
   guide: observation.md
   stages:
   - autosde
@@ -407,7 +413,7 @@ phases:
       kind_b: verified_rev
       absent_ok: true
 - id: revision
-  title: revision（16 步）
+  title: revision
   guide: revision.md
   stages:
   - revision-loop
@@ -416,7 +422,7 @@ phases:
   goal:
     type: phase_steps_closed
 - id: cleanup
-  title: cleanup（19 步）
+  title: cleanup
   guide: cleanup.md
   stages:
   - entry-gate

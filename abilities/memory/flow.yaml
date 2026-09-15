@@ -1,6 +1,6 @@
 version: 2
-ability: worktree
-title: Worktree isolation facts
+ability: memory
+title: Accumulated-lessons facts
 
 # BORROWED, NEVER ROUTED. `library` is what this is: `requires:`-able like a production
 # ability, absent from the routing roster like a fixture, and excluded from the
@@ -14,24 +14,22 @@ title: Worktree isolation facts
 # The engine now refuses a `when:` here, so unroutability is a property rather than a plea.
 role: library
 
-# NOT MEANT TO BE OPENED. This ability exists so a ship-like flow can `requires: [worktree]` and
-# ask whether its work is really isolated. Its own run has nothing to accomplish.
+# NOT MEANT TO BE OPENED. This ability exists so a flow can `requires: [memory]` and ask what the
+# accumulated-lessons store actually holds. Its own run has nothing to accomplish.
 #
-# It is `production` rather than `fixture` for one structural reason: the engine refuses to let a
-# production ability `requires:` a fixture (flow.py — "a fixture must be UNROUTABLE ... and no
-# production ability may `requires:` one"). Borrowability and unroutability are the two ends of
-# that constraint and only one is available, so the routing hint below is written to say "not
-# this" as plainly as a routing hint can. The engine does not enforce that reading; a reader is
-# the only thing that can.
+# It is `production` rather than `fixture` for the same structural reason `worktree` is: the engine
+# refuses to let a production ability `requires:` a fixture, so borrowability and unroutability are
+# the two ends of one constraint and only one is available. The routing hint below says "not this"
+# as plainly as a routing hint can; the engine does not enforce that reading, a reader does.
 # A scope no other ability shares, so opening this by accident cannot collide with a real run's
-# lease. `scope_kind` may not be empty, and every value is a shared namespace, so it says what it
+# lease. `scope_kind` may not be empty and every value is a shared namespace, so it says what it
 # is: a probe, not a unit of work.
-scope_kind: worktree_probe
+scope_kind: memory_probe
 
 uses: [phase_goals, results]
 
 # 它只有一种终态：不该被开，所以开了就是放弃。没有 `completed` —— 声明一个永远不会发生的
-# 终态，等于给"这个 run 有意义"留了个口子。
+# 终态，等于给「这个 run 有意义」留了个口子。
 results:
   values: [abandoned]
   default: abandoned
@@ -41,10 +39,10 @@ phases:
     title: Facts only
     goal:
       type: all_of
-      steps: [W00]
+      steps: [M00]
 
 steps:
-  - id: W00
+  - id: M00
     phase: facts
     title: Placeholder — this ability is borrowed, not walked
     directive: |
@@ -55,8 +53,8 @@ steps:
       step`）。如果你正在读这条 directive，说明有人开了一个不该开的 run —— 关掉它，去开真正
       拥有该生命周期的那个 flow。
 
-      本 ability 的价值全部在 `providers.py` 注册的 `worktree_state`，由别的 flow 通过
-      `requires: [worktree]` + `facts.providers: [worktree.worktree_state]` 借用。
+      本 ability 的价值全部在 `providers.py` 注册的 `hot_set`，由别的 flow 通过
+      `requires: [memory]` + `facts.providers: [memory.hot_set]` 借用。
     completion:
       type: evidence
-      kind: worktree_probe_noop
+      kind: memory_probe_noop

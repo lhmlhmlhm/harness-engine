@@ -214,9 +214,32 @@ GATE_NONE = "none"
 # reads), and no production ability may `requires:` one. Conversely `production` is the default
 # and it MUST carry routing. The two constraints point in opposite directions, so neither role
 # is the cheap one to claim.
+#
+# THAT SECOND HALF WAS PROSE ONLY UNTIL 2026-09-15. `requires: [<a fixture>]` from a production
+# ability validated ✅ — measured. So the fixture label WAS the cheap one: claim it, drop out of
+# the strength report, and stay borrowable. It is enforced below now, which is only possible
+# because there is finally a role for the thing people actually wanted when they reached for
+# fixture: something borrowable that nothing routes to.
+#
+# `library` IS THAT ROLE. Borrowable like production, unroutable like a fixture, and reported
+# like neither: its steps are a placeholder the engine's own "at least one step" rule forces, so
+# scoring their criteria measures nothing. What keeps THIS label honest is the same shape as the
+# other two — it cannot carry `when:`, so nothing can be routed to it, so relabelling a real flow
+# `library` to escape the strength bar costs you every way of reaching it.
+#
+# What forced it: two installed flows existed only to be borrowed, and with no role for that they
+# were declared `production` and each carried a `when:` whose content was that it must not be used.
+# The roster is DERIVED from `when:`, so the engine printed both of those sentences to every agent
+# reading the list for a choice — the only thing preventing a mis-route was the agent reading to the
+# end of a hint that said "not this". (Naming them here would be the fusion the purity guard exists
+# to stop; the engine must be able to run an ability it has never heard of.)
 ROLE_PRODUCTION = "production"
 ROLE_FIXTURE = "fixture"
-ROLES = (ROLE_PRODUCTION, ROLE_FIXTURE)
+ROLE_LIBRARY = "library"
+ROLES = (ROLE_PRODUCTION, ROLE_FIXTURE, ROLE_LIBRARY)
+# Roles excluded from the routing roster and from the criteria-strength report. Named once, so a
+# third exclusion cannot be added to one site and forgotten at the other four.
+ROLES_UNROUTABLE = (ROLE_FIXTURE, ROLE_LIBRARY)
 
 GATE_AFFIRM = "affirm"
 GATE_PREAUTH_PREFIX = "preauth:"
@@ -630,6 +653,24 @@ def _require_plain_id(value, where: str, path: Path) -> str:
     return value
 
 
+def _declared_role(path) -> str:
+    """The `role:` a spec declares, read without building the flow.
+
+    Needed by the `requires` check, which runs while the DEPENDER is still being built: calling
+    `load()` on the dependency there would walk its own `requires` first and turn one bad edge into
+    a recursion. An unreadable or malformed dependency is not this check's business — it is about to
+    be loaded properly anyway, and reporting the role as production simply lets that happen.
+    """
+    try:
+        import yaml
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ROLE_PRODUCTION
+    if not isinstance(raw, dict):
+        return ROLE_PRODUCTION
+    return str(raw.get("role", ROLE_PRODUCTION)).strip() or ROLE_PRODUCTION
+
+
 def _reject_unknown(mapping: dict, allowed: set, where: str, path: Path, *,
                     newer_by: tuple[int, int] | None = None) -> None:
     # A non-string KEY means YAML coerced it — `on:` / `no:` / `yes:` are booleans in
@@ -855,17 +896,18 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
     if role not in ROLES:
         raise FlowError(
             f"{path}: role {role!r} is not one of {', '.join(ROLES)}.\n"
-            f"  '{ROLE_FIXTURE}' means this flow exists to exercise the engine and is not "
-            f"routable; anything else carrying work is '{ROLE_PRODUCTION}'."
+            f"  '{ROLE_FIXTURE}' exercises the engine, '{ROLE_LIBRARY}' exists only to be "
+            f"borrowed via `requires:`; neither is routable. Anything carrying work is "
+            f"'{ROLE_PRODUCTION}'."
         )
     when_text = str(raw.get("when", "")).strip()
-    if role == ROLE_FIXTURE and when_text:
+    if role in ROLES_UNROUTABLE and when_text:
         raise FlowError(
-            f"{path}: a '{ROLE_FIXTURE}' declares `when:`, which is the hint an agent reads to "
+            f"{path}: a '{role}' declares `when:`, which is the hint an agent reads to "
             f"REACH for an ability.\n"
-            f"  A fixture is excluded from the criteria-strength report, so it must not also be "
+            f"  A '{role}' is excluded from the criteria-strength report, so it must not also be "
             f"reachable — otherwise the label is a way to carry real work with weak criteria.\n"
-            f"  Move the text to a comment, or drop `role: {ROLE_FIXTURE}`."
+            f"  Move the text to a comment, or drop `role: {role}`."
         )
     if role == ROLE_PRODUCTION and len(when_text) < 20:
         raise FlowError(
@@ -874,7 +916,8 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             f"  Routing has to be derivable from the abilities themselves; a hand-kept table "
             f"elsewhere is stale the moment one lands and reads authoritative while wrong.\n"
             f"  If this flow exists to exercise the engine rather than carry work, declare "
-            f"`role: {ROLE_FIXTURE}` instead."
+            f"`role: {ROLE_FIXTURE}`; if it exists only to be borrowed by another flow, "
+            f"`role: {ROLE_LIBRARY}`."
         )
     declared = _require(raw, "ability", path, str)
     if declared != ability:
@@ -1201,6 +1244,20 @@ def _build(ability: str, raw: dict, digest: str, path: Path) -> Flow:
             raise FlowError(
                 f"{path}: requires ability '{dep_ability}', which is not installed.\n"
                 f"  available: {', '.join(available_abilities())}"
+            )
+        # The ban the role comment claimed and nothing checked. A fixture is exempt from the
+        # strength report BECAUSE it only exercises the engine; borrowing one puts test scaffolding
+        # underneath real work, and the exemption then covers something that is load-bearing.
+        # Read from the dependency's own spec text rather than by loading it — a full load here
+        # would recurse through its `requires` before this check ran.
+        dep_role = _declared_role(spec_path(dep_ability))
+        if dep_role == ROLE_FIXTURE:
+            raise FlowError(
+                f"{path}: requires ability '{dep_ability}', which is a '{ROLE_FIXTURE}'.\n"
+                f"  A fixture is excluded from the criteria-strength report because it exists to "
+                f"exercise the engine; borrowing one puts scaffolding under real work and extends "
+                f"that exemption to something load-bearing.\n"
+                f"  If '{dep_ability}' is meant to be borrowed, it is a '{ROLE_LIBRARY}'."
             )
         load_extensions(dep_ability)
 

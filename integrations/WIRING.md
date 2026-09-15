@@ -15,7 +15,7 @@
 
 | 本安装实测 | | 谁产出它 |
 |---|---|---|
-| 驱动契约（`--portable`） | 231 行 | `harness brief --portable` |
+| 驱动契约（`--portable`） | 230 行 | `harness brief --portable` |
 | 其中不可派生的判断规则 | 7 条 | `brief.JUDGMENT` |
 | 只在用到时才渲染的小节 | 10 个 | `brief._CONDITIONAL` |
 | 最大的一条 flow | `shipcheck-asis`，104 步 | `harness abilities` |

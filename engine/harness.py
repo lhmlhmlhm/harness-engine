@@ -334,18 +334,21 @@ def cmd_abilities(args) -> int:
         roots = ", ".join(str(r) for r in flowmod.abilities_roots())
         print(f"(none installed under: {roots})")
         return OK
-    fixtures = []
+    # Two reasons to be off the roster, and they are not the same claim: scaffolding exists to
+    # exercise the engine, a library exists to be borrowed by a real flow. Printing both under
+    # "test scaffolding" said something false about the ones real work depends on.
+    unroutable = {flowmod.ROLE_FIXTURE: [], flowmod.ROLE_LIBRARY: []}
     for name in names:
         try:
             f = flowmod.load(name)
         except flowmod.FlowError as exc:
             print(f"❌ {name}: INVALID — {str(exc).splitlines()[0]}")
             continue
-        if f.role == flowmod.ROLE_FIXTURE:
+        if f.role in flowmod.ROLES_UNROUTABLE:
             # Kept OUT of the roster an agent reads to route. An entry that cannot be reached
             # is noise at best and a mis-route at worst; a trailing line keeps it discoverable
             # by a human without offering it as a choice.
-            fixtures.append(name)
+            unroutable[f.role].append(name)
             continue
         gated = sum(1 for s in f.steps.values() if s.gate != flowmod.GATE_NONE)
         checked = sum(1 for s in f.steps.values()
@@ -367,9 +370,14 @@ def cmd_abilities(args) -> int:
                     print(f"     ↳ {line.strip()}")
         print(f"     facts={'+'.join(f.facts_providers)}({len(f.facts_schema)} declared)"
               f"  hooks={len(f.hooks)} ({conditional} conditional, {obliged} obligation)")
-    if fixtures:
-        print(f"\n   fixtures (not routable): {', '.join(fixtures)}")
+    if unroutable[flowmod.ROLE_FIXTURE]:
+        print(f"\n   fixtures (not routable): "
+              f"{', '.join(unroutable[flowmod.ROLE_FIXTURE])}")
         print("   — engine test scaffolding; each flow.yaml header says why it is kept")
+    if unroutable[flowmod.ROLE_LIBRARY]:
+        print(f"\n   libraries (not routable, borrowed via `requires:`): "
+              f"{', '.join(unroutable[flowmod.ROLE_LIBRARY])}")
+        print("   — real work depends on these; they carry facts, not a lifecycle")
     return OK
 
 def cmd_validate(args) -> int:
@@ -402,19 +410,21 @@ def cmd_validate(args) -> int:
         import collections as _c
         tiers = _c.Counter(predicates.strength(st.completion) for st in f.steps.values())
         NAMES = {3: "derived", 2: "value-checked", 1: "record-exists", 0: "UNCHECKED"}
-        if f.role == flowmod.ROLE_FIXTURE:
+        if f.role in flowmod.ROLES_UNROUTABLE:
             # NOT REPORTED, and the omission is the point. A fixture's criteria are weak
             # because a fixture does not need strong criteria — it needs to be small, stable
             # and to reach a mechanism. Printing the tiers here invited reading a deliberate
             # `attest` floor as an unfinished ability, which is exactly what happened for
             # several rounds before this role existed.
-            print(f"   role: {f.role} — engine test scaffolding, not routable; "
+            why = ("engine test scaffolding" if f.role == flowmod.ROLE_FIXTURE
+                   else "borrowed via `requires:`, never routed")
+            print(f"   role: {f.role} — {why}, not routable; "
                   f"criteria strength not reported")
         else:
             print("   criteria: " + " · ".join(
                 f"{NAMES[t]}×{tiers.get(t, 0)}" for t in (3, 2, 1, 0)))
         weak = [st.id for st in f.steps.values() if predicates.strength(st.completion) == 0]
-        if weak and f.role != flowmod.ROLE_FIXTURE:
+        if weak and f.role not in flowmod.ROLES_UNROUTABLE:
             print(f"   ⚠️  {len(weak)} step(s) check nothing: {', '.join(weak[:10])}")
         # COMPLETENESS, alongside strength. They are different failures and one hides the
         # other: a step that produces three artifacts and pins the strongest ONE scores well on
@@ -423,7 +433,7 @@ def cmd_validate(args) -> int:
         pinned = [len([r for r in predicates.requirements(st.completion)
                        if r["what"] == "evidence"]) for st in f.steps.values()]
         multi = sum(1 for n in pinned if n >= 2)
-        if f.role != flowmod.ROLE_FIXTURE:
+        if f.role not in flowmod.ROLES_UNROUTABLE:
             print(f"   artifacts: {sum(pinned)} pinned across {len(pinned)} steps"
                   f" ({multi} step(s) pin ≥2)")
         # CAPABILITIES, probed here rather than left to be discovered mid-run. "Can this

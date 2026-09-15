@@ -3896,12 +3896,15 @@ def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path)
     import sys as _s
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
-    _fl.load_extensions("shipcheck-asis")
+    # `load`, not `load_extensions`: the provider lives in the `memory` ability now, and only the
+    # full load follows `requires` to it. Naming that ability here instead would write the ownership
+    # down a second time — and ownership is exactly what just moved.
+    _fl.load("shipcheck-asis")
 
     # A path with no store at all: the CLI creates an empty database, finds no tables, and
     # exits non-zero. The count it implies is an artefact of that failure.
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "nope.db"))
-    got = _f.gather("shipcheck-asis.hot_set", {})
+    got = _f.gather("memory.hot_set", {})
     assert got["hot_banner_readable"] is False, got
     assert got["hot_set_count"] == 0 and got["hot_set_ids"] == [], got
 
@@ -3911,13 +3914,18 @@ def test_an_unreadable_hot_store_is_not_an_empty_one(env, monkeypatch, tmp_path)
     monkeypatch.delenv("MEMORY_DB_PATH", raising=False)
     cli = pathlib.Path("~/.kiro/skills/shared-kb/memory/memory.py").expanduser()
     if cli.is_file():
-        proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
+        # The SAME surface the provider reads. Asking for the banner here and json there would
+        # compare two different questions, and on a store predating the json fix the banner exits 0
+        # while the machine surface is unparseable — the assertion would fail for a reason that has
+        # nothing to do with what it is about.
+        proc = subprocess.run([sys.executable, str(cli), "hot-banner", "--format", "json"],
                               capture_output=True, text=True)
-        live = _f.gather("shipcheck-asis.hot_set", {})
+        live = _f.gather("memory.hot_set", {})
         assert live["hot_banner_readable"] is (proc.returncode == 0), (proc.returncode, live)
         if proc.returncode == 0:
-            # The listing lines are load-bearing: a count with the per-entry lines dropped is
-            # the observed way this banner degrades.
+            # The roster is load-bearing, not decoration: a count whose per-entry ids went missing
+            # is the observed way this reading degrades, and the provider treats the two disagreeing
+            # as unreadable rather than picking one.
             assert len(live["hot_set_ids"]) == live["hot_set_count"], live
 
 
@@ -4045,7 +4053,7 @@ def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
     )
     owner = flowmod.load("shipcheck-asis").facts_owner
     for f in facts_used:
-        assert owner.get(f) == "shipcheck-asis.hot_set", (f, owner.get(f))
+        assert owner.get(f) == "memory.hot_set", (f, owner.get(f))
 
 
 def test_the_design_lifecycle_is_documented_as_executed_ELSEWHERE(env):
@@ -4147,26 +4155,31 @@ def test_routing_and_the_fixture_role_are_two_sides_of_one_rule(env):
     quietly-stale routing table sends work into the wrong lifecycle — worse than no table,
     because it reads authoritative. So every production ability carries its own `when:`.
 
-    The second half is what stops the fixture role from being an escape hatch. A role that only
+    The second half is what stops an excluded role from being an escape hatch. A role that only
     silenced a report could be claimed by anything; here it is tied to something structural and
-    checked at load — a fixture must NOT carry `when:`, so it cannot be reached at all. The two
-    requirements point in opposite directions, which is what makes neither the cheap one to
+    checked at load — an unroutable role must NOT carry `when:`, so it cannot be reached at all. The
+    two requirements point in opposite directions, which is what makes neither the cheap one to
     claim: dodging the criteria report costs you reachability.
+
+    Written against `ROLES_UNROUTABLE` rather than naming the fixture role, because this rule was
+    the fixture role's for a while and then `library` joined it. A test that spelled the membership
+    out a second time would have passed while `library` sat outside the rule it belongs to — the
+    same shape as the ban this file now also checks, which was prose for months.
     """
     from engine import flow as flowmod
     missing, reachable = [], []
     for name in flowmod.available_abilities():
         f = flowmod.load(name)
-        if f.role == flowmod.ROLE_FIXTURE:
+        if f.role in flowmod.ROLES_UNROUTABLE:
             if f.when.strip():
                 reachable.append(name)
         elif len(f.when.strip()) < 20:
             missing.append(name)
     assert not missing, f"no usable `when:` on production ability: {missing}"
-    assert not reachable, f"fixture is routable, which defeats the role: {reachable}"
-    # At least one of each, or this asserts nothing.
+    assert not reachable, f"an unroutable role carries routing, which defeats it: {reachable}"
+    # At least one of each role, or this asserts nothing.
     roles = {flowmod.load(n).role for n in flowmod.available_abilities()}
-    assert roles == {flowmod.ROLE_PRODUCTION, flowmod.ROLE_FIXTURE}, roles
+    assert roles == set(flowmod.ROLES), roles
     # A fixture must not be load-bearing for real work either.
     for name in flowmod.available_abilities():
         f = flowmod.load(name)
@@ -9708,3 +9721,208 @@ def test_a_deleted_header_is_not_put_back(env, tmp_path):
 
     assert rc(["require", "--add", "authoring", "--scope-key", str(tmp_path / "eee")], env) == OK
     assert "harness-engine — where a flow is MANDATORY" not in _policy(env), _policy(env)
+
+
+# ---------------------------------------------------------------------------
+# The `memory` ability reads a MACHINE surface now. These pin the two ways that reading can fail
+# without the command failing — both of which used to be impossible to distinguish from "empty".
+# ---------------------------------------------------------------------------
+def _fake_memory_cli(tmp_path, body: str) -> str:
+    """A stand-in for the store's CLI. A fake rather than the real store on purpose: the real one
+    cannot be made to answer incoherently, and an untestable branch is one nobody can trust."""
+    p = tmp_path / "fake_memory.py"
+    p.write_text("import sys\n" + body, encoding="utf-8")
+    return str(p)
+
+
+def test_an_unparseable_hot_reading_is_not_an_empty_one(env, monkeypatch, tmp_path):
+    """What a store predating the json fix does: `--format json` printed the banner.
+
+    The provider must call that unreadable. Treating unparseable output as zero would resurrect
+    exactly the confusion the flag exists to prevent — and silently, since the command exits 0.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_MEMORY_CLI", _fake_memory_cli(
+        tmp_path, "print('\\U0001F525 Hot Set: 7 loaded')\nprint('   \\u2514\\u2500 [a]')\n"))
+    got = _f.gather("memory.hot_set", {})
+    assert got["hot_banner_readable"] is False, got
+    assert got["hot_set_count"] == 0 and got["hot_set_ids"] == [], got
+
+
+def test_an_incoherent_hot_reading_is_not_a_successful_one(env, monkeypatch, tmp_path):
+    """count and ids disagreeing means there is no answer to report, not two to choose from.
+
+    Reporting the count would present a store that contradicted itself as one that was consulted
+    successfully — and the count is the number a criterion checks.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_MEMORY_CLI", _fake_memory_cli(
+        tmp_path, "print('{\"count\": 9, \"ids\": [\"a\"]}')\n"))
+    got = _f.gather("memory.hot_set", {})
+    assert got["hot_banner_readable"] is False, got
+    assert got["hot_set_count"] == 0, got
+
+
+def test_a_coherent_hot_reading_comes_through_the_machine_surface(env, monkeypatch, tmp_path):
+    """The positive case against a fake, so the pair above cannot both pass by the provider simply
+    never reporting anything — an all-unreadable provider satisfies every assertion about failure."""
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_MEMORY_CLI", _fake_memory_cli(
+        tmp_path, "print('{\"count\": 2, \"ids\": [\"a\", \"b\"], \"db\": \"/s/x.db\"}')\n"))
+    got = _f.gather("memory.hot_set", {})
+    assert got["hot_banner_readable"] is True, got
+    assert got["hot_set_count"] == 2 and got["hot_set_ids"] == ["a", "b"], got
+    assert got["hot_store_path"] == "/s/x.db", got
+
+
+def test_no_spec_hand_copies_a_step_count():
+    """A number a reader can derive must not be typed into a title or a routing hint.
+
+    Measured drift, twice over: `shipcheck-asis`'s `when:` said 101 steps, then 102, then the flow
+    grew to 104 — and four of its eight phase titles were wrong at the same time (context 25→26,
+    execution 9→10, observation 8→10, cleanup 19→18). Nothing failed, because nothing was checking:
+    the same shape as the README's eight numeric drifts, one layer down in the specs.
+
+    Scoped to `title:` and `when:` — the strings the engine SHOWS as routing and progress. Comments
+    are exempt on purpose: a comment recording "the source registry had 101 steps with content" is a
+    measurement of another system at a stated time, and forbidding that would delete history to
+    satisfy a guard.
+    """
+    import re
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    bad = []
+    count = re.compile(r"(\d+)\s*步")
+    for name in fl.available_abilities():
+        spec = fl.spec_path(name)
+        for i, line in enumerate(spec.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if not re.match(r"^(title|when):", stripped):
+                continue
+            m = count.search(line)
+            if m:
+                bad.append(f"  {spec.name}:{i} names {m.group(1)} steps: {stripped[:70]}")
+    assert not bad, (
+        "a spec hand-copies a step count into text the engine shows:\n" + "\n".join(bad)
+        + "\n  `harness abilities` and `harness next` derive it; a typed copy drifts silently."
+    )
+
+
+# ---------------------------------------------------------------------------
+# `role: library` — the third value. Borrowable like production, unroutable like a fixture.
+# ---------------------------------------------------------------------------
+def test_a_library_is_borrowable_but_never_routed(env, tmp_path):
+    """The two halves that make the label non-cheap, asserted together.
+
+    Before this role existed, `worktree` and `memory` were `production` carrying a `when:` whose
+    content was that they must not be used — and the roster is DERIVED from `when:`, so the engine
+    offered both of those sentences to every agent reading the list for a choice.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    libs = [n for n in fl.available_abilities() if fl.load(n).role == fl.ROLE_LIBRARY]
+    assert libs, "no library installed — this test would assert nothing"
+    for name in libs:
+        f = fl.load(name)
+        assert not f.when, f"{name} is a library and carries routing text: {f.when!r}"
+    # And borrowable: something real depends on one, which is the whole difference from a fixture.
+    borrowed = {d for n in fl.available_abilities() for d in fl.load(n).requires}
+    assert borrowed & set(libs), (borrowed, libs)
+
+
+def test_a_library_may_not_carry_routing_text(env, tmp_path):
+    """Load-time refusal, because that is what stops the label from being free: a `library` that
+    could still be routed to would be a way to hold real work while sitting out the strength
+    report."""
+    d = _spec(env, "__lib__", """
+role: library
+when: |
+  This sentence is the whole problem — a library that can be reached is not a library.
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        out = run(["validate", "__lib__"], env)
+        assert out.returncode == BAD_SPEC, (out.returncode, out.stdout, out.stderr)
+        assert "library" in (out.stdout + out.stderr), out.stdout + out.stderr
+    finally:
+        _rm(d)
+
+
+def test_production_may_not_borrow_a_fixture(env, tmp_path):
+    """The ban `role:`'s own comment claimed for months while nothing checked it.
+
+    Measured before the fix: a production ability declaring `requires: [<a fixture>]` validated ✅.
+    So the fixture label WAS the cheap one — claim it, leave the strength report, stay borrowable.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    fix = [n for n in fl.available_abilities() if fl.load(n).role == fl.ROLE_FIXTURE]
+    assert fix, "no fixture installed — this test would assert nothing"
+    d = _spec(env, "__borrow__", f"""
+uses: [ability_deps]
+requires: [{fix[0]}]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        out = run(["validate", "__borrow__"], env)
+        assert out.returncode == BAD_SPEC, (out.returncode, out.stdout, out.stderr)
+        assert fix[0] in (out.stdout + out.stderr), out.stdout + out.stderr
+    finally:
+        _rm(d)
+
+
+def test_the_hot_reading_names_the_store_it_came_from(env, monkeypatch, tmp_path):
+    """A count cannot be checked against the right store unless the store is part of the answer.
+
+    Partition the memory DB per user and "the lessons were loaded" becomes satisfiable by a reading
+    of somebody else's — a criterion met by the wrong evidence, which this engine treats as worse
+    than a missing check.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_MEMORY_CLI", _fake_memory_cli(
+        tmp_path, "print('{\"count\": 1, \"ids\": [\"a\"], \"db\": \"/tenants/alice.db\"}')\n"))
+    got = _f.gather("memory.hot_set", {})
+    assert got["hot_store_path"] == "/tenants/alice.db", got
+    assert got["hot_banner_readable"] is True, got
+
+
+def test_a_hot_reading_that_names_no_store_is_unreadable(env, monkeypatch, tmp_path):
+    """What an older store does — it answers count and ids and cannot say whose they are.
+
+    Reporting the count anyway would hand back the number while omitting the only thing that makes
+    it checkable, which is the state the field was added to end.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f, flow as _fl
+    _fl.load("shipcheck-asis")
+    monkeypatch.setenv("HARNESS_MEMORY_CLI", _fake_memory_cli(
+        tmp_path, "print('{\"count\": 4, \"ids\": [\"a\",\"b\",\"c\",\"d\"]}')\n"))
+    got = _f.gather("memory.hot_set", {})
+    assert got["hot_banner_readable"] is False, got
+    assert got["hot_set_count"] == 0 and got["hot_store_path"] == "", got

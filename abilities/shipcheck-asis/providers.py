@@ -57,8 +57,6 @@ NOISE_RULES = TOOLS / "config" / "analyzer-noise-rules.yaml"
 COMMENT_CLASSIFY = TOOLS / "analyzer-comment-classify.py"
 RUN_METRICS = TOOLS / "analyze-run-metrics.py"
 FLEET_PROBE = TOOLS / "fleet_probe.py"
-# NOT copied into the ability, deliberately — see `_hot_set`.
-MEMORY_CLI_DEFAULT = "${HARNESS_MEMORY_CLI:-~/.kiro/skills/shared-kb/memory/memory.py}"
 # 与 worktree 同类：这两处的效果由 agent 跑脚本完成，引擎只读核实，所以脚本一个字节都不复制。
 # 两个位置都可用环境变量覆盖，而这不是为了灵活：**没有覆盖口的话，测试只能读用户真实的
 # 方案语料**（几百份文档），而一个粗心的测试会写进去。这类事在相邻项目里发生过一次——一套
@@ -485,55 +483,6 @@ def _fleet_central(ctx: dict) -> dict:
     got["fleet_event_count"] = int(payload.get("events") or 0)
     got["fleet_artifact_count"] = int(payload.get("artifacts") or 0)
     return got
-
-
-@facts.provider("hot_set",
-                requires=({"file": MEMORY_CLI_DEFAULT},),
-                schema={
-    # Whether the store could be READ. Paired with the count on purpose: "consulted and
-    # genuinely empty" and "never consulted" both render as zero, and the standing instruction
-    # in this space is explicitly not to let the second become the first.
-    "hot_banner_readable": operators.T_BOOL,
-    "hot_set_count": operators.T_INT,
-    "hot_set_ids": operators.T_LIST,
-})
-def _hot_set(ctx: dict) -> dict:
-    """The always-resident slice of accumulated lessons, read from wherever it actually lives.
-
-    WHY THIS TOOL IS NOT COPIED, unlike every other one here. The others are algorithms, and an
-    algorithm travels. This one's value is a LIVE LOCAL STORE — a database that is deliberately
-    not in version control because it accumulates per-machine usage signal. Copying the reader
-    would produce a reader pointed at nothing. So the capability names the path where it lives,
-    and absence there is reported rather than papered over.
-
-    That is the general rule this case establishes: a tool whose value is its own accumulated
-    state cannot be vendored, and the capability declaration is what keeps its absence honest.
-
-    The command is a pure read (SELECTs only, no counter or timestamp touched), so calling it
-    repeatedly to evaluate a criterion is safe. Its sibling `recall` is NOT — it records usage
-    unless told otherwise — which is exactly why this provider calls the one that does not.
-    """
-    empty = {"hot_banner_readable": False, "hot_set_count": 0, "hot_set_ids": []}
-    # Overridable for the same reason the other two are: a test must be able to point this at a
-    # scratch store instead of the live one. Unlike the plan corpus this is a CLI rather than a
-    # directory, so a wrong value fails loudly on exec rather than reading someone else's data.
-    cli = _spec_path(MEMORY_CLI_DEFAULT).expanduser()
-    try:
-        proc = subprocess.run([sys.executable, str(cli), "hot-banner"],
-                              capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return empty
-    # exit 3 = the store exists but was never migrated; exit 1 = locked or crashed. Both are
-    # "could not look", and the count they imply is an artefact of failure, not a result.
-    if proc.returncode != 0:
-        return empty
-    ids = re.findall(r"└─ \[([^\]]+)\]", proc.stdout)
-    m = re.search(r"Hot Set:\s*(\d+)\s*loaded", proc.stdout)
-    if not m:
-        return empty
-    return {"hot_banner_readable": True,
-            "hot_set_count": int(m.group(1)),
-            "hot_set_ids": ids}
 
 
 @facts.provider("plan_writeback",
