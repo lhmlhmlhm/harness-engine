@@ -11,24 +11,42 @@ harness-engine/
 ├── pyproject.toml           打包（唯一外部依赖：PyYAML）
 ├── LICENSE                  MIT
 ├── bin/harness              入口（几行 argv 转发，行为全在 engine/）
-├── engine/                  【基座】不含任何能力词汇
+├── engine/                  【基座】不含任何能力词汇（模块数与行数见下方生成表）
 │   ├── __init__.py          版本号的唯一出处（pyproject 动态读它）
+│   ├── flow.py              flow spec 加载 + 校验（= 插件层）
+│   ├── predicates.py        完成谓词注册表（= 扩展点）
+│   ├── proof.py             gate 防伪 witness 注册表
 │   ├── brief.py             驱动契约的渲染器（`harness brief` 的产出）
+│   ├── onboard.py           一个 agent 被允许伸手拿哪些 —— 声明为数据，且被校验
 │   ├── registry.py          四个注册表共享的那件事：名字归谁、引用怎么解析
 │   ├── trust.py             扩展文件是代码：钉内容、报告、以及它不声称的东西
 │   ├── policy.py            哪里的流程是强制的（防遗漏，不防颠覆）
 │   ├── outputs.py           一步交回什么：读文件的一部分，且刻意不承重
 │   ├── schema.sql           引擎自己拥有的表
 │   ├── store.py             SQLite 访问层，所有跨界值都是不透明 TEXT
-│   ├── flow.py              flow spec 加载 + 校验（= 插件层）
-│   ├── predicates.py        完成谓词注册表（= 扩展点）
-│   ├── proof.py             gate 防伪 witness 注册表
 │   └── harness.py           CLI
-├── abilities/               【能力】一个 folder 一个能力，纯数据
-│   ├── delivery/flow.yaml   role: fixture —— 机制测试夹具（guard / hook / 义务那一路）
-│   └── authoring/flow.yaml  role: fixture —— 机制测试夹具（菱形依赖、attest）
+├── abilities/               【引擎级能力】一个 folder 一个能力，纯数据
+│   ├── sample-change/       role: production —— 满配样本（两个人工门、变体、互斥对、义务）
+│   ├── sample-note/         role: production —— 小样本（非位置 scope，显式变体）
+│   ├── sample-lib/          role: library    —— 被借用，永不路由
+│   ├── delivery/            role: fixture    —— 机制测试夹具（guard / hook / 义务那一路）
+│   ├── authoring/           role: fixture    —— 机制测试夹具（菱形依赖、attest）
+│   └── worktree/            role: library    —— 被借用的事实源
+├── agents/                  【引擎级 agent 定义】一个 agent 一份 yaml，由 `harness onboard` 校验
+│   └── sample-agent.yaml    随包样例：它绑定上面两条 production 样本
+├── workspace/               【个人级】被 .gitignore；公开仓在这里跟踪 0 个文件
+│   └── <你的名字>/          你自己的 git 仓库，与引擎同生共死但互不混淆
+│       ├── abilities/       你自己的能力
+│       └── agents/          你自己的 agent 定义
 └── tests/
 ```
+
+**两层是同一个形状，这是它好记的原因**：`abilities/` 旁边就是 `agents/`，而 `workspace/<你>/`
+下面也是这两个。引擎因此**零配置**就能找到你的东西 —— agent 定义的搜索根是从每个 abilities 根
+派生的（`<根>/../agents`），于是「有能力集的地方就有它的 agent 定义」，两者一起被拷到另一台机器。
+
+分家的理由不是整洁：**你的流程不该随引擎一起发行，而引擎的样本不该假装是你的流程。** 分家当天
+量到的代价是 79 条测试失败 —— 它们一直拿作者的私有能力当素材，而那份素材刚离开这棵树。
 
 <!-- BEGIN GENERATED — python3 integrations/render-readme.py --write -->
 
@@ -42,6 +60,9 @@ harness-engine/
 | 入口 | 10 行（行为全在 `engine/`） | `bin/harness` |
 | 引擎自己拥有的表 | 9 张 | `engine/schema.sql` |
 | spec 格式 MAJOR | 2 | `flow.SPEC_MAJOR` |
+| 一条 flow 可声明的 role | 3 种 | `flow.ROLES` |
+| 驱动契约里不可派生的判断规则 | 7 条 | `brief.JUDGMENT` |
+| 其中只在用到时才渲染的小节 | 10 个 | `brief._CONDITIONAL` |
 | 完成谓词 | 15 个 | `predicates._REGISTRY` |
 | gate 防伪 witness | 2 个 | `proof._WITNESSES` |
 | 运行时事实 provider | 3 个 | `facts._PROVIDERS` |
@@ -108,10 +129,13 @@ harness evidence --run <id> --step <s> --kind <k> --value <v>
 harness close-step --run <id> --step <s>              # 判据不满足则 exit 3
 ```
 
-**②不能省，因为装出来的东西里没有任何 flow，这是刻意的。** `abilities/` 不进包：树里那两条是
-测试夹具（`role: fixture`），而消费方的 flow 是消费方的——把任何一边塞进包里，就是往一个
-「核心主张是自己不含领域」的基座里放进一个领域。所以全新安装会如实说「一个都没装」，并等你指出
-自己的树在哪。
+**②不能省，因为装出来的东西里没有任何 flow，这是刻意的。** `abilities/` 不进包：树里那几条要么是
+测试夹具（`role: fixture`）、要么是**样本**（`sample-*`，存在的目的是被读和被引擎自己的测试驱动），
+而消费方的 flow 是消费方的——把任何一边塞进包里，就是往一个「核心主张是自己不含领域」的基座里放进
+一个领域。所以全新安装会如实说「一个都没装」，并等你指出自己的树在哪。
+
+（**样本随 checkout 走，但不随 pip 包走**，这两件事不同：克隆这个仓库的人应该有东西可读、可跑，而
+`pip install` 得到的应该是一个不含任何流程的基座。）
 
 **上手的工作量不在这三条命令上，在把你的 flow 写到能载入。** 引擎不替你猜，而是逐条说缺什么：
 
@@ -276,7 +300,7 @@ harness brief                # 契约生成得出来吗；里面的 hook 工具�
 harness validate             # 全部 spec 合法？exit 2 = 不合法（CI 就读这个码）
 ```
 
-**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 整套 476 个测试在 **3.10.16** 上跑过并全绿
+**`requires-python = ">=3.10"` 是跑出来的，不是猜的。** 当时整套 476 个测试在 **3.10.16** 上跑过并全绿
 （2026-09-11 实测，415 秒，与 3.12 上的 476 一致；`mcp` 需钉 1.x，见下条）。所以下限写 3.10。
 它以下**没有被验证过**——想往下调，先在那个版本上把套件跑一遍，而不是改这一行。
 声明一个未经测试的下限，和引擎在别处拒绝的「不可证伪声称」是同一件事。
@@ -533,7 +557,9 @@ results:
 
 词汇表在 `abilities --json` 里可读，所以 driver **在关 run 之前**就知道合法值，而不是只能从一次拒绝里学到。
 
-8 个已装 flow 全部声明了 `[completed, abandoned]`。**这个集合刻意保守**：`abandoned` 是引擎已经半知道
+当时 8 个已装 flow 全部声明了 `[completed, abandoned]`（那是私有集还在这棵树里的时候；现在这里
+只剩样本与夹具，所以这个数字换成了下面那句「凡是装着的都声明」的说法 —— **一个随安装变化的数字
+写在散文里，发行之后就是一句自信的错话**）。**这个集合刻意保守**：`abandoned` 是引擎已经半知道
 的那个区别（强制关闭与干净关闭不是一件事）。更贴合各 flow 的词汇（`shipped` / `drafted` / `pushed`）现在
 可表达了，但那是领域判断，不该由我替这些 spec 决定。
 
@@ -644,9 +670,16 @@ guard，而那是某些动作唯一可能的机制（人在一个 driver 根本�
 现在两处都报：`abilities --json` 加 `guard_reach`（`hook` / `ask_only`），文本形态标注
 `(1 ask-only: publish)`，契约里加一句「Not every guarded action is in that list」并列出它们。
 
-**穷尽核实过：5 个生产 flow 的 11 个 guard 动作全部可经 hook 触发；3 个仅可主动询问的都在 fixture
-`delivery` 里。** 有测试钉住这个状态——不是禁止，是让第一个依赖它的生产 flow 成为**某人做的决定**，
-而不是一次没人看见的漂移。
+**穷尽核实过：凡是 `role: production` 的 flow，它的每个 guard 动作都可经 hook 触发；仅可主动询问的
+那些全都在夹具里。** 有测试钉住这个状态（`test_no_shipped_production_flow_relies_on_an_ask_only_guard`）
+——不是禁止，是让第一个依赖它的生产 flow 成为**某人做的决定**，而不是一次没人看见的漂移。
+
+**它当场抓到过一次，而那次是本文档作者自己。** 新写的 `sample-change` 有一个 `settle` guard 没配
+`matches:`，于是它成了一条「只在 driver 主动来问时才会响」的保护 —— 保护取决于被保护方的配合。写这条
+不变量的人在写样本时犯了它盯的那个错，这大概就是它值得是一条测试而不是一句约定的理由。
+
+（此处原本写着「5 个生产 flow 的 11 个 guard 动作」。那是私有集还在这棵树里时的数字，分家之后
+就不对了 —— 所以这一段现在讲的是**性质**，数字交给 `harness abilities` 去数。）
 
 ### 账本终于能被问「这里最常出什么问题」
 
@@ -961,15 +994,42 @@ flow。
 ### 接一个 agent：一段生成的 prompt + 一份契约
 
 ```sh
-harness init                  # 顺带把本机契约写到 store 旁并打印路径
-harness brief --write         # 或单独刷新；agent 的 resources 指这个文件
-harness adapter-contract      # 适配器必须满足的用例（JSON）
+harness init                          # 顺带把本机契约写到 store 旁并打印路径
+harness brief --write                 # 或单独刷新（未收窄的那份）
+harness brief --write --agent <name>  # 收窄到该 agent 的绑定，写成 brief-<name>.md
+harness onboard                       # 每个 agent 绑定了什么，对着实际装了什么核一遍
+harness adapter-contract              # 适配器必须满足的用例（JSON）
 ```
 
-**两份副本，别指错**：`$XDG_STATE_HOME/harness-engine/brief.md` 是给 agent 的（本机真实路径，
-可直接跑）；`integrations/DRIVING.md` 是给人在仓库里看的参考副本（`--portable`，路径是占位符）。
-签入的那份开头会自述身份并指向 `--write`，因为**这条真的错过一次**——一个 agent 配置指着签入
-副本，于是 agent 被告知 alias 一个占位符。`--write` 与 `--portable` 同时给会被拒。
+**一个 agent 读两份文件**，而它们回答的是不同的问题：
+
+| | 它说什么 | 谁产出 |
+|---|---|---|
+| `brief-<agent>.md` | **怎么**驾驶这个引擎，以及**你**能伸手拿哪些 flow | 生成 |
+| `agents/<agent>.yaml` | 这个 agent 绑定了哪些能力、哪些跨 run 的接力、哪些对容易混 | 人写，引擎校验 |
+
+分工是按**「引擎知不知道」**划的：装了什么、每条的 `when:`、每条的 role、`requires:` —— 引擎知道，
+所以都由命令派生，绝不手抄。而「这个 agent 可以拿哪些」引擎不知道，那才是 yaml 的全部内容。
+`harness onboard` 把 yaml 里每个名字对着实际装了什么解析：点名一个没装的、或点名一个 role 从不被
+路由的（`fixture` / `library`），都是加载期拒绝 —— 这两种错在运行时是**静默**的，agent 只是从不
+伸手，然后把自己的无所作为读成「没什么要做」。
+
+**三份副本，别指错**：`$XDG_STATE_HOME/harness-engine/brief-<agent>.md` 是给那个 agent 的；
+同目录的 `brief.md` 是未收窄的那份（装了什么的全景）；`integrations/DRIVING.md` 是给人在仓库里看的
+参考副本（`--portable`，路径是占位符）。签入的那份开头会自述身份并指向 `--write`，因为**这条真的
+错过一次**——一个 agent 配置指着签入副本，于是 agent 被告知 alias 一个占位符。`--write` 与
+`--portable` 同时给会被拒；`--agent` 与 `--portable` 也会被拒，理由同类：一份签入的参考副本按某个
+人的绑定收窄，等于把他的 agent 名册当成引擎的一部分发行出去。
+
+**为什么每 agent 一份而不是共用一份。** 那一节的标题是「装了什么，以及**何时去拿**」—— 列出一条它
+没被绑定的 flow，不只是多给了信息，而是在**邀请它去驾驶别人的活**。共用一个路径还会让最后一次写入
+覆盖所有人，于是除一个之外的每个 agent 都在读一份对它静默错误的收窄。
+
+**收窄只动「你能驾驶什么」，不动「宿主怎么配」。** hook 必须覆盖的工具清单**不收窄**：拦截路径会
+遍历机器上每一个打开的 run，不管是谁开的，所以按收窄后的清单去配 hook，就会在别人的 run 上静默地
+不问。同理，被政策**强制**的 flow 也不跟着收窄 —— 如果这个 agent 没绑定它，矛盾会被写进文档给
+agent 看（「你在那些 scope 里就满足不了这条要求，不许绕过去，说出来并停下」），因为一份从未提过
+那条 flow 的契约会让 agent 撞上一个无从解释的拒绝，那时候「绕过去」看起来就是唯一的出路。
 
 **新鲜度靠 `init` 而不是靠记性**：它每次都重写那份契约。一份没人重新生成的生成物，就是一份多
 几个步骤的手写文件。
@@ -983,12 +1043,16 @@ harness adapter-contract      # 适配器必须满足的用例（JSON）
 凡是引擎自己知道的，现在都派生：真实存在的子命令、真实的退出码、三个环境变量、可路由的 flow
 及其 `when:`、以及 **hook 的 `matcher` 该覆盖哪些工具**（此前要人手写一段 heredoc 去算）。
 
-**并且它按安装裁剪**：小节只在已装 flow 真的用到那个机制时才渲染。本树 17 节；一个只有 gates
-的单 flow 安装 8 节。这不是为了短——**agent 读到的每一段用不上的机械，都是花掉的预算，也让
-真正适用的那几段更难找到**。
+**并且它按安装裁剪**：条件小节只在已装 flow 真的用到那个机制时才渲染（有多少个见上面的生成表）。
+只装一个夹具的树少掉大约一半。这不是为了短——**agent 读到的每一段用不上的机械，都是花掉的预算，
+也让真正适用的那几段更难找到**。`--agent` 把这条推到底：连 flow 清单也按绑定收窄，于是同一棵树上
+一个绑 5 条能力的 agent 与一个绑 1 条的，读到的契约相差约 1.4 KB。
 
-不可派生的只有 6 条判断规则（记录不等于做完 · 背书要两轮 · 引用人的原话 · 不要预载全部散文 ·
-挡住你的 spec 不是要改的 spec · 没有东西强迫你开 run）。它们作为**数据**住在 `engine/brief.py`
+（这两个数字此前是手写的，而它们**各漂了 1**。同一段里那句「不可派生的判断规则」也一样。三个数字
+一起挪进了生成块 —— 这一节讲的正是手写数字会漂，而它自己带着三个漂掉的。）
+
+不可派生的判断规则见生成表（记录不等于做完 · 背书要两轮 · **读答案而不是解析散文** · 引用人的原话 ·
+不要预载全部散文 · 挡住你的 spec 不是要改的 spec · 没有东西强迫你开 run）。它们作为**数据**住在 `engine/brief.py`
 里，于是**纯净性守卫会扫到它们**——一条只能用某个消费方的词汇讲出来的规则会被那道扫描打红，
 所以能活下来的规则就是对每个消费方都成立的规则。
 
@@ -1044,6 +1108,17 @@ HARNESS_ABILITIES_PATH=/root-a:/root-b    ./bin/harness validate their-flow   # 
 
 它也让 README 早先那句话第一次**真的**成立：`cp -r` 一个 ability 到别处，`harness validate` 就能判断它对不对——在这之前，「别处」必须还是引擎树内。
 
+**这条覆盖后来被用来做真正的分家**：作者自己的 9 个能力搬进 `workspace/<名字>/abilities/`（一个独立
+的 git 仓库，被公开仓 `.gitignore`），引擎根只留样本与夹具。选这个位置是**量出来的**，不是选好看的：
+把私有集放到 checkout **之外**去模拟，12 个能力里有 9 个直接加载失败 —— 信任边界是
+`path.resolve().relative_to(<checkout 根>)`，树外的 `providers.py` 会被判为「来自本引擎自己的树之外
+的代码」。嵌在 checkout 里则天然被信任，于是 `harness trust` 一次都不用跑。
+
+**agent 定义的搜索根不需要第二个变量去配**，它从每个 abilities 根**派生**：`<根>/../agents`。所以
+「有能力集的地方就有它的 agent 定义」，两者一起被拷走。要指到别处用 `HARNESS_AGENTS_PATH`，规则与
+下表**逐条相同**（包括「替换而不是并集」和「同名出现在两个根就 exit 2」）—— 那些理由与它守的是
+哪一种东西无关。
+
 四条行为，每条都有理由：
 
 | 情况 | 行为 | 为什么不是另一种 |
@@ -1095,6 +1170,17 @@ traceback 照旧打到 stderr（一个藏起自己位置的 bug 比一个退出�
 所以 `authoring` 被刻意做成与 `delivery` 四处不同——它是 `role: fixture`，存在的目的是**给抽象施压并给机制测试提供夹具**：
 不同的 scope 维度（document 而非 repo）、**零 guard**、**菱形依赖**（B1/B2 从 A1 分叉、
 在 D1 汇合，检验拓扑排序真的在工作）、以 `attest` 为主（诚实承认引擎在这些步骤上只是账本）。
+
+**这条约束后来又被量了一次，而这次的答案是「两个夹具不够」。** 私有能力集搬出这棵树的那天，79 条
+测试失败 —— 它们一直拿作者的真实流程当素材。于是引擎开始随包发行**两条 `role: production` 的样本**
+加一个 `library`：`sample-change`（13 步，两个人工门 + 一个 preauth、派生变体、可选步、互斥对、
+带工具 matcher 的 guard、一个能阻塞 close-run 的义务）、`sample-note`（5 步，**非位置 scope** 与
+**显式变体**，与前者的派生变体正好构成对照）、`sample-lib`（被借用的事实源）。
+
+为什么必须是**两条** production：载入期那条「每条生产 flow 精确声明它用了什么」的交叉核对，在只有
+一条时是无意义的。而为什么样本要满配而不是最小：夹具越小越好（机制测试要最便宜的底座），但**样本是
+别人克隆这个仓库要读的东西**，也是引擎自己的组合性测试要驱动的东西 —— 两者的最优方向相反，所以它们
+是不同的文件。
 
 ### ② 能力词汇永不进引擎代码
 
@@ -1445,8 +1531,13 @@ python3 -m pytest tests/ -q      # 全绿；条数见开头那张生成的表
 写文档的正确方式 —— **一条会误伤好做法的守卫会换来一份豁免清单，而清单一长，规则就悄悄变成建议**。
 
 **不扫非 `role: fixture` 的能力**，这是对的：那些是私有流程，它们的 provider 本来就指向真实的
-本机工具，而且它们不随包走 —— 把它们泛化掉等于弄坏它们。发行面是从磁盘派生的：引擎、入口、
-集成、测试、根文档，加上作为 sample 的夹具能力。
+本机工具 —— 把它们泛化掉等于弄坏它们。发行面是从磁盘派生的：引擎、入口、集成、测试、根文档，
+加上随包的样本与夹具能力，以及 `agents/` 下的样例定义。
+
+**「它们不随包走」后来从一句判断变成了一条机制**：私有能力现在住在 `workspace/<名字>/`，被公开仓
+`.gitignore`，而一条守卫查的是 `git ls-files` 而不是那份 ignore 文件 —— 因为**在文件已被跟踪之后
+才加的 ignore 规则并不会把它取消跟踪**。这条守卫当场就抓到一次：`git mv` 把私有文件带进了公开仓的
+索引（gitignore 不阻止显式 add），用 `git rm -r --cached` 修掉，磁盘文件数一个没变。
 
 写这四条守卫时它们抓到的第一个违规者是**守卫文件自己**（docstring 里为了举例写了带尾斜杠的
 `/Users` 形式）和 `pyproject.toml` 的作者署名。前者改措辞而不是加豁免；后者说明守卫写宽了 ——
@@ -1998,21 +2089,27 @@ gate / witness / preauth / guard / scope 歧义 / close-run / forced-close / pur
 所以引擎新增一个声明字段，而不是在报告里加个例外：
 
 ```yaml
-role: fixture      # 缺省 production
+role: fixture      # 缺省 production；另有 library
 ```
 
 `validate` 因此不为夹具打印判据强度与产物完整性两行，`abilities` 也不把它们放进 agent 用来
 路由的名录（只在末尾留一行让人能找到）。
+
+**第三种角色 `library` 是后来加的，因为「不可路由」有两种截然不同的理由。** 一个夹具不可路由是
+因为它不承载工作；一个 library 不可路由是因为它**只被借用**：它注册 provider、提供事实，由别的
+flow 通过 `requires: [<它>]` 拿到，自己从不被打开。两者在报告与名录里的待遇相同，但把 library
+标成 fixture 是撒谎 —— 引擎明文禁止 production `requires:` 一个 fixture（夹具不许成为真实工作的
+承重件），而借用恰恰要求这条边合法。**借用性与不可路由性是两件事，需要两个词。**
 
 **关键是这个标签不能是绕过判据检查的开关。** 一个只会让报告闭嘴的角色，任何 ability 都能声称。
 所以它被绑在一件结构性的事上，并在加载期强制——**夹具必须不可路由**：
 
 | 规则 | 加载期行为 |
 |---|---|
-| `role` 不在 `production` / `fixture` 里 | exit 2 |
-| 夹具声明了 `when:`（agent 用来找能力的提示） | **exit 2** —— 免于报告就不许可被触及 |
+| `role` 不在 `flow.ROLES` 里（`production` / `fixture` / `library`，数量见生成表） | exit 2 |
+| **不可路由**的角色声明了 `when:`（agent 用来找能力的提示） | **exit 2** —— 免于报告就不许可被触及。`fixture` 与 `library` 都在此列 |
+| production `requires:` 一个 `fixture` | **加载期 exit 2**（此前只是散文里的一句禁令，后来才被实现：读依赖的 `role:` 而不做整份加载） |
 | production 的 `when:` 短于 20 字符 | exit 2 |
-| production 的 `requires:` 指向一个夹具 | 测试拒绝 —— 夹具不许成为真实工作的承重件 |
 | 什么都不声明 | 落 **production**（严格的那个），因此因缺 `when:` 被拒 |
 
 最后一条是重点：**沉默落在严格的角色上，不是宽松的那个。** 两条约束方向相反，所以两个角色

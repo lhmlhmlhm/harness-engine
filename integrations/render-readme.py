@@ -56,7 +56,8 @@ def _tests() -> int:
 
 def facts() -> dict:
     sys.path.insert(0, str(ROOT))
-    from engine import facts as factsmod, flow, harness, operators, predicates, proof
+    from engine import (brief as briefmod, facts as factsmod, flow, harness, operators,
+                        predicates, proof)
 
     mods = sorted((ROOT / "engine").glob("*.py"))
     return {
@@ -66,6 +67,13 @@ def facts() -> dict:
         "tables": len(re.findall(r"CREATE TABLE",
                                  (ROOT / "engine" / "schema.sql").read_text(encoding="utf-8"))),
         "spec_major": flow.SPEC_MAJOR,
+        # ALL THREE ARE ENGINE DATA, so they survive `abilities/` being reduced to the samples — which
+        # is the only test for whether a fact belongs in this block. They are here because the prose
+        # beside them stated each as a hand-written number, and by the time anybody counted, all three
+        # had drifted by one: a section about hand-written numbers going stale, carrying three that had.
+        "roles": len(flow.ROLES),
+        "judgment": len(briefmod.JUDGMENT),
+        "conditional": len(briefmod._CONDITIONAL),
         "predicates": len(predicates._REGISTRY),
         "witnesses": len(proof._WITNESSES),
         "providers": len(factsmod._PROVIDERS),
@@ -98,6 +106,9 @@ def block(f: dict | None = None) -> str:
         f"| 入口 | {f['entry_lines']} 行（行为全在 `engine/`） | `bin/harness` |",
         f"| 引擎自己拥有的表 | {f['tables']} 张 | `engine/schema.sql` |",
         f"| spec 格式 MAJOR | {f['spec_major']} | `flow.SPEC_MAJOR` |",
+        f"| 一条 flow 可声明的 role | {f['roles']} 种 | `flow.ROLES` |",
+        f"| 驱动契约里不可派生的判断规则 | {f['judgment']} 条 | `brief.JUDGMENT` |",
+        f"| 其中只在用到时才渲染的小节 | {f['conditional']} 个 | `brief._CONDITIONAL` |",
         f"| 完成谓词 | {f['predicates']} 个 | `predicates._REGISTRY` |",
         f"| gate 防伪 witness | {f['witnesses']} 个 | `proof._WITNESSES` |",
         f"| 运行时事实 provider | {f['providers']} 个 | `facts._PROVIDERS` |",
