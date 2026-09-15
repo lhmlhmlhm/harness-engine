@@ -18,8 +18,8 @@
 | 驱动契约（`--portable`） | 231 行 | `harness brief --portable` |
 | 其中不可派生的判断规则 | 7 条 | `brief.JUDGMENT` |
 | 只在用到时才渲染的小节 | 10 个 | `brief._CONDITIONAL` |
-| 最大的一条 flow | `shipcheck-asis`，105 步 | `harness abilities` |
-| 它的 spec 与散文 | 66 KB + 1461 行 | 磁盘 |
+| 最大的一条 flow | `shipcheck-asis`，104 步 | `harness abilities` |
+| 它的 spec 与散文 | 66 KB + 1452 行 | 磁盘 |
 | 一步的 directive（中位数） | 2 行 | 同上 |
 | 适配器用例 translation | 5 条 | `harness adapter-contract` |
 | 适配器用例 resilience | 5 条 | 同上 |

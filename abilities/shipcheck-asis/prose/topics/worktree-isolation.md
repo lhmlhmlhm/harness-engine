@@ -15,7 +15,7 @@
 一次实测。工作树真实存在：
 
 ```
-…/state/worktrees/<run>/WinnerPortalBackend/src/AWSGCRWinBotBFFEntryLambda
+<worktree ability>/state/worktrees/<run>/<workspace>/src/<Pkg>
 存在 True   .git 是文件 True      ← 它确实是 linked worktree
 ```
 

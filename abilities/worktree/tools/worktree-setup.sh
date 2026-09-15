@@ -39,6 +39,9 @@
 # Usage:
 #   worktree-setup.sh --uuid <shipcheck-uuid> --source-repo <path> [--root <dir>] [--dry-run]
 #
+#   Trees are created under this ability's own `state/worktrees/` by default.
+#   Override with --root, or with HARNESS_WORKTREE_ROOT for a whole host.
+#
 # Output (last lines, machine-readable — callers parse these):
 #   MODE=plain|brazil
 #   WORKTREE_PATH=<abs path>       <- persist THIS as metadata_json.workspace
@@ -52,7 +55,7 @@ set -euo pipefail
 
 UUID=""
 SOURCE_REPO=""
-ROOT_BASE="$HOME/.kiro/skills/ship-check/state/worktrees"
+ROOT_BASE=""   # empty = not given on the CLI; resolved after arg parse (see below)
 DRY_RUN=false
 
 while [ $# -gt 0 ]; do
@@ -68,6 +71,38 @@ done
 
 [ -n "$UUID" ]        || { echo "ERR: --uuid is required" >&2; exit 3; }
 [ -n "$SOURCE_REPO" ] || { echo "ERR: --source-repo is required" >&2; exit 3; }
+
+# ---------------------------------------------------------------------------
+# WHERE THE TREES LIVE (moved into this ability): `<this ability>/state/worktrees`.
+#
+# Resolved from THIS SCRIPT's own location, so it moves with the checkout and names no
+# absolute path — the same reason `produced_by` in the consuming flow is relative.
+#
+# `state/` is the FIRST line of the engine repo's .gitignore and matches at any depth, which
+# is the load-bearing part: one brazil session measured 216,384 files / 29 MB, and an
+# un-ignored root would make `git add -A` in the engine repo commit a whole checkout. A guard
+# in tests/ asserts the root this resolves to is ignored, because that property is invisible
+# until the day someone renames the directory.
+#
+# Precedence: --root (CLI) > HARNESS_WORKTREE_ROOT (env) > ability-local default. The env var
+# exists for a host where the checkout is read-only or on a different volume; the engine
+# itself never reads it (it is this tool's knob, not an engine setting).
+#
+# The default REFUSES rather than guesses when it cannot see the ability next to it — invoked
+# through a symlink placed elsewhere, `dirname $0` is the link's directory, and silently
+# rooting trees at some unrelated `state/worktrees` is the failure you would not notice.
+# ---------------------------------------------------------------------------
+if [ -z "$ROOT_BASE" ]; then ROOT_BASE="${HARNESS_WORKTREE_ROOT:-}"; fi
+if [ -z "$ROOT_BASE" ]; then
+  _tools_dir="$(cd -P "$(dirname "$0")" && pwd)"
+  _ability_dir="$(cd -P "$_tools_dir/.." && pwd)"
+  [ -f "$_ability_dir/flow.yaml" ] || {
+    echo "ERR: cannot locate the worktree ability from \$0=$0 —" >&2
+    echo "     expected $_ability_dir/flow.yaml. Pass --root <dir> or set HARNESS_WORKTREE_ROOT." >&2
+    exit 3
+  }
+  ROOT_BASE="$_ability_dir/state/worktrees"
+fi
 [ -d "$SOURCE_REPO" ] || { echo "ERR: --source-repo not a directory: $SOURCE_REPO" >&2; exit 3; }
 
 git -C "$SOURCE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \

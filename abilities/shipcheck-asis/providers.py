@@ -65,7 +65,6 @@ MEMORY_CLI_DEFAULT = "${HARNESS_MEMORY_CLI:-~/.kiro/skills/shared-kb/memory/memo
 # 测试扫掉了 772MB 真实存储——所以给读取真实位置的 provider 留一个重定向口是安全属性，
 # 不是便利。被读的 CLI 自己也有同样的口（MEMORY_DB_PATH），这里与它对称。
 PLAN_DATA_DEFAULT = "${HARNESS_PLAN_DATA_DIR:-~/.kiro/skills/plan/data}"
-HISTORY_LOG_DEFAULT = "${HARNESS_HISTORY_LOG_DIR:-~/.kiro/skills/ship-check/history-log}"
 
 
 def _spec_path(spec: str) -> Path:
@@ -549,7 +548,6 @@ def _hot_set(ctx: dict) -> dict:
     # The two artefacts the closing writeback leaves behind. Their presence is what makes
     # "the writeback ran" checkable without re-running anything.
     "shipped_block_present": operators.T_BOOL,
-    "history_record_exists": operators.T_BOOL,
 })
 def _plan_writeback(ctx: dict) -> dict:
     """Where the plan document ended up, and whether the closing writeback left its traces.
@@ -567,7 +565,7 @@ def _plan_writeback(ctx: dict) -> dict:
     """
     from engine import store
     empty = {"plan_doc_dir": "", "plan_doc_status": "", "plan_doc_found": False,
-             "shipped_block_present": False, "history_record_exists": False}
+             "shipped_block_present": False}
     conn = store.connect(read_only=True)
     try:
         rows = store.find_evidence(conn, str(ctx.get("run_id") or ""), None, "plan_doc")
@@ -605,14 +603,6 @@ def _plan_writeback(ctx: dict) -> dict:
         got["plan_doc_status"] = m.group(1) if m else ""
     got["shipped_block_present"] = bool(re.search(r"^##\s+Shipped\b", text, re.M))
 
-    # Matched by CONTAINS, not by an exact directory name: the writer's naming has changed over
-    # time (of 205 real entries only 18 carry a date prefix), so an exact-name lookup would
-    # report a present record as missing for every older shape.
-    hl = _spec_path(HISTORY_LOG_DEFAULT).expanduser()
-    if hl.is_dir():
-        got["history_record_exists"] = any(
-            (d / "record.md").is_file() for d in hl.iterdir()
-            if d.is_dir() and slug in d.name)
     return got
 
 

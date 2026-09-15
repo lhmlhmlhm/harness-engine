@@ -429,7 +429,6 @@ phases:
     - E09g
     - E10
     - E11
-    - E12
     - E19
     - E20
     - E21
@@ -1890,7 +1889,6 @@ steps:
       disproved_when:
         all_of:
         - {fact: shipped_block_present, equals: false}
-        - {fact: history_record_exists, equals: false}
     - type: claim_corroborated       # 说不适用 -> 但按 slug 找到了方案文档
       kind: close_writeback
       claims:
@@ -1910,18 +1908,6 @@ steps:
   completion:
     type: evidence
     kind: shipped_section
-- id: E12
-  phase: cleanup
-  stage: writeback
-  title: History log
-  directive: |
-    产出：一条结构化历史记录
-    完成：记录按既定结构写入
-  deps:
-  - E11
-  completion:
-    type: evidence
-    kind: history_log
 - id: E14
   phase: cleanup
   stage: housekeeping
@@ -2020,7 +2006,6 @@ steps:
     产出：一份会话指标汇总
     完成：指标已汇总
   deps:
-  - E12
   completion:
     type: all_checks
     checks:

@@ -3825,9 +3825,6 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     1. RESOLVED BY SLUG, not by the recorded path. The recorded path is stale BY DESIGN at
        closing time, because moving the document is the effect under test. Reading it would
        report a successful move as a failure, or an absent move as a success.
-    2. The history record is matched by CONTAINS. The writer's naming changed over time — of
-       205 real entries only 18 carry a date prefix — so an exact-name lookup reports a present
-       record as missing for every older shape.
     3. The frontmatter is read from the LEADING block only. A document that lost its frontmatter
        but quotes a yaml block later would otherwise have a snippet read as its status.
 
@@ -3863,13 +3860,6 @@ def test_the_plan_document_is_found_where_it_ENDED_UP(env, monkeypatch, tmp_path
     assert got["plan_doc_found"] is True and got["plan_doc_dir"] == "done", got
     assert got["plan_doc_status"] == "done", got
     assert got["shipped_block_present"] is True, got
-
-    # ② A record whose directory carries a date prefix — the current writer's shape.
-    assert got["history_record_exists"] is False, got
-    rec = hlog / f"2026-09-02_bms_{slug}"
-    rec.mkdir()
-    (rec / "record.md").write_text("x\n", encoding="utf-8")
-    assert _f.gather("shipcheck-asis.plan_writeback", ctx)["history_record_exists"] is True
 
     # ③ A document that LOST its frontmatter but quotes a yaml block later. The leading-block
     #    read reports no status; a whole-document search would report the snippet's.
@@ -9397,3 +9387,251 @@ steps:
         assert run(["validate", "__dig2__"], env).returncode == BAD_SPEC
     finally:
         _rm(d)
+
+
+# ══════════════════ the ledger reports what it already recorded ══════════════════
+#
+# `run_progress` held four facts. The store held more, and nothing could read it: a run that reached
+# the end after twenty refusals looked identical to one that walked straight through, and
+# `violation_count` summed the two severities whose whole reason for existing is that they mean
+# opposite things. Extended rather than joined by a second provider — a neighbouring provider reading
+# the same tables is the duplicate this project keeps removing, and the first time the two disagreed
+# nothing would say which was right.
+
+
+def _measured(env, run_id: str, ability: str, scope: str) -> dict:
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f
+    return _f.gather_all(("run_progress",),
+                         {"run_id": run_id, "scope": scope, "scope_kind": "s", "ability": ability})
+
+
+def test_the_ledger_reports_the_friction_nothing_could_read_before(env, monkeypatch, tmp_path):
+    """Refusals and skips were recorded and unreadable. Friction is a measurement.
+
+    The engine writes a `refused` step-log row at three sites. Until this, no criterion could ask
+    how many there had been — so "finished" and "finished after fighting it" were the same answer.
+    """
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    d = _spec(env, "__meas__", """
+uses: [facts, optional_steps]
+facts:
+  provider: run_progress
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+  - id: OPT
+    phase: p
+    optional: true
+  - id: B
+    phase: p
+    deps: [A]
+""")
+    try:
+        assert rc(["open", "__meas__", "--scope", "s1", "--run", "f1"], env) == OK
+        # Closing a step whose dependency is unmet is REFUSED — and recorded.
+        assert rc(["close-step", "--run", "f1", "--step", "B"], env) == REFUSED
+        assert rc(["close-step", "--run", "f1", "--step", "B"], env) == REFUSED
+        assert rc(["skip", "--run", "f1", "--step", "OPT", "--reason", "not needed"], env) == OK
+
+        got = _measured(env, "f1", "__meas__", "s1")
+        assert got["steps_refused"] == 2, got
+        assert got["steps_skipped"] == 1, got
+        # And the pre-existing fact still counts a skipped step as accounted-for, because
+        # `store.closed_steps` selects `event IN ('closed','skipped')`. Left deliberately: three
+        # installed flows read it, so its meaning must not move under them — `steps_skipped` is
+        # what makes the split answerable.
+        assert "OPT" in got["closed_steps"], got
+    finally:
+        _rm(d)
+
+
+def test_the_two_violation_severities_are_counted_apart(env, monkeypatch):
+    """`violation_count` sums two things that point in opposite directions.
+
+    `blocked` means an attempt was REFUSED — the guarantee worked and the row is an audit trace.
+    `breach` means something passed WITH A MARK — the guarantee did not. A bar placed on the sum
+    would be satisfied by not trying, which is the incentive this engine exists to remove.
+    """
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    d = _spec(env, "__sev__", """
+uses: [facts]
+facts:
+  provider: run_progress
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        assert rc(["open", "__sev__", "--scope", "s2", "--run", "s1"], env) == OK
+        import sys as _s
+        _s.path.insert(0, str(REPO))
+        from engine import store as _st
+        conn = _st.connect()
+        try:
+            _st.record_violation(conn, "s1", "A", "probe_blocked", "probe", severity="blocked")
+            _st.record_violation(conn, "s1", "A", "probe_breach", "probe", severity="breach")
+            conn.commit()
+        finally:
+            conn.close()
+
+        got = _measured(env, "s1", "__sev__", "s2")
+        assert got["violations_blocked"] == 1, got
+        assert got["violations_breach"] == 1, got
+        # The sum is still reported, unchanged, because flows already read it.
+        assert got["violation_count"] == 2, got
+    finally:
+        _rm(d)
+
+
+def test_an_unfinished_run_has_no_duration_rather_than_a_duration_of_zero(env, monkeypatch):
+    """0 seconds and "not finished" must not be the same answer.
+
+    This is the 0-of-0 hazard named elsewhere in this engine: a vacuous value that reads as a
+    measured one. So `run_closed` travels with the duration and is a FACT, not something a caller
+    has to already know to ask about. A criterion that puts a ceiling on duration would otherwise
+    be satisfied by every run that never ended.
+    """
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    d = _spec(env, "__dur__", """
+uses: [facts]
+facts:
+  provider: run_progress
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        assert rc(["open", "__dur__", "--scope", "s3", "--run", "d1"], env) == OK
+        open_now = _measured(env, "d1", "__dur__", "s3")
+        assert open_now["run_closed"] is False, open_now
+        assert open_now["run_duration_s"] == 0, open_now
+
+        assert rc(["close-step", "--run", "d1", "--step", "A"], env) == OK
+        assert rc(["close-run", "--run", "d1"], env) == OK
+        closed = _measured(env, "d1", "__dur__", "s3")
+        assert closed["run_closed"] is True, closed
+        assert closed["run_duration_s"] >= 0, closed
+    finally:
+        _rm(d)
+
+
+def test_the_original_four_facts_did_not_move(env, monkeypatch):
+    """A regression guard, because three installed flows and a dozen tests read these by name.
+
+    Extending a provider is safe only while the existing keys keep their meaning. Nothing here
+    asserts the new ones — that is the point: this test would still fail if adding them had changed
+    what the old ones report.
+    """
+    monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import facts as _f
+    schema = _f.schema_of("run_progress")
+    for k in ("closed_steps", "evidence_kinds", "gate_count", "violation_count"):
+        assert k in schema, f"{k} disappeared from run_progress"
+
+    d = _spec(env, "__orig__", """
+uses: [facts]
+facts:
+  provider: run_progress
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+""")
+    try:
+        assert rc(["open", "__orig__", "--scope", "s4", "--run", "o1"], env) == OK
+        assert rc(["evidence", "--run", "o1", "--step", "A",
+                   "--kind", "note", "--value", "x"], env) == OK
+        assert rc(["close-step", "--run", "o1", "--step", "A"], env) == OK
+        got = _measured(env, "o1", "__orig__", "s4")
+        assert got["closed_steps"] == ["A"], got
+        assert got["evidence_kinds"] == ["note"], got
+        assert got["gate_count"] == 0, got
+        assert got["violation_count"] == 0, got
+    finally:
+        _rm(d)
+
+
+# ---------------------------------------------------------------------------
+# The worktree tools' ROOT. These two run the shell tool itself — every other worktree test
+# in this file pins the guard PATTERNS, which say nothing about where trees land.
+# ---------------------------------------------------------------------------
+WT_SETUP = REPO / "abilities" / "worktree" / "tools" / "worktree-setup.sh"
+
+
+def _throwaway_git_repo(tmp_path) -> Path:
+    d = tmp_path / "srcrepo"
+    d.mkdir()
+    g = ["git", "-C", str(d)]
+    subprocess.run(g + ["init", "-q", "."], check=True)
+    (d / "f.txt").write_text("hi\n", encoding="utf-8")
+    subprocess.run(g + ["add", "-A"], check=True, capture_output=True)
+    subprocess.run(g + ["-c", "user.email=a@b", "-c", "user.name=a",
+                        "commit", "-qm", "init"], check=True, capture_output=True)
+    return d
+
+
+@pytest.mark.skipif(not WT_SETUP.exists(), reason="worktree ability not installed here")
+def test_the_worktree_root_lands_inside_the_ability_and_git_ignores_it(tmp_path):
+    """Where a brazil session's 216,384 files land, and why nothing here may name a path.
+
+    Two properties, and the second is the one that is invisible until it breaks: the root
+    resolves under the ability itself (so it travels with the checkout and the tool names no
+    absolute path), AND git ignores it. Un-ignored, one `git add -A` in the engine repo commits
+    an entire checkout — and the tree would look fine right up to that moment.
+
+    Asserted through the tool's own `--dry-run` resolution rather than by reading the source:
+    a regex on the default expression passes while the precedence chain around it is broken.
+    Dry-run creates nothing, so this leaves no residue inside the repo.
+    """
+    src = _throwaway_git_repo(tmp_path)
+    out = subprocess.run(
+        [str(WT_SETUP), "--uuid", "eeee1111-2222-3333-4444-555555555555",
+         "--source-repo", str(src), "--dry-run"],
+        capture_output=True, text=True, cwd=str(REPO),
+    )
+    assert out.returncode == 0, out.stderr
+    line = [l for l in out.stdout.splitlines() if l.startswith("WORKTREE_PATH=")]
+    assert line, f"the tool stopped emitting its machine-readable path:\n{out.stdout}"
+    path = Path(line[0].split("=", 1)[1])
+    assert str(path).strip(), "empty WORKTREE_PATH — this assertion would pass on nothing"
+
+    ability = REPO / "abilities" / "worktree"
+    assert str(path).startswith(str(ability) + "/"), (
+        f"worktree root escaped the ability: {path}\n  expected under {ability}"
+    )
+    ignored = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-q", str(path)])
+    assert ignored.returncode == 0, (
+        f"git does NOT ignore {path} — a session's checkout would become `git add -A` fodder.\n"
+        "  `state/` is the first line of .gitignore; keep the runtime directory under it."
+    )
+
+
+@pytest.mark.skipif(not WT_SETUP.exists(), reason="worktree ability not installed here")
+def test_the_worktree_tool_refuses_when_it_cannot_see_its_own_ability(tmp_path):
+    """Invoked through a symlink elsewhere, `dirname $0` is the link's directory.
+
+    Guessing there would root trees at some unrelated `state/worktrees` that git does not
+    ignore and teardown never sweeps — silently. Exit 3 is the usage/env code, so a caller
+    branching on the number sees a setup error rather than an operational one.
+    """
+    src = _throwaway_git_repo(tmp_path)
+    link = tmp_path / "linked-setup.sh"
+    link.symlink_to(WT_SETUP)
+    out = subprocess.run(
+        [str(link), "--uuid", "eeee2222-3333-4444-5555-666666666666",
+         "--source-repo", str(src), "--dry-run"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert out.returncode == 3, (out.returncode, out.stdout, out.stderr)
+    assert "HARNESS_WORKTREE_ROOT" in out.stderr, out.stderr

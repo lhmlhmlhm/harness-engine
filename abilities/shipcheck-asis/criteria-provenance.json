@@ -93,7 +93,6 @@
           "E09g",
           "E10",
           "E11",
-          "E12",
           "E19",
           "E20",
           "E21",
@@ -113,7 +112,6 @@
           "E09g",
           "E10",
           "E11",
-          "E12",
           "E19",
           "E20",
           "E21",
@@ -1713,10 +1711,6 @@
                 {
                   "fact": "shipped_block_present",
                   "equals": false
-                },
-                {
-                  "fact": "history_record_exists",
-                  "equals": false
                 }
               ]
             }
@@ -1747,18 +1741,6 @@
         "kind": "shipped_section"
       },
       "reason": "完成标准「已交付段落写入，且哈希标注诚实」。散文「给方案文档追加『已交付』段」。哈希诚实（pre-merge 标注）无法机器校验，故 T1。刻意不复用共享 plan_doc——plan_doc 是「跨层引用」在 context 层就已记录，用它会被那条旧行造成假阳性；改用本步专属 kind shipped_section 绑定 E11 自己的写入动作。"
-    },
-    "E12": {
-      "tier_at_derivation": "T1",
-      "spec_at_derivation": {
-        "type": "evidence",
-        "kind": "history_log"
-      },
-      "live_spec": {
-        "type": "evidence",
-        "kind": "history_log"
-      },
-      "reason": "完成标准「记录按既定结构写入」。散文「按既定结构把这次会话的经过落一条盘：改动、波折、结论」。是留下可审计的一条结构化历史行，但结构完整性本身不可机检，故 T1。"
     },
     "E14": {
       "tier_at_derivation": "T1",
