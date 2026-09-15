@@ -115,14 +115,28 @@ harness brief | sed -n '/Tools the runtime hook must cover/,$p'
 `harness-hook` 是 PATH 上的一个几行的包装，它问另一个包装「引擎在哪」，后者读**唯一一份记录**
 （可被 `HARNESS_ENGINE_HOME` 覆盖，于是云桌面可以在 plist 或 profile 里声明而不改任何文件）。
 
-`resources` 是个例外 —— `file://` URI 没法向谁提问，所以它指向状态目录里一个**稳定路径**，
-而那个路径是一个指进 checkout 的链接：
+`resources` 是个例外 —— `file://` URI 没法向谁提问，所以它只能指向状态目录里一个**稳定路径**。
+每个 agent 有两条，而它们**过期的方式不同**，所以处理方式也不同：
 
 ```jsonc
-"resources": ["file://$HOME/.local/state/harness-engine/CAPABILITIES.md"]
+"resources": [
+  "file://$HOME/.local/state/harness-engine/brief-<agent>.md",
+  "file://$HOME/.local/state/harness-engine/agents/<agent>.yaml"
+]
 ```
 
-用链接而不是拷贝：**拷贝会静默过期**，而那正是 agent 读到上个月的能力地图的方式。
+- **`brief-<agent>.md` 是生成的**，本来就写在状态目录里，所以没有链接可言 —— 只有「重新生成」。
+  它按该 agent 的绑定收窄（`harness brief --write --agent <name>`），因为那一节的标题是
+  「装了什么，以及**何时去拿**」：列出一条它没被绑定的 flow，不只是多给了信息，而是在邀请它去
+  驾驶别人的活。
+- **`<agent>.yaml` 住在某个 checkout 里**（它是某个人自己的文件，跟他的能力集一起版本化），
+  所以这一条是**链接**。用链接而不是拷贝：**拷贝会静默过期**，而那正是 agent 读到上个月的
+  绑定的方式。
+
+两者都由那条命令维护，而**哪些 agent 存在是派生的**（问 `harness onboard --json`），不是脚本里
+记着的一张名单 —— 第二个 agent 靠「存在」加入，而不是靠有人记得改接线。只有**能解析**的定义会
+被接上：接一份引擎拒绝的定义，等于给 agent 一份点名了它拿不到的能力的绑定，而那个资源看起来
+完全健康。
 
 于是搬家变成一条命令重指全部，而它**验证而不是假设** —— 特别是验证那个包装真的在 PATH 上，
 因为「hook 够不到」是这里唯一一种从外面看不见的失效。
@@ -174,6 +188,22 @@ harness adapter-contract          # JSON：I/O 契约 + translation + resilience
   却什么都没证明——所以那一条如实标了「这归你」。
 
 这些用例不是摆设：**本引擎自己的适配器测试就在迭代它们**。
+
+## 其余环境变量
+
+上面三节讲的是**必须对**的那些。剩下这些引擎会读，默认值通常就够用 —— 列在这里是因为一个
+**存在却没人知道的旋钮**比一份指向不存在事物的文档更难发现：后者读文档时就会撞上，前者要等到
+有人需要它却翻不到。
+
+| 变量 | 它决定什么 | 不设时 |
+|---|---|---|
+| `HARNESS_AGENTS_PATH` | 到哪里找 agent 定义（`<agent>.yaml`），`os.pathsep` 分隔 | 从每个 abilities 根**派生**：`<根>/../agents`。所以有能力集的地方就有它的 agent 定义，两者一起被拷走 |
+| `HARNESS_REQUIRED_FLOWS` | 「哪条 flow 在哪个 scope 是强制的」这份记录的位置 | 状态目录下的 `required-flows` |
+| `HARNESS_TRUST_FILE` | 记录哪些 ability 的 `providers.py` 被批准执行过 | 状态目录下的信任记录 |
+
+`HARNESS_AGENTS_PATH` 和 `HARNESS_ABILITIES_PATH` 一样是**替换**默认值而不是追加：隐式并集会让
+调用方永远拿不到一个干净的集合，而「从没人命名过的根里冒出来一个定义」比「必须把两个根都写出来」
+更糟。
 
 ## 3. `HARNESS_STATE_DIR` —— 两侧必须一致
 

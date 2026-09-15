@@ -36,7 +36,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 HARNESS = REPO / "bin" / "harness"
-DOCS = ("README.md", "integrations/WIRING.md", "integrations/CAPABILITIES.md")
+# `integrations/CAPABILITIES.md` used to be here. It left the engine's tree: its content was one
+# person's routing map, and the path four agent configs read was a symlink INTO this repository — so
+# publishing the engine published that map. What replaced it is `agents/<name>.yaml`, which is checked
+# by `harness onboard` rather than by a doc guard, because a schema the engine resolves against the
+# installed set is a stronger check than any assertion about prose could be.
+DOCS = ("README.md", "integrations/WIRING.md")
 RENDERER = REPO / "integrations" / "render-wiring.py"
 BEGIN = "<!-- BEGIN GENERATED"
 END = "<!-- END GENERATED -->"
@@ -395,3 +400,36 @@ def test_the_default_state_dir_the_doc_states_is_the_one_the_engine_uses():
     assert actual.replace(str(Path.home()), "~") in doc.replace("`", ""), (
         f"the engine's default state dir is {actual}, which the doc does not state"
     )
+
+
+def test_every_env_var_the_engine_reads_is_named_in_some_doc():
+    """The other direction, and it was missing — which is how a new one got in unmentioned.
+
+    Its sibling above checks that a doc naming `HARNESS_X` is not naming something imaginary. That is
+    one of two ways this can go wrong, and the docstring of this whole file only anticipated that one.
+
+    The symmetric failure is quieter and arguably worse: a variable the engine READS that no document
+    mentions. A doc pointing at something absent is caught by the first reader who tries it; a knob
+    nobody wrote down is found only by whoever needed it, after they have failed to find it. Measured:
+    `HARNESS_AGENTS_PATH` was added to the engine and no test said a word, and two older ones had been
+    undocumented for longer.
+
+    Deliberately satisfied by ANY doc rather than by a specific one. Which document a variable belongs
+    in is an editorial judgment, and pinning it here would turn a coverage check into a filing rule —
+    the second one gets worked around by moving a line, and stops meaning anything.
+    """
+    src = " ".join((REPO / "engine" / f.name).read_text(encoding="utf-8")
+                   for f in (REPO / "engine").glob("*.py"))
+    read = set(re.findall(r"\bHARNESS_[A-Z_]+\b", src))
+    assert read, "no env vars found in engine source; this test asserted nothing"
+
+    documented: set = set()
+    for doc in (*DOCS, "integrations/DRIVING.md"):
+        documented |= set(re.findall(r"\bHARNESS_[A-Z_]+\b",
+                                     (REPO / doc).read_text(encoding="utf-8")))
+
+    missing = sorted(read - documented)
+    assert not missing, (
+        f"the engine reads these and no doc names them: {missing}\n"
+        f"  A variable nobody wrote down is found only by whoever needed it, after failing to.\n"
+        f"  Name it in one of: {', '.join((*DOCS, 'integrations/DRIVING.md'))}")

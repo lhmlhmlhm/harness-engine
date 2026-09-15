@@ -233,6 +233,7 @@ def render(
     guard_tools: list[str],
     example_step: str | None,
     required: tuple = (),
+    unbound_required: tuple = (),
     ask_only_guards: tuple = (),
 ) -> str:
     """Assemble the brief. Every argument is a fact the caller read off the engine."""
@@ -298,6 +299,21 @@ def render(
         a(_fence([f"{e['ability']}  {e['scope_key']}"
                   + ("   (strict)" if e.get("strict") else "") for e in required]))
         a("")
+        if unbound_required:
+            # NAMED HERE RATHER THAN OMITTED, and this is the whole reason a narrowed brief still
+            # carries the full list. Narrowing "what to reach for" while silently narrowing the
+            # mandates too would hide a trap: the guard refuses the action, and a document that never
+            # mentioned the flow leaves proceeding without it as the only apparent way forward.
+            #
+            # The scope decides whether it applies, and nothing here knows which scopes this agent
+            # works in — so it is reported as a possibility to resolve, not as an error.
+            a("⚠️  Mandatory above, but NOT among what you may reach for: "
+              + ", ".join(unbound_required) + ".")
+            a("")
+            a("If you are working in one of those scopes, you cannot satisfy the requirement and")
+            a("must not proceed around it — say so and stop. Whoever owns this setup either binds")
+            a("the flow to you or drops the requirement; both are their call, not yours.")
+            a("")
 
     a("## The loop")
     a("")

@@ -77,7 +77,7 @@ def db_path() -> Path:
     return state_dir() / "harness.db"
 
 
-def brief_path() -> Path:
+def brief_path(agent: str | None = None) -> Path:
     """Where the machine-local driving contract is written.
 
     Beside the store rather than in the package, because it has exactly the store's lifecycle:
@@ -86,6 +86,12 @@ def brief_path() -> Path:
     agent handed that one is told to alias something that does not exist, which is how this file
     came to be needed.
     """
+    # ONE FILE PER AGENT when an agent is named, because the contract is not the same document for
+    # two agents: the section saying which flows to reach for is narrowed to what that agent is bound
+    # to. Sharing one file would mean every agent reads a list that includes flows it must not drive,
+    # and that section's own heading invites reaching for them.
+    if agent:
+        return state_dir() / f"brief-{agent}.md"
     return state_dir() / "brief.md"
 
 

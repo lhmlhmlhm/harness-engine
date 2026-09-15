@@ -3710,58 +3710,6 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path, m
     assert bare["in_linked_worktree"] is False and bare["on_isolation_branch"] is False, bare
 
 
-def test_the_map_only_points_at_entry_points_that_exist(env):
-    """A pointer that has rotted is worse than no pointer: it reads authoritative.
-
-    The map deliberately POINTS at non-ability tooling rather than restating it — restating
-    would be a second copy that drifts, which is the failure this whole repo is about. The cost
-    of pointing is that a moved or renamed file turns the map into a confident lie, and nothing
-    would notice. So every path the map names is checked to exist.
-
-    Checked only when the pointed-at tree is INSTALLED. On a machine without it the pointer is
-    still correct as a pointer — it says where the thing would be — and failing there would
-    punish a machine for not having an optional dependency rather than catching drift.
-    """
-    import re as _re
-    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
-    home = pathlib.Path.home()
-
-    # Paths the map names under the shared observability tree, plus the sub-KB meta files.
-    checks = [
-        (home / ".kiro/loop agents", ["scripts/trace.py", "quality-slo.yaml",
-                                      "stage-compliance.yaml", "CAPABILITIES.md"]),
-        (home / ".kiro/skills/shared-kb", ["L0-meta/routing-rules.md",
-                                           "L0-meta/kb-registry.md",
-                                           "L0-meta/evaluation-criteria.md",
-                                           "L2-hot/hot-set.md"]),
-        (home / ".kiro/skills/agent-scheduler", ["references/task-authoring-guide.md"]),
-    ]
-    checked = 0
-    for root, rels in checks:
-        if not root.is_dir():
-            continue                      # not installed here; the pointer still reads true
-        for rel in rels:
-            # The FULL relative path, not just the basename. A basename fallback was tried
-            # and was too loose: the map mentions `trace.py` bare in a later sentence, so
-            # renaming the actual pointer left the check satisfied by the prose. A pointer is
-            # only useful if it is directly actionable, so require the actionable form.
-            # (For a top-level file the two coincide; for `CAPABILITIES.md` the name check is
-            # vacuous because this file is also called that — its existence check still bites.)
-            assert rel in cap, (
-                f"the map no longer names {rel} — if it was dropped on purpose, drop it from "
-                f"this list too, so the two stay in step"
-            )
-            assert (root / rel).is_file(), f"the map names {rel} under {root}, which is gone"
-            checked += 1
-    assert checked, "no pointed-at tree is installed; this test asserted nothing"
-
-    # And the map must record WHERE the two unbuilt structural pieces are already declared, so a
-    # future round reads them instead of inventing a second, quietly diverging copy.
-    flat = cap.replace("**", "").replace("`", "")
-    assert "先读这里，不要重新发明一遍" in flat, (
-        "the map must say that the regression baseline and cross-run correlation are already "
-        "declared elsewhere — the risk here was never a missing first copy, it is a second one"
-    )
 
 
 def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
@@ -3888,8 +3836,12 @@ def test_routing_and_the_fixture_role_are_two_sides_of_one_rule(env):
             for dep in f.requires:
                 assert flowmod.load(dep).role != flowmod.ROLE_FIXTURE, (name, dep)
     # And the capability map must NOT duplicate what `when:` already says.
-    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
-    assert "harness abilities" in cap, "the map must point at the derivable source"
+    # The tail of this test used to assert that a hand-written map POINTED AT the derivable source
+    # instead of copying it. That map has left the engine's tree (it was one person's), and the
+    # property it was standing in for is now structural rather than editorial: an agent definition
+    # has no place to write a routing table, because `harness onboard` refuses any key it does not
+    # know. A shape that cannot hold the copy is a better guarantee than a document promising not
+    # to make one — see `test_an_agent_definition_cannot_restate_what_the_engine_derives`.
 
 
 @pytest.mark.parametrize("body,expect", [
@@ -4023,11 +3975,17 @@ guards:
 
 @pytest.mark.parametrize("ability,scope,guard_tool,guard_payload,taken,untaken", [
     # A review-side shape: the scope is an identifier, not a location, so the guard can only be
-    # attributed by that key appearing in the action's payload. `sample-note`'s `publish_note`
-    # guard matches a `shell` call naming `publish-note`, and points at gate N02; the command is
-    # piped so the pattern's command-position anchor ([;&|]) fires inside the serialised payload.
+    # attributed by that key appearing in the action's payload. `sample-note`'s `publish_note` guard
+    # matches a `shell` call naming `publish-note` and points at gate N02.
+    #
+    # THE PAYLOAD KEY IS THE ONE THE GUARD DECLARES (`field: command`). An earlier version of this
+    # case used a different key and a piped command — `true | publish-note …` — so that the pattern's
+    # command-position anchor would fire against the whole serialised payload. That passed by
+    # exploiting a defect: the guard named no `field`, so it matched the JSON dump, where a `^`
+    # anchor sits behind a quote and can never fire on its own. The guard was fixed; a test written
+    # around the bug would have kept it alive by going red on the fix.
     ("sample-note", "NOTE-42", "shell",
-     {"cmd": "true | publish-note NOTE-42", "ref": "NOTE-42"}, "N03keep", "N03drop"),
+     {"command": "publish-note NOTE-42", "ref": "NOTE-42"}, "N03keep", "N03drop"),
 ])
 def test_a_review_side_ability_runs_end_to_end_with_its_guard(
         env, tmp_path, ability, scope, guard_tool, guard_payload, taken, untaken):
@@ -9875,3 +9833,364 @@ def test_an_anchored_matcher_tells_a_command_from_a_mention_of_one(env, cmd, blo
     finally:
         rc(["close-run", "--run", "gan", "--result", "abandoned",
             "--force-steps", "--force-obligations"], env)
+
+
+def _agent_def(tmp_path, **over) -> tuple:
+    """A minimal definition that passes, plus the directory holding it.
+
+    Built from the SHIPPED sample rather than hand-written here, so a change to the schema breaks
+    this in one place instead of leaving a second copy of the format to keep in step.
+    """
+    import yaml as _yaml
+    raw = _yaml.safe_load(
+        (REPO / "agents" / "sample-agent.yaml").read_text(encoding="utf-8"))
+    raw.update(over)
+    d = tmp_path / "agents"
+    d.mkdir(exist_ok=True)
+    name = str(raw.get("agent") or "sample-agent")
+    (d / f"{name}.yaml").write_text(_yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    return d, raw
+
+
+def test_an_agent_definition_is_resolved_against_what_is_actually_installed(env, tmp_path):
+    """The check that makes this file a contract rather than a convention.
+
+    A schema nothing resolves costs a reader exactly what a prose document costs: they guess what the
+    keys mean and never find out whether they got it right. So every name here is looked up in the
+    installed set, and the two ways a binding is wrong are BOTH silent at run time — an agent bound to
+    something absent, or to a role that is never routed to, simply never reaches for it and reads its
+    own inaction as there being nothing to do.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+
+    d, _ = _agent_def(tmp_path)
+    assert rc(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d))) == OK
+
+    # Absent.
+    d2 = tmp_path / "absent"
+    d2.mkdir()
+    (d2 / "sample-agent.yaml").write_text(
+        (d / "sample-agent.yaml").read_text().replace("sample-note", "nope-not-installed"),
+        encoding="utf-8")
+    r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d2)))
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "not installed" in r.stderr, r.stderr
+
+    # Present, but a role nothing routes to. Named from the engine's own constant, so a new
+    # unroutable role is covered here without this test being edited.
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    unroutable = [n for n in fl.available_abilities()
+                  if fl.load(n).role in fl.ROLES_UNROUTABLE]
+    assert unroutable, "nothing unroutable is installed; this half asserted nothing"
+    d3 = tmp_path / "unroutable"
+    d3.mkdir()
+    (d3 / "sample-agent.yaml").write_text(
+        (d / "sample-agent.yaml").read_text().replace("sample-note", unroutable[0]),
+        encoding="utf-8")
+    r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d3)))
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "never routed to" in r.stderr, r.stderr
+
+
+def test_an_agent_definition_cannot_restate_what_the_engine_derives(env, tmp_path):
+    """The routing table has NO PLACE to live here, and that is the guarantee.
+
+    The document this replaced opened by warning that a hand-written list of "which ability for which
+    request" expires the moment another is installed — and then, three sections later, contained one.
+    A promise not to copy something is not a mechanism; a shape that cannot HOLD the copy is.
+
+    So the key set is closed, and an unknown key is refused rather than ignored. That is also why the
+    refusal has to be fatal: a key silently dropped reads as though it took effect, and whoever wrote
+    it would carry on believing the engine was honouring it.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    d, _ = _agent_def(tmp_path)
+    path = d / "sample-agent.yaml"
+
+    # The shape a copied routing table would want.
+    path.write_text(path.read_text() + "\nrouting:\n  code change: sample-change\n",
+                    encoding="utf-8")
+    r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d)))
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "unsupported key(s): routing" in r.stderr, r.stderr
+
+    # And the engine DOES publish that table, so the copy is not merely refused — it is unnecessary.
+    brief = run(["brief"], e).stdout
+    assert "when to reach for it" in brief, brief[:400]
+
+
+def test_a_confusable_pair_without_its_cost_is_refused(env, tmp_path):
+    """The asymmetric cost is the half worth writing, so it is the half that is required.
+
+    A reader can usually see that two abilities differ; what they cannot work out is which way round
+    the mistake is expensive — and that is the only part that changes a decision under time pressure.
+    A pair recorded without it is a note that two things are different, which the reader already
+    suspected.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    d, raw = _agent_def(tmp_path)
+    assert raw.get("confusable"), "the sample records no pair; this test asserted nothing"
+
+    import yaml as _yaml
+    stripped = dict(raw)
+    stripped["confusable"] = [{k: v for k, v in rec.items() if k != "cost"}
+                              for rec in raw["confusable"]]
+    (d / "sample-agent.yaml").write_text(
+        _yaml.safe_dump(stripped, allow_unicode=True), encoding="utf-8")
+    r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d)))
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "no `cost`" in r.stderr, r.stderr
+
+
+def test_a_chain_must_say_what_carries_between_its_runs(env, tmp_path):
+    """Separate runs share no state, so the artifact between them IS the chain.
+
+    This is the one thing in the file the engine genuinely cannot derive and also cannot do without:
+    `requires:` is a load-time dependency it already resolves, while a chain is several runs opened at
+    different times. Without the carrier named, what is left is an ordering somebody remembered.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    d, raw = _agent_def(tmp_path)
+    assert raw.get("chains"), "the sample records no chain; this test asserted nothing"
+
+    import yaml as _yaml
+    for mutate, expect in (
+        (lambda ch: {k: v for k, v in ch.items() if k != "carried_by"}, "carried_by"),
+        (lambda ch: dict(ch, hops=ch["hops"][:1]), "at least two `hops`"),
+    ):
+        broken = dict(raw)
+        broken["chains"] = [mutate(ch) for ch in raw["chains"]]
+        (d / "sample-agent.yaml").write_text(
+            _yaml.safe_dump(broken, allow_unicode=True), encoding="utf-8")
+        r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d)))
+        assert r.returncode == BAD_SPEC, (expect, r.stdout + r.stderr)
+        assert expect in r.stderr, (expect, r.stderr)
+
+
+def test_a_flow_no_agent_binds_is_reported_once_for_the_whole_set(env, tmp_path):
+    """A per-file version of this warning was measured as noise, and narrowed to a set property.
+
+    Every agent binds a SUBSET on purpose, so "this definition does not bind that" is true of almost
+    every pair — printed per file it produces a warning nobody reads, which is worse than no warning
+    because it trains the reader to skip the line where the real one will appear.
+
+    What is worth knowing is a property of the whole set: something installed and routable that NO
+    definition binds is a flow nothing will ever reach for, and nothing else in this system would
+    mention it. Withheld when a single file is named, because one definition cannot establish it —
+    the answer would be an artefact of what was asked.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    d, raw = _agent_def(tmp_path)
+
+    import yaml as _yaml
+    # Bind ONE, so the other shipped production flow is bound by nobody.
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    production = sorted(n for n in fl.available_abilities()
+                        if fl.load(n).role == fl.ROLE_PRODUCTION)
+    assert len(production) >= 2, production
+    narrowed = {"agent": "sample-agent", "abilities": [production[0]]}
+    (d / "sample-agent.yaml").write_text(
+        _yaml.safe_dump(narrowed, allow_unicode=True), encoding="utf-8")
+
+    whole = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=str(d)))
+    assert whole.returncode == OK, whole.stderr
+    assert "bound by NO agent" in whole.stdout, whole.stdout
+    assert production[1] in whole.stdout, whole.stdout
+
+    # Naming the file asks a narrower question, and gets no set-wide claim back.
+    one = run(["onboard", str(d / "sample-agent.yaml")], dict(e, HARNESS_AGENTS_PATH=str(d)))
+    assert one.returncode == OK, one.stderr
+    assert "bound by NO agent" not in one.stdout, one.stdout
+
+
+def test_two_roots_defining_one_agent_is_refused_rather_than_resolved(env, tmp_path):
+    """First-wins would make "which definition is in force" unanswerable from the files.
+
+    Which is the question this whole file exists to answer, so the engine refuses to pick. Same rule
+    the abilities roots follow, and for the same measured reason: a root nobody is looking at
+    shadowing the one being edited.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    a, _ = _agent_def(tmp_path)
+    b = tmp_path / "other"
+    b.mkdir()
+    (b / "sample-agent.yaml").write_text((a / "sample-agent.yaml").read_text(), encoding="utf-8")
+    r = run(["onboard"], dict(e, HARNESS_AGENTS_PATH=f"{a}{os.pathsep}{b}"))
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "two roots define the agent" in r.stderr, r.stderr
+
+
+def test_the_shipped_agent_definition_passes_its_own_check(env):
+    """A sample that does not pass is worse than no sample: it is a template for a broken file."""
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"),
+             HARNESS_AGENTS_PATH=str(REPO / "agents"))
+    r = run(["onboard"], e)
+    assert r.returncode == OK, r.stdout + r.stderr
+    assert "sample-agent" in r.stdout, r.stdout
+    # And it binds real flows, not placeholders — a sample bound to nothing installed would pass the
+    # schema while teaching the form wrong.
+    assert "binds:" in r.stdout, r.stdout
+
+
+def test_a_narrowed_brief_names_only_what_that_agent_may_drive(env, tmp_path):
+    """The two files have to agree, and the heading is why.
+
+    That section is titled "what is installed, and WHEN TO REACH FOR IT". Listing a flow an agent is
+    not bound to therefore does not merely inform it — it invites driving something that is somebody
+    else's work. So naming an agent narrows the list to its bindings, and the binding is the same file
+    `harness onboard` checks: one source, so the contract and the check cannot disagree.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+    e0 = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"))
+    production = {n for n in fl.available_abilities()
+                  if fl.load(n).role == fl.ROLE_PRODUCTION}
+    assert len(production) >= 2, production
+
+    # A definition binding a STRICT SUBSET, built here rather than reusing the shipped sample —
+    # that one binds every production flow it ships beside, so narrowing by it would be a no-op and
+    # this test would assert nothing while passing.
+    import yaml as _yaml
+    d = tmp_path / "agents"
+    d.mkdir()
+    # The flow with the FEWEST capabilities, chosen by asking the engine rather than by name. That is
+    # what makes the section check below meaningful: narrowing to the richest flow would drop no
+    # section at all, and this test would pass while the capability narrowing did nothing.
+    bound = {min(production, key=lambda n: len(fl.capabilities_used(fl.load(n))))}
+    unbound = production - bound
+    (d / "narrow.yaml").write_text(
+        _yaml.safe_dump({"agent": "narrow", "abilities": sorted(bound)}, allow_unicode=True),
+        encoding="utf-8")
+    e = dict(e0, HARNESS_AGENTS_PATH=str(d))
+
+    def listed(text):
+        out, on = set(), False
+        for line in text.splitlines():
+            if line.startswith("## What is installed"):
+                on = True
+                continue
+            if on and line.startswith("## "):
+                break
+            if on and line.startswith("- **`"):
+                out.add(line.split("`")[1])
+        return out
+
+    whole = run(["brief"], e)
+    assert whole.returncode == OK, whole.stderr
+    assert listed(whole.stdout) == production, listed(whole.stdout)
+
+    narrowed = run(["brief", "--agent", "narrow"], e)
+    assert narrowed.returncode == OK, narrowed.stderr
+    assert listed(narrowed.stdout) == bound, listed(narrowed.stdout)
+    for n in unbound:
+        assert n not in listed(narrowed.stdout), n
+    # AND THE CAPABILITY SECTIONS GO TOO, asserted on the SECTIONS rather than on the length. A
+    # length comparison passes as soon as the flow list shortens, so it left the capability narrowing
+    # unpinned — a mutation that stopped narrowing capabilities kept this test green. Measured, then
+    # replaced with this.
+    def sections(text):
+        return {l.strip() for l in text.splitlines() if l.startswith("## ")}
+
+    dropped = (set(fl.capabilities_used(fl.load(sorted(unbound)[0])))
+               - set(fl.capabilities_used(fl.load(sorted(bound)[0]))))
+    assert dropped, "the bound flow exercises everything the unbound one does; nothing would drop"
+    assert sections(narrowed.stdout) < sections(whole.stdout), (
+        f"narrowing dropped no section, yet the unbound flow exercises {sorted(dropped)} that the "
+        f"bound one does not — those sections should not be rendered for this agent")
+
+
+def test_an_unknown_agent_is_refused_rather_than_widened(env):
+    """A narrowed brief that silently widened would be indistinguishable from a correct one.
+
+    Which makes it the worst available failure: the mistake it hides — an agent told to reach for work
+    that is not its own — is the exact thing the flag exists to prevent. A definition that does not
+    RESOLVE is refused for the same reason: narrowing by a binding that names something absent would
+    be narrower than the truth, and nothing later reveals it.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"),
+             HARNESS_AGENTS_PATH=str(REPO / "agents"))
+    r = run(["brief", "--agent", "no-such-agent"], e)
+    assert r.returncode == BAD_SPEC, r.stdout + r.stderr
+    assert "no definition for agent" in r.stderr, r.stderr
+    assert "known:" in r.stderr, "the refusal must say what it would have accepted"
+    assert not r.stdout.strip(), "a refused brief must not also print one"
+
+
+def test_a_narrowed_brief_still_carries_a_mandate_it_cannot_satisfy(env, tmp_path):
+    """Narrowing what to REACH FOR must not narrow what is REQUIRED, and this is why.
+
+    A flow policy makes mandatory is enforced by the guard whatever the agent is bound to. Omit it
+    from a narrowed brief and the agent meets a refusal for a flow its own contract never mentioned —
+    and the apparent way past that is to proceed without it. So the mandate stays, and the conflict is
+    stated in the document, addressed to the party who has to act on it.
+
+    Reported rather than refused: the scope decides whether it applies, and nothing here knows which
+    scopes an agent works in. Refusing would leave an agent that never enters those scopes with no
+    contract at all.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as fl
+
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"),
+             HARNESS_AGENTS_PATH=str(tmp_path / "agents"))
+    production = sorted(n for n in fl.available_abilities()
+                        if fl.load(n).role == fl.ROLE_PRODUCTION)
+    assert len(production) >= 2, production
+    bound, mandated = production[0], production[1]
+
+    d = tmp_path / "agents"
+    d.mkdir()
+    import yaml as _yaml
+    (d / "narrow.yaml").write_text(
+        _yaml.safe_dump({"agent": "narrow", "abilities": [bound]}, allow_unicode=True),
+        encoding="utf-8")
+
+    # Mandate the flow this agent is NOT bound to.
+    assert rc(["require", "--add", mandated,
+               "--scope-key", str(tmp_path / "elsewhere")], e) == OK
+
+    r = run(["brief", "--agent", "narrow"], e)
+    assert r.returncode == OK, r.stdout + r.stderr
+    assert "## Where a flow is MANDATORY here" in r.stdout, r.stdout
+    assert mandated in r.stdout, "the mandate itself must survive the narrowing"
+    assert "Mandatory above, but NOT among what you may reach for" in r.stdout, r.stdout
+    assert "must not proceed around it" in r.stdout, "it must say what to do instead"
+
+
+def test_each_agent_gets_its_own_written_brief(env, tmp_path):
+    """One file per agent, because the contract is not the same document for two of them.
+
+    Sharing one path would mean the last write wins and every agent reads whichever binding was
+    generated most recently — a narrowing that is silently wrong for all but one of them.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"),
+             HARNESS_AGENTS_PATH=str(REPO / "agents"))
+    r = run(["brief", "--write", "--agent", "sample-agent"], e)
+    assert r.returncode == OK, r.stderr
+    written = Path(r.stdout.split()[-1])
+    assert written.name == "brief-sample-agent.md", written
+    assert written.is_file()
+    # The un-narrowed one is a DIFFERENT file, so generating one never overwrites the other.
+    plain = run(["brief", "--write"], e)
+    assert plain.returncode == OK, plain.stderr
+    assert Path(plain.stdout.split()[-1]).name == "brief.md"
+    assert written.read_text() != Path(plain.stdout.split()[-1]).read_text()
+
+
+def test_a_portable_brief_refuses_to_carry_one_persons_bindings(env):
+    """A portable copy is a reference checked into a repository; a binding is one person's.
+
+    Rendering the two together would ship somebody's agent roster as though it were the engine's —
+    the same mistake that put a personal capability map in this tree in the first place.
+    """
+    e = dict(env, HARNESS_ABILITIES_PATH=str(REPO / "abilities"),
+             HARNESS_AGENTS_PATH=str(REPO / "agents"))
+    r = run(["brief", "--agent", "sample-agent", "--portable"], e)
+    assert r.returncode == USAGE, r.stdout + r.stderr
+    assert "different audiences" in r.stderr, r.stderr

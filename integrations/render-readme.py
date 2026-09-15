@@ -9,11 +9,15 @@ evidence, and the README contradicted itself about it within 11 lines.
 
 THE CONSTRAINT THAT SHAPES WHAT GOES IN HERE
 --------------------------------------------
-This engine is meant to be published with `abilities/` emptied down to a sample. So a fact is
-allowed in this block only if it SURVIVES that deletion — i.e. it must come from `engine/`,
-never from the set of installed flows. "15 completion predicates" survives; "8 installed
-flows" and "shipcheck-asis has 102 steps" do not: after publishing they would be confidently
-wrong, which is worse than absent.
+This engine is meant to be published with `abilities/` holding only the samples. So a fact is
+allowed in this block only if it SURVIVES having the rest deleted — i.e. it must come from
+`engine/`, never from the set of installed flows. "15 completion predicates" survives; "8
+installed flows" and "the largest flow has 102 steps" do not: after publishing they would be
+confidently wrong, which is worse than absent.
+
+The counter-example used to name a specific flow from the author's own set, which is a smaller
+version of the same mistake this rule is about: a reader who does not have that flow cannot tell
+whether the sentence is an example or a fact about what they just cloned.
 
 That rule is not a convention to remember, it is asserted by a test
 (`test_the_generated_block_holds_no_fact_that_publishing_would_falsify`), because a rule kept

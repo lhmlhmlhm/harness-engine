@@ -27,6 +27,7 @@ import uuid
 from pathlib import Path
 
 from . import flow as flowmod
+from . import onboard as onboardmod
 from . import outputs
 from . import policy
 from . import trust
@@ -1764,6 +1765,118 @@ def cmd_purge_run(args) -> int:
         conn.close()
 
 
+
+def cmd_onboard(args) -> int:
+    """Check what an agent is bound to, against what is actually installed.
+
+    Answers a question `validate` cannot. `validate` asks whether a spec is well formed, and every
+    spec can be perfect while an agent is bound to one that is not installed, or to one whose role is
+    never routed to. Both of those are SILENT at run time — the agent simply never reaches for it, and
+    reads its own inaction as there being nothing to do.
+
+    Exit 2 = at least one definition is wrong. Exit 0 = every one resolves.
+    """
+    say = _sayer(args)
+    try:
+        found = onboardmod.installed()
+    except onboardmod.OnboardError as exc:
+        _err(f"❌ {exc}")
+        return BAD_SPEC
+
+    if args.file:
+        target = Path(args.file).expanduser()
+        if not target.is_file():
+            _err(f"❌ no such definition: {target}")
+            return BAD_SPEC
+        targets = [target]
+    elif found:
+        targets = [found[k] for k in sorted(found)]
+    else:
+        # NOT an error, and said out loud rather than exiting 0 in silence: "nothing is bound" and
+        # "there is nowhere to look" are different answers, and only the second is a configuration
+        # problem the reader can act on.
+        roots = [str(r) for r in onboardmod.agents_roots()]
+        data = {"agents": [], "roots": roots, "bound_by_nothing": []}
+
+        def _none(d):
+            _err(f"no agent definitions found. Looked in: {', '.join(d['roots'])}")
+            _err(f"  A definition is <root>/<agent>.yaml. Set {onboardmod.AGENTS_ENV} to look "
+                 f"elsewhere.")
+        return _emit(args, data, _none)
+
+    bad = False
+    agents: list = []
+    # Intersected across every definition, so what survives is bound by none of them.
+    never_bound: set = set(flowmod.available_abilities())
+    for path in targets:
+        try:
+            raw, problems, unmentioned = onboardmod.check(path)
+        except onboardmod.OnboardError as exc:
+            _err(f"❌ {exc}")
+            bad = True
+            continue
+        name = str(raw.get("agent") or path.stem)
+        if problems:
+            bad = True
+            agents.append({"agent": name, "path": str(path), "ok": False, "problems": problems})
+            continue
+        never_bound &= set(unmentioned)
+        agents.append({
+            "agent": name, "path": str(path), "ok": True,
+            "abilities": [str(x) for x in (raw.get("abilities") or [])],
+            "chains": [{"id": str(ch.get("id") or ""),
+                        "hops": [str(h) for h in ch.get("hops") or []],
+                        "carried_by": str(ch.get("carried_by") or "").strip()}
+                       for ch in (raw.get("chains") or [])],
+            "confusable": [{"pair": [str(x) for x in rec.get("pair") or []],
+                            "distinction": str(rec.get("distinction") or "").strip(),
+                            "cost": str(rec.get("cost") or "").strip()}
+                           for rec in (raw.get("confusable") or [])],
+            "tools": [{"name": str(t.get("name") or ""),
+                       "reach": str(t.get("reach") or "").strip()}
+                      for t in (raw.get("tools") or [])],
+        })
+
+    data = {"agents": agents,
+            "roots": [str(r) for r in onboardmod.agents_roots()]}
+    if not args.file:
+        # Withheld when a single file was named, because one definition cannot establish that nothing
+        # binds a flow — the answer would be an artefact of what was asked, not a fact. Present and
+        # possibly EMPTY otherwise: a key that disappears on the happy path forces every consumer to
+        # write the same `.get(...)`, and one of them will read a missing key as "nothing to report"
+        # when the real answer was "not asked".
+        data["bound_by_nothing"] = sorted(never_bound)
+
+    def _render(d):
+        for a in d["agents"]:
+            if not a["ok"]:
+                _err(f"❌ {a['agent']}")
+                for why in a["problems"]:
+                    _err(f"  {why}")
+                continue
+            say(f"✅ {a['agent']}: binds {len(a['abilities'])} ability(ies); "
+                f"{len(a['chains'])} chain(s), {len(a['confusable'])} confusable pair(s), "
+                f"{len(a['tools'])} non-flow tool(s)")
+            say(f"   binds: {', '.join(a['abilities'])}")
+            for ch in a["chains"]:
+                # FIRST LINE ONLY of what carries between hops. The field is prose and often a
+                # paragraph; a summary that reflows it stops being scannable, which is the one thing
+                # a summary is for. The full text is in the file, and in --json.
+                lines = ch["carried_by"].splitlines()
+                head = lines[0] if lines else ""
+                if len(lines) > 1 or len(head) > 72:
+                    head = head[:69].rstrip() + "…"
+                say(f"   chain {ch['id']}: {' → '.join(ch['hops'])}  (carried by {head})")
+        never = d.get("bound_by_nothing") or []
+        if never:
+            say(f"⚠️  installed and routable, but bound by NO agent: {', '.join(never)}")
+            say("   Each is a flow nothing will ever reach for. Bind it, or drop it.")
+
+    rc = BAD_SPEC if bad else OK
+    _emit(args, data, _render)
+    return rc
+
+
 def cmd_guard_tool(args) -> int:
     """The RUNTIME hook. Answers: may this tool call proceed?
 
@@ -2370,12 +2483,74 @@ def _invocation(portable: bool = False) -> str:
     return str(Path(__file__).resolve().parents[1] / "bin" / "harness")
 
 
-def _render_brief(portable: bool) -> str:
+
+def _agent_bindings(agent: str) -> list[str]:
+    """What this agent is bound to, refusing rather than guessing when it cannot be answered.
+
+    An unknown name must not fall back to "everything". A narrowed brief that silently widened would
+    be indistinguishable from a correct one, and the mistake it hides is the one this whole flag
+    exists to prevent — an agent told to reach for work that is not its own.
+    """
+    try:
+        found = onboardmod.installed()
+    except onboardmod.OnboardError as exc:
+        raise SystemExit(_fail(BAD_SPEC, f"❌ {exc}"))
+    if agent not in found:
+        known = ", ".join(sorted(found)) or "(none)"
+        raise SystemExit(_fail(
+            BAD_SPEC,
+            f"❌ no definition for agent '{agent}'.\n"
+            f"  known: {known}\n"
+            f"  Looked in: {', '.join(str(r) for r in onboardmod.agents_roots())}"))
+    raw, problems, _ = onboardmod.check(found[agent])
+    if problems:
+        # REFUSED rather than rendered from a broken definition. A brief narrowed by a binding that
+        # names something absent would be narrower than the truth in a way nothing later reveals.
+        lines = "\n".join(f"  {x}" for x in problems)
+        raise SystemExit(_fail(
+            BAD_SPEC,
+            f"❌ the definition for '{agent}' does not resolve, so a brief cannot be narrowed by "
+            f"it:\n{lines}"))
+    return [str(x) for x in (raw.get("abilities") or [])]
+
+
+def _fail(code: int, msg: str) -> int:
+    _err(msg)
+    return code
+
+
+def _render_brief(portable: bool, agent: str | None = None) -> str:
     """Gather every fact off the engine, then render. Shared by `brief` and `init`.
 
-    One gatherer, because two would drift — and drift in a document about the engine is the
-    defect this whole command exists to remove.
+    One gatherer, because two would drift — and drift in a document about the engine is the defect
+    this whole command exists to remove.
+
+    NAMING AN AGENT NARROWS WHAT IT MAY DRIVE, AND NOTHING ELSE. The split is by who the fact is
+    about:
+
+        narrowed        which flows to reach for, which mechanisms they use, and which of their
+                        guards no hook can fire — every one of these is a statement about THIS
+                        agent's work, and listing another agent's flows under a heading that says
+                        "when to reach for it" is an invitation to drive something it must not.
+
+        left whole      the exit codes, the subcommands, the environment, the tools the host's hook
+                        must cover, and where a flow is MANDATORY. None of these are about the
+                        agent: the interception path iterates every open run on the machine
+                        whatever opened it, so a hook configured from a narrowed tool list would
+                        silently fail to ask about somebody else's run.
     """
+    bound: set | None = None
+    unbound_required: tuple = ()
+    if agent is not None:
+        bound = set(_agent_bindings(agent))
+        # A FLOW POLICY MAKES MANDATORY THAT THIS AGENT CANNOT DRIVE. Computed here and rendered
+        # INTO the document rather than refused: the scope decides whether it applies, and nothing
+        # here knows which scopes an agent works in. Refusing would mean no contract at all for an
+        # agent that legitimately never enters those scopes; hiding it would leave the agent facing
+        # a guard refusal with no explanation and skipping the flow as the apparent way forward.
+        if not portable:
+            mandated = {str(r.get("ability") or "") for r in (policy.read() or ())}
+            unbound_required = tuple(sorted(n for n in mandated if n and n not in bound))
     routable: list[tuple[str, str]] = []
     caps: set[str] = set()
     guard_tools: set[str] = set()
@@ -2387,7 +2562,12 @@ def _render_brief(portable: bool) -> str:
             f = flowmod.load(name)
         except flowmod.FlowError:
             continue  # a broken spec must not stop the rest of the brief
-        caps |= set(flowmod.capabilities_used(f))
+        if bound is None or name in bound:
+            # Narrowed too, because each capability decides whether a whole SECTION renders. A brief
+            # explaining variants to an agent none of whose flows have them is budget spent teaching
+            # it about machinery it will never meet — and it is generated, so a flow that later gains
+            # one brings its section back on the next write.
+            caps |= set(flowmod.capabilities_used(f))
         for rules in f.guard_matches.values():
             guard_tools |= {r["tool"] for r in rules}
         # Collected at the SAME level as the tool list above, and deliberately not below the
@@ -2395,10 +2575,12 @@ def _render_brief(portable: bool) -> str:
         # fixture's guarded actions are as real to a hook as a production flow's. Listing one
         # kind of declaration and hiding the other would make the tool list read as the complete
         # guarded surface, which is exactly what it is not.
-        for action in sorted(f.guards):
-            if not f.guard_matches.get(action):
-                ask_only_guards.append((name, action))
-        if f.role != flowmod.ROLE_PRODUCTION:
+        mine = bound is None or name in bound
+        if mine:
+            for action in sorted(f.guards):
+                if not f.guard_matches.get(action):
+                    ask_only_guards.append((name, action))
+        if f.role != flowmod.ROLE_PRODUCTION or not mine:
             continue
         routable.append((name, f.when.strip().splitlines()[0] if f.when else ""))
         if len(f.steps) > widest and f.order:
@@ -2409,7 +2591,8 @@ def _render_brief(portable: bool) -> str:
         invocation=_invocation(portable),
         version=__version__,
         portable=portable,
-        write_hint="harness brief --write",
+        write_hint=("harness brief --write" if agent is None
+                      else f"harness brief --write --agent {agent}"),
         exit_codes={"OK": OK, "USAGE": USAGE, "BAD_SPEC": BAD_SPEC,
                     "REFUSED": REFUSED, "BLOCKED": BLOCKED, "INTERNAL": INTERNAL},
         subcommands=_subcommand_help(),
@@ -2424,6 +2607,7 @@ def _render_brief(portable: bool) -> str:
         guard_tools=sorted(guard_tools),
         example_step=example_step,
         required=() if portable else policy.read(),
+          unbound_required=unbound_required,
         ask_only_guards=tuple(ask_only_guards),
     )
 
@@ -2436,13 +2620,20 @@ def cmd_brief(args) -> int:
     materialised somewhere machine-local, and the command prints where it went rather than
     leaving the caller to guess.
     """
-    text = _render_brief(args.portable)
+    agent = getattr(args, "agent", None)
+    if agent and args.portable:
+        # A portable copy is a REFERENCE checked into a repository; narrowing it by one machine's
+        # agent definition would ship somebody's bindings as if they were the engine's.
+        _err("⛔ --agent and --portable name different audiences: a portable copy is a reference "
+             "for any reader, and an agent's bindings are one person's.")
+        return USAGE
+    text = _render_brief(args.portable, agent)
     if args.write:
         if args.portable:
             _err("⛔ --write and --portable name different audiences: the written copy is for "
                  "THIS machine and must carry a working path.")
             return USAGE
-        path = store.brief_path()
+        path = store.brief_path(agent)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         print(f"✅ wrote {path}")
@@ -2863,6 +3054,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="use a placeholder path instead of this machine's (for a checked-in copy)")
     br.add_argument("--write", action="store_true",
                     help="write it beside the store instead of to stdout, and print the path")
+    br.add_argument("--agent", metavar="NAME",
+                    help="narrow what to reach for to that agent's bindings (see `harness onboard`)")
     br.set_defaults(fn=cmd_brief)
     hi = sub.add_parser("history", help="list runs that have ended")
     hi.add_argument("--limit", type=int, default=20)
@@ -2880,6 +3073,14 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="validate flow spec(s); exit 2 if invalid")
     v.add_argument("ability", nargs="?")
     v.set_defaults(fn=cmd_validate)
+
+    ob = sub.add_parser("onboard",
+                        help="check what an agent is bound to against what is installed")
+    ob.add_argument("file", nargs="?",
+                    help="one definition to check; default is every one discovered")
+    ob.add_argument("--json", action="store_true",
+                    help="machine-readable: the resolved bindings, and what nothing binds")
+    ob.set_defaults(fn=cmd_onboard)
 
     o = sub.add_parser("open", help="open a run of an ability's flow")
     o.add_argument("ability")

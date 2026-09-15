@@ -1,0 +1,75 @@
+# A worked example of an agent definition. Checked by `harness onboard`, so if you copy this and get
+# a key wrong you find out immediately rather than from an agent that quietly never reaches for
+# anything.
+#
+# WHAT BELONGS IN A FILE LIKE THIS, and the test is one question: could the engine work it out?
+#
+#   it could            what is installed, each one's `when:` line, each one's role, what each one
+#                       `requires:` at load time
+#                       → `harness abilities` and `harness brief` already publish these, generated,
+#                         so writing them here would be a copy that rots. Do not.
+#
+#   it could not        which SUBSET this agent may reach for; which of them hand off to each other
+#                       across separate runs and what artifact carries between; which pairs are easy
+#                       to confuse and which way round the mistake is expensive; what non-flow tools
+#                       this agent has and how to reach them
+#                       → that is this file, and it is all of it.
+#
+# This example is deliberately about nothing: two sample flows that move a made-up item between
+# directories. A sample that bound a real build system or ticket tracker would teach you about those
+# instead of about the form.
+
+agent: sample-agent
+title: A worked example — an agent bound to the two shipped sample flows
+
+# WHICH OF THE INSTALLED FLOWS THIS AGENT MAY REACH FOR. Every name is resolved against what is
+# actually installed, and a name whose role is never routed to (`fixture`, `library`) is refused —
+# those are reached THROUGH another ability, never asked for by name.
+#
+# Binding a subset is normal and expected. `harness onboard` still reports what is installed and
+# routable but not bound here, because that is this file's only silent failure mode: a flow no agent
+# binds is a flow that never gets driven, and nothing else in the system would ever mention it.
+abilities:
+  - sample-change
+  - sample-note
+
+# A HAND-OFF ACROSS RUNS, which is the part the engine genuinely cannot see. `requires:` inside a
+# spec is a load-time dependency and the engine already resolves it. A chain is different in kind:
+# separate runs, opened at different times, connected only by something one of them produced.
+#
+# `carried_by` is required for exactly that reason — separate runs share no state, so the artifact
+# that connects them IS the chain. Without it this is only an ordering somebody remembered.
+chains:
+  - id: record-then-settle
+    hops: [sample-note, sample-change]
+    carried_by: the item name, recorded as evidence in the first run and named again in the second
+    note: |
+      Each hop opens its OWN run. A single run spanning both would make one flow's gates stand in for
+      the other's, which is the thing gates exist to prevent.
+
+# PAIRS THAT GET CONFUSED, with the cost of confusing them. Both halves are required, and the cost is
+# the one worth writing: a reader can usually see that two things differ, but not which way round the
+# mistake is expensive — and that is what decides it under time pressure.
+confusable:
+  - pair: [sample-change, sample-note]
+    distinction: |
+      `sample-change` is for something you are ABOUT to do and will be held to — it has gates, an
+      obligation that can refuse the close, and a variant that changes which steps apply.
+      `sample-note` is for something that ALREADY happened and needs recording.
+    cost: |
+      Asymmetric. Recording an intended change as a note gets you a record with no gates, no
+      corroboration and no obligation — the work happens with none of the guarantees, and the log
+      afterwards looks tidy. The reverse mistake merely makes you walk more steps than you needed.
+
+# THINGS THAT ARE NOT FLOWS, and so have no `when:` for the engine to publish. They still have to be
+# findable, which is the entire content of an entry: a name, and how to reach it. A name with no route
+# is a reminder that something exists, which costs a search every time it is read.
+tools:
+  - name: the sample item store
+    reach: |
+      `abilities/sample-lib/sample/` — three status folders. `HARNESS_SAMPLE_DIR` points the borrowed
+      provider somewhere else, which is what a test does rather than writing into the shipped one.
+  - name: the shipped observing tool
+    reach: |
+      `abilities/sample-lib/tools/sample-read.py --dir <dir> --item <name>` — pure compute, prints
+      JSON. Exit 2 means it could not look, which is NOT the same answer as finding nothing.
