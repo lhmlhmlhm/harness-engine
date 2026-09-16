@@ -61,7 +61,7 @@ provider 指到别处。两个端点变量必须**成对**给：引擎在 provid
 
 | 引擎实测 | | 出处 |
 |---|---|---|
-| 基座 | 17 个模块 · 10,018 行 | `engine/*.py` |
+| 基座 | 17 个模块 · 10,063 行 | `engine/*.py` |
 | 入口 | 10 行（行为全在 `engine/`） | `bin/harness` |
 | 引擎自己拥有的表 | 9 张 | `engine/schema.sql` |
 | spec 格式 MAJOR | 2 | `flow.SPEC_MAJOR` |
@@ -77,7 +77,7 @@ provider 指到别处。两个端点变量必须**成对**给：引擎在 provid
 | `guard` 裁决闭集 | 7 种 | `harness.GUARD_VERDICTS` |
 | 只有散文的命令 | 7 个（各带理由） | `harness.PROSE_ONLY` |
 | 还没有 `--json` 的命令 | 空集（每个写命令都能用 `--json` 作答） | `harness.NO_JSON_YET` |
-| 测试 | 524 个 | `pytest --collect-only` |
+| 测试 | 525 个 | `pytest --collect-only` |
 
 <!-- END GENERATED -->
 

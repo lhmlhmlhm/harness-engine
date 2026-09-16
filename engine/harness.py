@@ -1863,6 +1863,7 @@ def cmd_onboard(args) -> int:
             "tools": [{"name": str(t.get("name") or ""),
                        "reach": str(t.get("reach") or "").strip()}
                       for t in (raw.get("tools") or [])],
+            "wired_contract": _wired_contract_state(name),
         })
 
     data = {"agents": agents,
@@ -1886,6 +1887,14 @@ def cmd_onboard(args) -> int:
                 f"{len(a['chains'])} chain(s), {len(a['confusable'])} confusable pair(s), "
                 f"{len(a['tools'])} non-flow tool(s)")
             say(f"   binds: {', '.join(a['abilities'])}")
+            if a["wired_contract"] == "stale":
+                # NOT a failure of the definition, so it does not set `bad`: the definition is
+                # correct and the machine's copy of the derived document is behind it. Exit 2 here
+                # would conflate "you wrote something wrong" with "you have not re-wired", and the
+                # second is a one-command fix that nothing was watching for.
+                _err(f"⚠️  {a['agent']}: the wired contract at "
+                     f"{store.brief_path(a['agent'])} is behind this definition.")
+                _err(f"    Regenerate it:  harness-wire <engine tree>   (idempotent)")
             for ch in a["chains"]:
                 # FIRST LINE ONLY of what carries between hops. The field is prose and often a
                 # paragraph; a summary that reflows it stops being scannable, which is the one thing
@@ -2545,6 +2554,42 @@ def _agent_bindings(agent: str) -> list[str]:
 def _fail(code: int, msg: str) -> int:
     _err(msg)
     return code
+
+
+def _wired_contract_state(agent: str) -> str:
+    """Is the machine-local copy of this agent's driving contract still what it would render as?
+
+    THREE ANSWERS, and the middle one is the point:
+
+      absent  — nothing has been wired for this agent. Not a defect: a fresh checkout has no
+                machine-local state, and reporting that as staleness would make the check cry wolf
+                on exactly the setup it is supposed to help.
+      current — the file on disk is byte-for-byte what rendering produces now.
+      stale   — it is not, so an agent loading it is reading a description of a different binding.
+
+    COMPARED AS BYTES, NOT PARSED. Extracting one list out of the rendered document and comparing
+    that would only catch drift in the part the extractor happens to look at, and it would couple
+    this check to the rendering's punctuation. Rendering fresh and diffing is the same shape the
+    repo's own generated documents are guarded with, and it catches every kind of drift including
+    the ones nobody thought to look for.
+
+    WHY THIS BELONGS TO THIS COMMAND. The narrowed contract is derived from a definition and from
+    what is installed — the two things this command already loads and compares. It is refreshed by
+    the wiring script and by nothing else, so a definition edited by hand leaves it behind with
+    nothing watching. Putting the check on every command instead would put a permanent warning in
+    the path of every call to catch a fault that is soft and rare, and a check that cries wolf gets
+    switched off.
+
+    NEVER RAISES. A document being unreadable must not stop a definition from being reported on.
+    """
+    try:
+        path = store.brief_path(agent)
+        if not path.is_file():
+            return "absent"
+        return "current" if path.read_text(encoding="utf-8") == _render_brief(
+            portable=False, agent=agent) else "stale"
+    except Exception:  # noqa — a derived document must not break the check it is derived for
+        return "absent"
 
 
 def _render_brief(portable: bool, agent: str | None = None) -> str:

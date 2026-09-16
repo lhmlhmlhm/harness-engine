@@ -10787,3 +10787,61 @@ def test_where_an_ability_lives_is_answerable_not_guessable(env):
         assert Path(row["root"]).name == "__broken__", row
     finally:
         _rm(bad)
+
+def test_onboard_reports_a_wired_contract_that_has_fallen_behind_its_definition(env, tmp_path):
+    """Three answers, and `absent` must stay silent — otherwise the check cries wolf on a fresh tree.
+
+    The narrowed contract is derived from a definition and from what is installed, and it is written
+    by the wiring script and by nothing else. So editing a definition by hand leaves the machine's
+    copy behind with nothing watching, and an agent then loads a description of a different binding.
+    This command already loads and compares exactly those two things, which is why the check lives
+    here rather than on every command: the fault is soft and rare, and a permanent warning in the path
+    of every call is how a check gets switched off.
+
+    STALENESS IS NOT A BAD DEFINITION. It must not change the exit code — conflating "you wrote
+    something wrong" with "you have not re-wired" would make the one-command fix look like a spec
+    error, and the reader would go looking in the wrong file.
+    """
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    # A ROUTABLE binding, deliberately: `onboard` refuses a definition that binds a fixture role, and
+    # that refusal (exit 2) would mask the state this test is about.
+    (agents / "probe.yaml").write_text(
+        "agent: probe\nabilities:\n- sample-note\n", encoding="utf-8")
+    e = {**env, "HARNESS_AGENTS_PATH": str(agents)}
+    wired = Path(env["HARNESS_STATE_DIR"]) / "brief-probe.md"
+
+    def state():
+        """The JSON field AND the prose warning, asked separately.
+
+        `--json` renders the envelope INSTEAD of the prose, so one call cannot answer both. Reading
+        the field from a `--json` run and then asserting on that run's stderr was silently checking
+        prose that had never been rendered — an assertion that would have passed just as happily with
+        the warning deleted.
+        """
+        as_json = run(["onboard", "--json"], e)
+        assert as_json.returncode == OK, as_json.stderr
+        field = json.loads(as_json.stdout)["agents"][0]["wired_contract"]
+        as_prose = run(["onboard"], e)
+        return field, as_prose
+
+    # ① nothing wired yet — reported, and NOT warned about. A fresh checkout has no machine-local
+    #    state, and calling that staleness would fire on exactly the setup this is meant to help.
+    st, proc = state()
+    assert st == "absent", st
+    assert "behind this definition" not in proc.stderr, proc.stderr
+
+    # ② wire it → current.
+    assert rc(["brief", "--write", "--agent", "probe"], e) == OK
+    assert wired.is_file(), f"{wired} was not written"
+    st, proc = state()
+    assert st == "current", st
+    assert "behind this definition" not in proc.stderr
+
+    # ③ change the file on disk → stale, warned about, exit code UNCHANGED.
+    wired.write_text(wired.read_text(encoding="utf-8") + "\ndrifted\n", encoding="utf-8")
+    st, proc = state()
+    assert st == "stale", st
+    assert "behind this definition" in proc.stderr, proc.stderr
+    assert "harness-wire" in proc.stderr, "the message must name the one command that fixes it"
+    assert proc.returncode == OK, "staleness is not a bad definition and must not fail the check"
