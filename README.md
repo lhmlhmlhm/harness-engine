@@ -41,6 +41,11 @@ harness-engine/
 └── tests/
 ```
 
+**样本自己的三个旋钮**（不是引擎的，是那三个样本 ability 的）：`HARNESS_SAMPLE_DIR` 指到别的
+状态目录、`HARNESS_SAMPLE_ENDPOINT` 与 `HARNESS_SAMPLE_ENDPOINT_HOST` 把那个「问一个端点」的
+provider 指到别处。两个端点变量必须**成对**给：引擎在 provider 运行**之前**就探测 capability，
+只改 URL 而 capability 仍指着一个不可达的主机，会在什么都没问之前就被拒。
+
 **两层是同一个形状，这是它好记的原因**：`abilities/` 旁边就是 `agents/`，而 `workspace/<你>/`
 下面也是这两个。引擎因此**零配置**就能找到你的东西 —— agent 定义的搜索根是从每个 abilities 根
 派生的（`<根>/../agents`），于是「有能力集的地方就有它的 agent 定义」，两者一起被拷到另一台机器。
@@ -56,7 +61,7 @@ harness-engine/
 
 | 引擎实测 | | 出处 |
 |---|---|---|
-| 基座 | 17 个模块 · 9,928 行 | `engine/*.py` |
+| 基座 | 17 个模块 · 10,018 行 | `engine/*.py` |
 | 入口 | 10 行（行为全在 `engine/`） | `bin/harness` |
 | 引擎自己拥有的表 | 9 张 | `engine/schema.sql` |
 | spec 格式 MAJOR | 2 | `flow.SPEC_MAJOR` |
@@ -72,7 +77,7 @@ harness-engine/
 | `guard` 裁决闭集 | 7 种 | `harness.GUARD_VERDICTS` |
 | 只有散文的命令 | 7 个（各带理由） | `harness.PROSE_ONLY` |
 | 还没有 `--json` 的命令 | 空集（每个写命令都能用 `--json` 作答） | `harness.NO_JSON_YET` |
-| 测试 | 514 个 | `pytest --collect-only` |
+| 测试 | 520 个 | `pytest --collect-only` |
 
 <!-- END GENERATED -->
 

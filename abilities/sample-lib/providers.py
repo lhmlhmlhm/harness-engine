@@ -34,6 +34,14 @@ SAMPLE_TOOL = "tools/sample-read.py"
 # cannot accidentally name somebody's machine — which is what makes it safe to ship a `net`
 # capability in a sample: the probe reports "could not reach", never "reached something unexpected".
 SAMPLE_HOST = "sample.invalid:443"
+# The endpoint the THIRD provider asks about a specific item. Overridable because a test has to be
+# able to stand up its own server and get a real answer out of it — a probe that can only ever fail
+# cannot demonstrate the difference between the three states below.
+SAMPLE_ENDPOINT = "${HARNESS_SAMPLE_ENDPOINT:-https://sample.invalid}"
+# The HOST the capability names, derived from the same override. Declared separately because a
+# capability spec is `host[:port]` while the provider needs a full URL — and both must move together,
+# or the engine would probe one host while the provider asked another.
+SAMPLE_ENDPOINT_HOST = "${HARNESS_SAMPLE_ENDPOINT_HOST:-sample.invalid:443}"
 
 # The statuses `sample_state` treats as a settled outcome. A closed set, so a criterion can ask
 # "did this settle" without the flow re-deciding what settled means.
@@ -161,3 +169,86 @@ def _sample_reach(ctx: dict) -> dict:
     got["host_answered"] = True
     got["auth_needed"] = code in ("401", "403")
     return got
+
+
+@facts.provider("sample_lookup",
+                requires=({"cmd": "curl"}, {"net": SAMPLE_ENDPOINT_HOST}),
+                schema={
+    # STATE ONE: could we ask at all? A missing tool, no network, a refused connection — none of
+    # these are answers about the item, and collapsing them into "not there" is how an absent
+    # dependency becomes a clean bill of health.
+    "lookup_probed": operators.T_BOOL,
+    # STATE TWO: did something answer? Distinct from state one because a host that refuses a
+    # connection and a host that replies are different worlds, and only the second one is evidence
+    # about anything.
+    "lookup_answered": operators.T_BOOL,
+    # STATE THREE, and the reason this provider exists at all: did it answer ABOUT THE ITEM WE ASKED
+    # FOR? An endpoint that responds while knowing nothing about this item has answered, and it has
+    # told us nothing. Two states cannot express that, and the two-state version reads "it replied,
+    # so it is fine" — which lets a run be refused for claiming it could not verify something, at a
+    # moment when in fact nothing was verified.
+    "lookup_knows_item": operators.T_BOOL,
+    # The derived verdict, TRUE only when all three hold. Derived here rather than left to each
+    # consumer, because the whole failure this provider exists to prevent is a caller deciding for
+    # itself that two out of three is close enough.
+    "lookup_reachable": operators.T_BOOL,
+    # WHY it came out that way, for a reader of the run. Without it, "not reachable" from a missing
+    # tool and "not reachable" from a 404 are the same two words.
+    "lookup_verdict": operators.T_STR,
+})
+def _sample_lookup(ctx: dict) -> dict:
+    """Ask an endpoint about THIS run's item, and report which of three things happened.
+
+    NO CREDENTIAL IS READ, for the same reason `sample_reach` reads none: trading a broad credential
+    permission for a small fact is the wrong exchange, and an unauthenticated request still separates
+    the three states this provider is about.
+
+    The default endpoint is `.invalid` (RFC 2606), so out of the box this reports `no_answer` and
+    never touches anybody's machine. Point `HARNESS_SAMPLE_ENDPOINT` at something real to get the
+    other two verdicts.
+    """
+    empty = {"lookup_probed": False, "lookup_answered": False, "lookup_knows_item": False,
+             "lookup_reachable": False, "lookup_verdict": "not_probed"}
+
+    from engine import store
+    conn = store.connect(read_only=True)
+    try:
+        rows = store.find_evidence(conn, str(ctx.get("run_id") or ""), None, "sample_item")
+    finally:
+        conn.close()
+    if not rows:
+        # Nothing to ask ABOUT. Reported as not probed rather than as unreachable: the endpoint was
+        # never given a chance, and blaming it would send the reader to the wrong place.
+        return dict(empty, lookup_verdict="no_item_recorded")
+    name = Path(str(rows[-1]["value"]).strip()).name
+    if not name:
+        return dict(empty, lookup_verdict="no_item_recorded")
+
+    base = facts.expand_env(SAMPLE_ENDPOINT).rstrip("/")
+    try:
+        proc = subprocess.run(
+            ["curl", "-s", "-o", os.devnull, "-w", "%{http_code}", "--max-time", "3",
+             f"{base}/items/{name}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return dict(empty, lookup_verdict="probe_failed")
+
+    got = dict(empty)
+    got["lookup_probed"] = True
+    code = (proc.stdout or "").strip()
+    if not code.isdigit() or code == "000":
+        # Asked, nothing came back. NOT the same as a 404: one is "we could not look", the other is
+        # "we looked and it does not know this item".
+        return dict(got, lookup_verdict="no_answer")
+    got["lookup_answered"] = True
+    if code == "404":
+        # THE THIRD STATE. It answered, and what it said was "I have never heard of this". Mapping
+        # this to reachable is the bug this provider is shaped to make impossible: a run claiming it
+        # could not verify the item would then be refused, at the exact moment nothing was verified.
+        return dict(got, lookup_verdict="answered_unknown_item")
+    if code.startswith("2"):
+        got["lookup_knows_item"] = True
+        got["lookup_reachable"] = True
+        return dict(got, lookup_verdict="answered_knows_item")
+    return dict(got, lookup_verdict=f"answered_{code}")

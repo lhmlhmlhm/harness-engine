@@ -297,11 +297,21 @@ def cmd_abilities(args) -> int:
             try:
                 f = flowmod.load(name)
             except flowmod.FlowError as exc:
-                out.append({"ability": name, "valid": False,
+                # ROOT ON BOTH BRANCHES, including the invalid one. A caller that cannot load a spec
+                # still needs to know WHERE the thing it could not load lives, and omitting the path
+                # exactly when something is wrong is omitting it when it is most needed.
+                out.append({"ability": name, "root": str(flowmod.ability_dir(name)),
+                            "valid": False,
                             "error": str(exc).splitlines()[0], **_code_fields(name)})
                 continue
             out.append({
-                "ability": name, "valid": True, "title": f.title, "role": f.role,
+                "ability": name,
+                # WHERE IT LIVES, answerable rather than guessable. `abilities/` is no longer one
+                # directory: the engine has its own, and each person's set sits under a separate root.
+                # A caller that searched for a file "under abilities/" therefore missed every private
+                # ability and found a stale same-named file instead — measured on a real run.
+                "root": str(flowmod.ability_dir(name)),
+                "valid": True, "title": f.title, "role": f.role,
                 "routable": f.role == flowmod.ROLE_PRODUCTION, "when": f.when,
                 "scope_kind": f.scope_kind, "scope_match": f.scope_match,
                 "phases": list(f.phases), "steps": len(f.steps),
@@ -926,6 +936,11 @@ def cmd_next(args) -> int:
                 "exclusive_group": list(f.group_of(s.id) or ()),
                 "blocked_on": blocked,
                 "directive": s.directive,
+                # ABSENT FROM THIS ENVELOPE UNTIL NOW, which meant a JSON-driving adapter could not
+                # learn that a step had a producer at all — only the text form mentioned it. Resolved
+                # rather than echoed: the pointer is relative to the declaring ability, and the
+                # engine is the only party that knows what it is relative to.
+                "produced_by": flowmod.resolve_producer(f, s.id),
                 "guide": None if guide is None else {
                     "file": str(guide.path), "level": guide.level,
                     "whole_file": guide.whole_file, "anchor": guide.anchor},
@@ -974,9 +989,22 @@ def cmd_next(args) -> int:
         # WHO PRODUCES THE EFFECT. Printed here because this is the moment the driver would
         # otherwise start grepping for it — and a driver that greps finds the reference
         # implementation, which is a whole second engine rather than one tool.
-        if s.produced_by:
+        prod = flowmod.resolve_producer(f, s.id)
+        if prod:
             print("  ── produced by (the engine does not run this) ──")
-            print(f"  {s.produced_by}")
+            # THE RESOLVED PATH, not the pointer as written. A relative pointer sends the reader
+            # searching, and a search finds whatever else on the machine shares that name — measured
+            # once as a month-old copy from a previous layout, which hard-coded a location the
+            # current one derives.
+            print(f"  {prod['path']}")
+            if prod["declared"] != prod["path"]:
+                print(f"  (declared as {prod['declared']}, relative to this ability)")
+            if not prod["exists"]:
+                print("  ⚠️  NOTHING IS THERE. Declared but absent is not the same as no producer:")
+                print("      do not substitute another file of the same name found elsewhere.")
+            elif prod["owner"] is None:
+                print("  ⚠️  it resolves OUTSIDE every installed abilities root — this step reaches")
+                print("      out of the tree, which nothing else here does.")
             print("  how to call it: that file's own header — this is a pointer, not a copy")
 
         # Deliberately the POINTER, not the text. Dumping a document on every `next`

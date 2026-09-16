@@ -3,10 +3,25 @@
 Three things happen here, and the middle one changes shape with the variant. What does not change is
 that both of the claims made in this phase are checked against the world rather than accepted.
 
+This phase declares three **stages** — `read`, `judge`, `move`. A stage is not a phase: a phase
+carries an acceptance criterion the engine checks, a stage carries nothing. It exists so a long phase
+can be read and discussed in parts. Splitting this into three phases instead would have invented two
+more acceptance gates nobody asked for, each needing a goal to satisfy.
+
 ## Step: W01 Read what the world says about the item
 
+> - **Stage**: `read`.
 > - **Output**: a `sample_read` row — `found` or `absent`.
 > - **Complete**: the recorded value survives a check against `item_found`.
+> - **Repeatable**: yes, budget 3.
+
+Repeatable because reading the world again after you have CHANGED it is the same step, not a new one.
+This step's claim is checked against the world, so a run that moves the item and re-reads is behaving
+correctly rather than retrying a failure.
+
+The budget is what keeps that honest. Unlimited attempts on a corroborated claim would let a driver
+record every legal value in turn until one happened to agree — brute force wearing the shape of
+diligence. An exhausted budget refuses, unconditionally.
 
 Recording `found` while the item is nowhere on disk is refused, and the refusal names the fact that
 contradicted it. This is the cheapest possible demonstration of the pattern: the record is not the
@@ -60,9 +75,23 @@ a step quietly left open is an absence that looks the same as work in progress.
 
 ## Step: W03 Move the item to review
 
+> - **Stage**: `move`.
 > - **Output**: the item, physically in `review/`.
 > - **Complete**: the recorded status agrees with the directory the item is actually in.
 > - **Guards**: `move_item` (see `I02`).
+> - **Produced by**: `tools/sample-move.py`.
+
+`produced_by` names the tool that CAUSES this step's effect, and the engine never runs it — it is a
+pointer, not a hook. The contrast with the reading tool is the thing worth carrying away:
+
+| | who calls it | why |
+|---|---|---|
+| `sample-lib/tools/sample-read.py` | the **engine**, through a fact provider | pure compute, so evaluating a criterion twice gives the same answer |
+| `sample-change/tools/sample-move.py` | **you** | it moves a file, so calling it twice is not the same as calling it once |
+
+A flow that pointed `produced_by` at the observing tool, or that let a provider call the effecting
+one, would have crossed that line — and the symptom would be a criterion whose answer depends on how
+many times it was checked.
 
 Move the file FIRST, then record the status. The other order earns a refusal that names the folder
 the reader actually found — because the directory is the status in this layout, which is what makes a

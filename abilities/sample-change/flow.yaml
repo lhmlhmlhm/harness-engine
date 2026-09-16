@@ -31,7 +31,7 @@ scope_match: path_prefix
 
 requires: [sample-lib]
 
-uses: [ability_deps, exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, prose, results, variants]
+uses: [ability_deps, exclusive_groups, facts, gates, guards, hooks, obligations, optional_steps, phase_goals, producers, prose, repeatable, results, stages, variants]
 
 variants:
   values: [quick, full]
@@ -135,6 +135,11 @@ phases:
     # The guide pointer is declared at the PHASE, so each step resolves to its own anchored
     # section in this file and falls back to the whole document only if the anchor is missing.
     guide: work.md
+    # STAGES GROUP STEPS INSIDE A PHASE, and they are not phases. A phase carries an acceptance
+    # criterion the engine checks; a stage carries nothing — it exists so a long phase can be read
+    # and talked about in parts. Splitting `work` into three phases instead would have invented two
+    # more acceptance gates nobody asked for, and every one of them would need a goal to satisfy.
+    stages: [read, judge, move]
     goal:
       type: all_of
       steps: [W01]
@@ -180,8 +185,18 @@ steps:
 
   - id: W01
     phase: work
+    stage: read
     title: Read what the world says about the item
     deps: [I02]
+    # REPEATABLE, WITH A BUDGET. Reading the world again after you have changed it is the SAME step,
+    # not a new one — and this step's claim is checked against the world, so a run that moves the item
+    # and re-reads is behaving correctly rather than retrying a failure.
+    #
+    # The budget is what keeps that honest. Unlimited attempts on a corroborated claim would let a
+    # driver record every legal value in turn until one happened to agree, which is brute force
+    # wearing the shape of diligence. An exhausted budget REFUSES, unconditionally.
+    repeatable: true
+    budget: 3
     directive: |
       Produce: the borrowed state, consulted.
       Complete: a `sample_read` row, corroborated against the borrowed fact.
@@ -203,6 +218,7 @@ steps:
 
   - id: W02quick
     phase: work
+    stage: judge
     title: Quick path — accept the item as it stands
     deps: [W01]
     variants: [quick]
@@ -215,6 +231,7 @@ steps:
 
   - id: W02full
     phase: work
+    stage: judge
     title: Full path — judge the item against the settled set
     deps: [W01]
     variants: [full]
@@ -228,6 +245,7 @@ steps:
 
   - id: W04quick
     phase: work
+    stage: judge
     title: Quick path — record the judgement and move on
     deps: [W02quick]
     variants: [quick]
@@ -244,6 +262,7 @@ steps:
 
   - id: W04full
     phase: work
+    stage: judge
     title: Full path — record the judgement with its reason
     deps: [W02full]
     variants: [full]
@@ -260,6 +279,7 @@ steps:
 
   - id: D01
     phase: work
+    stage: judge
     title: Optional — gather more before judging
     deps: [W01]
     optional: true
@@ -275,7 +295,16 @@ steps:
 
   - id: W03
     phase: work
+    stage: move
     title: Move the item to review
+    # THE TOOL THAT PRODUCES THIS STEP'S EFFECT, named so the reader does not have to guess how the
+    # move is meant to happen — and so the engine can report which steps have an effecting tool and
+    # which are the agent's own judgement.
+    #
+    # Same-ability relative on purpose. A pointer into another ability's directory would make this
+    # step's effect depend on a file this spec cannot see moving, and the two would drift apart with
+    # nothing saying so. The engine NEVER runs it: `produced_by` is a pointer, not a hook.
+    produced_by: tools/sample-move.py
     # Depends on the SHARED core, not on either variant's steps. A dep on `W04quick` would be
     # unreachable under `full` and the engine refuses it at load time — which is the right place to
     # find out, rather than halfway through a run. What makes the variant steps still mandatory is the

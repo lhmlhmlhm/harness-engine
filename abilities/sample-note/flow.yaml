@@ -128,6 +128,24 @@ steps:
       type: evidence
       kind: sample_impact
 
+  - id: N02brief
+    phase: gather
+    title: Brief note — one line, and nothing else
+    deps: [N01]
+    variants: [brief]
+    directive: |
+      Output: the one line this note is worth, and no more.
+      Complete: one `sample_brief` row.
+
+      Only under `brief` (the default). **This step is why the variants are a real fork rather than
+      an optional step wearing a variant's name**: each value owns something the other does not, so
+      choosing one genuinely excludes the other's work. A `full` that merely ADDED a step would be
+      indistinguishable from `optional: true`, which the engine already has — and a construct that
+      duplicates an existing one teaches the reader the wrong thing about both.
+    completion:
+      type: evidence
+      kind: sample_brief
+
   - id: N03keep
     phase: decide
     title: Keep the note

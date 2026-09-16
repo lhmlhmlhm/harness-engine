@@ -418,8 +418,17 @@ def test_every_env_var_the_engine_reads_is_named_in_some_doc():
     in is an editorial judgment, and pinning it here would turn a coverage check into a filing rule —
     the second one gets worked around by moving a line, and stops meaning anything.
     """
-    src = " ".join((REPO / "engine" / f.name).read_text(encoding="utf-8")
-                   for f in (REPO / "engine").glob("*.py"))
+    # COMMENTS ARE STRIPPED FIRST, because a variable NAMED in an explanation is not a variable the
+    # engine reads. Measured: a comment quoting a sample's own knob as an example of an error message
+    # made this guard demand that the engine's docs adopt it. A check that fires on prose gets
+    # answered by editing prose, and the next real omission would land in a test everyone had already
+    # learned to argue with.
+    #
+    # String literals are KEPT — `os.environ.get("HARNESS_X")` is exactly how one is read, and the
+    # name lives in a literal there.
+    src = "\n".join(
+        re.sub(r"#.*", "", (REPO / "engine" / f.name).read_text(encoding="utf-8"))
+        for f in sorted((REPO / "engine").glob("*.py")))
     read = set(re.findall(r"\bHARNESS_[A-Z_]+\b", src))
     assert read, "no env vars found in engine source; this test asserted nothing"
 

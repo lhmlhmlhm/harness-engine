@@ -770,35 +770,99 @@ steps:
         _rm(d)
 
 
-def test_the_real_flow_closes_without_force(env, tmp_path):
-    """End-to-end on the 111-step transcription: it must reach a clean close.
+def test_the_sample_flow_closes_without_force(env, tmp_path):
+    """End-to-end on the shipped sample flow: it must reach a clean close.
 
-    This is the payoff test for all four primitives at once. Without them the same
-    flow could only be closed with --force.
+    This is the payoff test for the primitives at once — witness, preauth, optional,
+    obligation, summarize. Without them the same flow could only be closed with --force. Walking
+    every applicable step to a clean `close-run` with NO `--force`, past an audit that shows no
+    unwitnessed gate, no forced close and no undischarged obligation, is the proof that the steps
+    close honestly and the terminal criterion is reachable by COMPLYING rather than by overriding.
+
+    Material swapped from the author's private flow to the shipped `sample-change`; the property
+    under test — a run closes cleanly without force — is unchanged. Counts are derived from the
+    flow, never written down here, so it holds at any flow size.
     """
     import json as _json
+    import yaml as _yaml
+
+    ABILITY = "sample-change"
+    flow = _yaml.safe_load(
+        (REPO / "abilities" / ABILITY / "flow.yaml").read_text(encoding="utf-8"))
+    steps = flow["steps"]
+    exclusive = set(sum(flow.get("exclusive_groups") or [], []))
+
+    # The world this run acts on — its OWN directory, so the walk never mutates the sample content
+    # shipped in the repository (which the next run would then inherit).
+    data = tmp_path / "sample"
+    for folder in ("intake", "review", "settled"):
+        (data / folder).mkdir(parents=True)
+    env = dict(env, HARNESS_SAMPLE_DIR=str(data))
+
     t = tmp_path / "t.jsonl"
     t.write_text("", encoding="utf-8")
-    assert rc(["open", "shipcheck-asis", "--scope", "/repo/t", "--run", "real"], env) == OK
 
-    import yaml as _yaml
-    flow = _yaml.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
-    turns = 0
-    seen_phase = None
-    for s in flow["steps"]:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    opened = run(["open", ABILITY, "--scope", str(tree), "--run", "real"], env)
+    assert opened.returncode == OK, opened.stderr
+
+    # Which variant the run settled on, read back rather than assumed: this flow DERIVES it, and
+    # closing a step the variant excludes would fail — so the walk must filter by it.
+    variant = None
+    for line in (opened.stdout + opened.stderr).splitlines():
+        if line.strip().startswith("variant "):
+            variant = line.split("variant", 1)[1].strip().split()[0]
+            break
+    assert variant in flow["variants"]["values"], (opened.stdout + opened.stderr)
+    applicable = [s for s in steps if not s.get("variants") or variant in s["variants"]]
+    excluded = {s["id"] for s in steps if s not in applicable}
+
+    item = {"name": None}
+
+    def do_the_work(wrote: list) -> None:
+        # Act on the world so a corroborated claim about it can be TRUE before it is closed on. A
+        # value that names a status folder is a claim about where the item is, so move it there.
+        # The item carries REAL recorded failures, so the work-phase obligation later fires for a
+        # genuine reason rather than a staged one.
+        for kind, value in wrote:
+            if item["name"] is None and kind.endswith("_item"):
+                item["name"] = value
+            target = data / value
+            if not target.is_dir() or item["name"] is None:
+                continue
+            fname = f"{Path(item['name']).name}.json"
+            for folder in (data / f for f in ("intake", "review", "settled")):
+                stale = folder / fname
+                if stale.is_file() and folder != target:
+                    stale.unlink()
+            (target / fname).write_text(
+                _json.dumps({"status": value, "failed": 2, "failed_ids": ["A1", "A7"]}),
+                encoding="utf-8")
+
+    branch_taken = False
+    phases_seen = []
+    for s in steps:
         sid = s["id"]
-        # Phase boundary: wrap the previous phase up. `summarize` REFUSES unless that phase
-        # meets its goal, so reaching the end of the flow is now also proof that every layer
-        # passed its own acceptance criterion — not just that its steps were ticked off.
-        if seen_phase is not None and s["phase"] != seen_phase:
-            assert rc(["summarize", "--run", "real", "--phase", seen_phase], env) == OK, seen_phase
-        seen_phase = s["phase"]
+        if sid in excluded:
+            continue                      # not part of this run — the variant excluded it
+        if sid in exclusive:
+            if branch_taken:
+                continue                  # the exclusive sibling; closing one is enough
+            branch_taken = True
+        if s["phase"] not in phases_seen:
+            # Phase boundary: wrap the PREVIOUS phase up. `summarize` REFUSES unless that phase
+            # meets its goal, so reaching the end of the flow is also proof that every phase passed
+            # its own acceptance criterion — not just that its steps were ticked off.
+            if phases_seen:
+                assert rc(["summarize", "--run", "real", "--phase", phases_seen[-1]],
+                          env) == OK, phases_seen[-1]
+            phases_seen.append(s["phase"])
         if s.get("optional"):
             assert rc(["skip", "--run", "real", "--step", sid, "--reason", "n/a"], env) == OK
             continue
         gate = s.get("gate", "none")
         if gate == "affirm":
-            turns += 1
             with t.open("a", encoding="utf-8") as fh:
                 fh.write(_json.dumps({"role": "user", "content": f"ok {sid}"}) + "\n")
             assert rc(["gate", "--run", "real", "--step", sid, "--decision", "affirm",
@@ -809,11 +873,17 @@ def test_the_real_flow_closes_without_force(env, tmp_path):
             assert rc(["config", "--run", "real", "--set", f"{key}=true"], env) == OK
             assert rc(["gate", "--run", "real", "--step", sid, "--decision", "preauth"],
                       env) == OK, sid
-        _satisfy(env, "real", sid, s.get("completion") or {})
-        if sid == "E22b":
-            continue  # the exclusive sibling of E22a; closing one is enough
+        wrote = _satisfy(env, "real", sid, s.get("completion") or {}, variant=variant)
+        # Do the work FIRST, then close — the order an honest run takes, so a corroborated claim is
+        # true by the time it is closed on rather than leaning on the disproof-and-retry path.
+        do_the_work(wrote)
         r = _close_step_honestly(env, "real", sid, s)
         assert r.returncode == OK, f"{sid}: {r.stderr}"
+
+    # The last phase had no successor to trigger its rollup inside the loop; do it now, so the
+    # clean close is not blocked on an unsummarised phase.
+    assert rc(["summarize", "--run", "real", "--phase", phases_seen[-1]],
+              env) == OK, phases_seen[-1]
 
     # Conditional hooks may have raised obligations along the way; discharge them, since
     # the point of this test is that STEPS close cleanly, not that hooks never fire.
@@ -1526,28 +1596,56 @@ def test_ability_supplied_fact_provider_is_loaded(env):
     assert "assertions_failed" in schema
 
 
-def test_domain_analysis_decides_the_flow(env):
+def test_domain_analysis_decides_the_flow(env, tmp_path):
     """THE SEAM: a domain tool computes, the engine's declared conditions decide.
 
-    The engine records gates; it cannot compute whether one is warranted. That computation
-    is domain analysis (~2,600 lines of it in the reference system) and belongs outside.
-    This test pins the arrangement that connects them:
+    The engine records gates; it cannot compute whether one is warranted. That computation is
+    domain analysis — here an observing tool (`sample-lib`'s `sample-read.py`, run by a borrowed
+    provider) that reads the world and reports facts — and belongs outside. This test pins the
+    arrangement that connects them:
 
         tool → structured output → declared facts → condition → obligation → close-run block
 
-    Driven through the `analysis_ran: false` branch because it is the one with a designed
-    meaning: no information is NOT the same as no problem, and the flow says so out loud.
+    Driven through the branch that carries the designed OBLIGATION meaning: the item this run is
+    about really does hold recorded failures, so the borrowed fact reports them and the flow says
+    out loud that failures must be answered for before the run may close. Its sibling hook — the
+    one that fires when the store could not be read AT ALL — is deliberately NOT an obligation
+    (nothing was found to answer for), so this walk also pins that the non-firing hook explains
+    itself leaf by leaf against the very fact the tool produced: the store WAS readable here.
     """
-    assert rc(["open", "shipcheck-asis", "--scope", "/definitely/not/a/repo",
-               "--run", "seam"], env) == OK
-    # Walk to the end of the phase whose boundary carries the hooks.
     import yaml as _yaml
-    flow = _yaml.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
+    # A real world for the borrowed fact to read. The obligation is triggered honestly rather than
+    # staged: the item genuinely sits in review/ carrying two failing assertions.
+    data = tmp_path / "sample"
+    for folder in ("intake", "review", "settled"):
+        (data / folder).mkdir(parents=True)
+    env = dict(env, HARNESS_SAMPLE_DIR=str(data))
+    tree = tmp_path / "tree"                # a scope name NOT ending in '-full' → variant `quick`
+    tree.mkdir()
+
+    opened = run(["open", "sample-change", "--scope", str(tree), "--run", "seam"], env)
+    assert opened.returncode == OK, opened.stderr
+    # Which variant the run got, read back rather than assumed. The flow DERIVES it from the scope,
+    # so the set of steps that apply is itself a product of the domain — hardcoding it would let
+    # the derivation break unnoticed.
+    variant = None
+    for line in (opened.stdout + opened.stderr).splitlines():
+        if line.strip().startswith("variant "):
+            variant = line.split("variant", 1)[1].strip().split()[0]
+            break
+    flow = _yaml.safe_load((REPO / "abilities" / "sample-change" / "flow.yaml").read_text())
+    assert variant in flow["variants"]["values"], (opened.stdout + opened.stderr)
+    excluded = {s["id"] for s in flow["steps"]
+                if s.get("variants") and variant not in s["variants"]}
+
+    # Walk to the end of the phase whose boundary carries the hooks (`work`), then stop.
     fired = None
     for s in flow["steps"]:
-        if s["phase"] not in ("context", "config", "coding", "verification"):
+        if s["phase"] not in ("intake", "work"):
             break
         sid = s["id"]
+        if sid in excluded:
+            continue                        # a step the derived variant excluded — never entered
         if s.get("optional"):
             assert rc(["skip", "--run", "seam", "--step", sid, "--reason", "n/a"], env) == OK
             continue
@@ -1560,43 +1658,53 @@ def test_domain_analysis_decides_the_flow(env):
             assert rc(["config", "--run", "seam", "--set", f"{key}=true"], env) == OK
             assert rc(["gate", "--run", "seam", "--step", sid, "--decision", "preauth"],
                       env) == OK
-        _satisfy(env, "seam", sid, s.get("completion") or {})
         # Third driver to reach for the shared helper. The first two drifted apart the same
         # way and were merged last round; this one surfaced when a corroborated criterion
         # landed on a step it walks. A driver duplicated is a driver that stops testing the
         # same thing.
+        wrote = _satisfy(env, "seam", sid, s.get("completion") or {}, variant=variant)
+        # Make the world carry the failures the borrowed fact will report — the honest order: act
+        # on the world, THEN close on the claim about it. The item this run named really is on disk
+        # in review/ with two failing assertions.
+        for kind, value in wrote:
+            if kind.endswith("_item"):
+                (data / "review" / f"{Path(value).name}.json").write_text(
+                    json.dumps({"status": "review", "failed": 2,
+                                "failed_ids": ["A1", "A7"]}), encoding="utf-8")
         r = _close_step_honestly(env, "seam", sid, s)
         assert r.returncode == OK, f"{sid}: {r.stderr}"
         fired = r.stdout
 
-    # The hook fired and named itself. Note it does NOT print a trace: a trace answers
-    # "why did this NOT fire", which is the question that is otherwise unanswerable.
-    assert "blast-radius-absent" in fired
+    # The obligation hook fired and named itself, and it prints its CONTRACT (a trace answers
+    # "why did this NOT fire", the question that is otherwise unanswerable — so a fired hook has
+    # no trace to print). The failing assertions appear by NAME, not as a bare total.
+    assert "failures-need-an-answer" in fired
     assert "[obligation]" in fired
-    # ...and the ones that did not fire each explain themselves, leaf by leaf, against the
-    # facts the domain tool produced.
-    assert "blast-radius-failures: condition not met" in fired
-    assert "failed_assertions count_gte 1" in fired
-    assert "analysis_ran equals True   (actual: False)" in fired
+    assert "A1, A7" in fired
+    # ...and the hook that did NOT fire explains itself, leaf by leaf, against the very fact the
+    # domain tool produced: the store WAS readable, so "could not read" does not apply.
+    assert "state-unreadable: condition not met" in fired
+    assert "analysis_ran equals False   (actual: True)" in fired
 
-    # The obligation exists, carries the fact snapshot, and blocks the close
+    # The obligation exists, carries the fact snapshot, and blocks the close.
     obs = run(["obligations", "--run", "seam", "-v"], env).stdout
-    assert "⏳ OPEN" in obs and "blast-radius-absent" in obs
-    assert "analysis_ran=False" in obs
+    assert "⏳ OPEN" in obs and "failures-need-an-answer" in obs
+    assert "assertions_failed=2" in obs
     assert rc(["close-run", "--run", "seam"], env) == REFUSED
 
-    # TWO obligations, not one — a scope that is not a repository makes both the blast-radius
-    # analysis and the decision pipeline unable to run, and each of those raises its own. This
-    # assertion is here because the test previously discharged one and let a combined --force
-    # excuse the other, so a second obligation appearing went unnoticed: exactly the silence the
-    # flag split removes.
+    # The EXACT set of open obligations, discharged by name — a bare count or a presence check
+    # would let a spurious extra obligation appear unnoticed, which is exactly the silence the
+    # flag split (--force-steps vs discharge) removes. This flow raises a single obligation hook,
+    # so the set is a singleton; the shape of the check — an equality against the whole owed set —
+    # is what carries the property, not the count.
     owed = [ln.split()[2] for ln in run(["obligations", "--run", "seam"], env).stdout.splitlines()
             if ln.strip().startswith("⏳")]
-    assert set(owed) == {"blast-radius-absent", "decision-gate-vacuous"}, owed
+    assert set(owed) == {"failures-need-an-answer"}, owed
     for hook_id in owed:
         assert rc(["discharge", "--run", "seam", "--hook", hook_id,
-                   "--evidence", "scope is not a repository"], env) == OK
-    # Steps are still open, so this authorises leaving WORK undone — and nothing else.
+                   "--evidence", "answered A1 and A7"], env) == OK
+    # Settle-phase steps are still open, so this authorises leaving WORK undone — and, because the
+    # obligation had to be discharged FIRST, nothing else: --force-steps does not excuse an obligation.
     assert rc(["close-run", "--run", "seam", "--force-steps"], env) == OK
 
 
@@ -2391,18 +2499,18 @@ def test_the_variant_is_pinned_at_open_not_re_derived(env):
         _rm(d)
 
 
-def test_the_push_transcription_carries_two_real_variants(env):
-    """The pressure test: a second ability whose flow has more than one shape.
+def test_the_sample_change_transcription_carries_two_real_variants(env):
+    """The pressure test: an ability whose flow has more than one shape.
 
-    shipcheck-asis has exactly one, so it could not have exercised this. Both variants must be
+    sample-lib has exactly one, so it could not have exercised this. Both variants must be
     non-trivial (each owning steps) and the shared core must be the majority — a "variant" that
     forks the whole flow is two abilities wearing one name.
     """
     from engine import flow as flowmod
-    f = flowmod.load("push")
-    assert f.variants == ("ship-check", "ux")
-    assert f.default_variant == "ship-check"
-    assert f.variant_spec["fact"] == "executor"
+    f = flowmod.load("sample-change")
+    assert f.variants == ("quick", "full")
+    assert f.default_variant == "quick"
+    assert f.variant_spec["fact"] == "sample_mode"
     owned = {v: [s.id for s in f.steps.values() if s.variants == (v,)] for v in f.variants}
     for v, ids in owned.items():
         assert len(ids) >= 2, (v, ids)
@@ -2532,10 +2640,10 @@ steps: [{id: A, phase: p1}]
 # ──────────────── end-to-end: both abilities, both variants, four runs ────────────────
 
 @pytest.mark.parametrize("ability,variant,scope,derive", [
-    ("push", "ux",         "~/.kiro/skills/ux/output/proj", True),
-    ("push", "ship-check", "/tmp/an-ordinary-package",             True),
-    ("plan", "ux",         "some-ux-plan-slug",                    False),
-    ("plan", "ship-check", "some-code-plan-slug",                  False),
+    ("sample-change", "quick", "/tmp/an-ordinary-package", True),
+    ("sample-change", "full",  "/tmp/a-package-full",      True),
+    ("sample-note",   "brief", "some-note-ref",            False),
+    ("sample-note",   "full",  "some-other-note-ref",      False),
 ])
 def test_a_variant_bearing_flow_runs_end_to_end(env, tmp_path, ability, variant, scope, derive):
     """Drive a whole run of each ability under each variant, to a clean close.
@@ -2544,43 +2652,50 @@ def test_a_variant_bearing_flow_runs_end_to_end(env, tmp_path, ability, variant,
     different claims: the applicable set, the goals, the cross-variant `any_of` reconciliation
     and (for the borrowing ability) a provider owned by a different ability all only meet each
     other at runtime. `derive` distinguishes the two resolution paths — one ability's scope IS
-    the value its variant is derived from, the other's is not, and that difference is the reason
-    the second one must be told explicitly.
+    the value its variant is derived from (`sample-change` reads it from the scope name), the
+    other's is not (`sample-note`'s brief-vs-full is the author's call), and that difference is
+    the reason the second one must be told explicitly with `--variant`.
     """
     import json as _json
     import yaml as _yaml
     flow = _yaml.safe_load((REPO / "abilities" / ability / "flow.yaml").read_text())
     run_id = f"{ability}-{variant}".replace("-", "")[:16]
 
-    # A scratch plan corpus, because both of these flows now CHECK that the document they claim to
-    # have filed is really in the folder they claimed. Never the real one: without the redirect this
-    # would read several hundred of the user's documents and a careless walk would write into them.
-    corpus = tmp_path / "plandata"
-    corpus.mkdir()
-    env = {**env, "HARNESS_PLAN_DATA_DIR": str(corpus)}
-    filed: dict[str, str] = {}
+    # A scratch sample directory, because the borrowing flow CHECKS that the item it claims to have
+    # moved is really in the folder it claimed — the borrowed fact reads the world back, so the
+    # world has to be made to agree before the claim is closed on. Its own directory, never the
+    # shipped one: a walk that wrote into the repository's sample would leave the tree dirty and the
+    # next run would inherit it. The flow with no provider (`sample-note`) never touches it.
+    data = tmp_path / "sample"
+    for folder in ("intake", "review", "settled"):
+        (data / folder).mkdir(parents=True)
+    env = {**env, "HARNESS_SAMPLE_DIR": str(data)}
+    item: dict[str, str | None] = {"name": None}
 
     def _mirror(wrote):
-        """File the document where the run just SAID it is — derived from what was recorded.
+        """File the run's item where it just SAID it is — derived from what was recorded.
 
-        Not a table of step ids: the claim lives in the spec, `_satisfy` records it, and this
-        follows. Change the claimed folder in a flow and this keeps up; drop the corroboration and
-        the spec-level guard notices instead.
+        Not a table of step ids: a value that names one of the sample's status folders is a claim
+        about where the item now lives, so put it there before the corroboration reads the world
+        back. Change the claimed folder in a flow and this keeps up; drop the corroboration and the
+        spec-level guard notices instead. The item is written carrying real recorded failures, so
+        the obligation this flow raises fires for a genuine reason rather than a staged one — and a
+        flow with no such claim (a value that is not a folder name) leaves this a no-op.
         """
         for kind, value in wrote:
-            if kind == "plan_doc":
-                filed["slug"] = Path(value).name.removesuffix(".md")
-            elif kind == "plan_status":
-                filed["status"] = value
-        slug, status = filed.get("slug"), filed.get("status")
-        if not slug or not status:
-            return
-        for old_doc in corpus.rglob(f"{slug}.md"):
-            old_doc.unlink()
-        target = corpus / status
-        target.mkdir(parents=True, exist_ok=True)
-        (target / f"{slug}.md").write_text(
-            f"---\nstatus: {status}\n---\n\n# {slug}\n", encoding="utf-8")
+            if item["name"] is None and kind.endswith("_item"):
+                item["name"] = value
+            target = data / value
+            if item["name"] is None or not target.is_dir():
+                continue
+            fname = f"{Path(item['name']).name}.json"
+            for folder in ("intake", "review", "settled"):
+                stale = data / folder / fname
+                if stale.is_file() and (data / folder) != target:
+                    stale.unlink()
+            (target / fname).write_text(
+                _json.dumps({"status": value, "failed": 2, "failed_ids": ["A1", "A7"]}),
+                encoding="utf-8")
 
     args = ["open", ability, "--scope", scope, "--run", run_id]
     if not derive:
@@ -2597,14 +2712,25 @@ def test_a_variant_bearing_flow_runs_end_to_end(env, tmp_path, ability, variant,
                   if not s.get("variants") or variant in s["variants"]]
     other = [s["id"] for s in flow["steps"]
              if s.get("variants") and variant not in s["variants"]]
+    # EVERY VARIANT MUST EXCLUDE SOMETHING, asserted per variant rather than per flow. A variant that
+    # excludes nothing is a superset of the others, and a superset is an `optional: true` wearing a
+    # variant's name — the engine already has optional steps. So this is not merely a non-vacuity
+    # guard for the loop below: it pins that each value of the variant is a real FORK.
+    #
+    # It was briefly relaxed to "the flow pins some step to some variant", because a sample's `full`
+    # did only add a step. The right fix was in the sample, not here: that value now owns a step of
+    # its own, so both sides genuinely exclude the other's work. A relaxed assertion would have made
+    # the loop below vacuous for exactly the run where a superset variant is most likely to be wrong.
     assert other, "each variant should exclude at least one step"
-    # Every step of the OTHER shape must be unreachable, both ways.
+    # Every step this variant excludes must be unreachable, both ways.
     for sid in other:
         assert rc(["enter", "--run", run_id, "--step", sid], env) == REFUSED, sid
         assert rc(["skip", "--run", run_id, "--step", sid, "--reason", "x"], env) == REFUSED, sid
 
     t = tmp_path / "t.jsonl"
     t.write_text("", encoding="utf-8")
+    groups = [set(g) for g in (flow.get("exclusive_groups") or [])]
+    taken_groups: set[int] = set()
     turns = gates = skipped = 0
     seen_phase = None
     for s in applicable:
@@ -2613,12 +2739,20 @@ def test_a_variant_bearing_flow_runs_end_to_end(env, tmp_path, ability, variant,
             r = run(["summarize", "--run", run_id, "--phase", seen_phase, "--note", "walked"], env)
             assert r.returncode == OK, (seen_phase, r.stderr)
         seen_phase = s["phase"]
-        if s.get("optional") and sid.startswith("D0"):   # the optional research step
+        if s.get("optional"):                            # optional steps are skippable, not owed
             assert rc(["skip", "--run", run_id, "--step", sid, "--reason", "not complex"],
                       env) == OK
             skipped += 1
             continue
-        if s.get("gate") == "affirm":
+        gi = next((i for i, g in enumerate(groups) if sid in g), None)
+        if gi is not None:
+            # One branch of an exclusive pair is taken; closing it auto-skips the sibling, so the
+            # second time the loop reaches the group there is nothing left to do.
+            if gi in taken_groups:
+                continue
+            taken_groups.add(gi)
+        gate = s.get("gate") or "none"
+        if gate == "affirm":
             turns += 1
             with t.open("a", encoding="utf-8") as fh:
                 fh.write(_json.dumps({"role": "user", "content": f"ok {sid}"}) + "\n")
@@ -2626,8 +2760,18 @@ def test_a_variant_bearing_flow_runs_end_to_end(env, tmp_path, ability, variant,
                        "--evidence", "human said go"], env,
                       transcript=t, witness="transcript") == OK, sid
             gates += 1
+        elif gate.startswith("preauth:"):
+            # A pre-authorised gate stands in for a human once its config key is set — the honest
+            # way past it, and it takes no witness because no person is being cited.
+            key = gate.split(":", 1)[1]
+            assert rc(["config", "--run", run_id, "--set", f"{key}=true"], env) == OK, sid
+            assert rc(["gate", "--run", run_id, "--step", sid, "--decision", "preauth"],
+                      env) == OK, sid
         _mirror(_satisfy(env, run_id, sid, s.get("completion") or {}, variant=variant))
-        r = run(["close-step", "--run", run_id, "--step", sid], env)
+        # `_close_step_honestly`, not a bare close: a claim of absence recorded against a
+        # corroboration is refused until the world is made to agree, and the honest response is to
+        # record what is really the case (the item is not yet on disk at the read step) and close.
+        r = _close_step_honestly(env, run_id, sid, s)
         assert r.returncode == OK, (sid, r.stderr)
     assert rc(["summarize", "--run", run_id, "--phase", seen_phase, "--note", "walked"],
               env) == OK
@@ -3315,78 +3459,135 @@ def test_a_corroboration_check_is_validated_at_load_time(env, bad, expect):
 
 
 def test_a_pure_compute_tool_is_wired_through_the_provider_seam(env):
-    """C1: a copied tool computes, a provider declares, a criterion decides.
+    """A tool computes, a provider declares what it needs, a criterion decides on the answer.
 
-    The tool is byte-identical to its source and emits TEXT, not JSON, so the seam had to
-    absorb a second output shape rather than the ability adapting the tool. What it buys is
-    a criterion that was previously "a row of this kind exists" — which accepts numbers
-    nobody produced — becoming a claim that an independent record can contradict.
+    Three properties meet here, and none of them is visible from one side alone:
+
+    1. The provider declares BOTH the tool and the record the tool reads, as two `file` capabilities.
+       Declaring only the tool would make "this machine has no such store" look like "the store is
+       empty" — the pair the whole capability layer exists to keep apart.
+    2. The tool is PURE COMPUTE: it reads, it prints, it exits. That is what makes it safe for the
+       engine to call while a criterion is being evaluated, because a criterion may be evaluated more
+       than once and a tool with effects would make the second evaluation disagree with the first.
+    3. The step that consumes it declares a claim AND at least one legal value that is not a claim —
+       so the way OUT of a disproved claim is in the spec, not only in a refusal message.
+
+    Split from a version that also pinned a vendored copy against its origin bytes and an ability
+    adapting to a TEXT-emitting tool. Both of those are facts about one person's tool, not about this
+    seam, and they now live in that ability set's own suite.
     """
     import sys as _s
     _s.path.insert(0, str(REPO))
     from engine import facts as _f, flow as _fl
-    _fl.load_extensions("shipcheck-asis")
-    assert "shipcheck-asis.run_metrics" in _f.registered()
-    caps = _f.capabilities("shipcheck-asis.run_metrics")
+
+    # The BORROWING flow is loaded, so the engine follows `requires:` to whichever ability owns the
+    # provider. Naming the owner here would make this a second place to edit when a provider moves.
+    f = _fl.load("sample-change")
+    borrowed = [n for n in f.facts_providers if "." in n and not n.startswith(f.ability + ".")]
+    assert borrowed, f"{f.ability} borrows no provider; this test asserted nothing"
+    name = borrowed[0]
+    assert name in _f.registered(), (name, sorted(_f.registered()))
+
+    caps = _f.capabilities(name)
     kinds = [next(iter(d)) for d in caps]
     assert kinds == ["file", "file"], caps
-    # The tool's own presence AND the runtime record it reads are both declared. Declaring
-    # only the tool would make "this machine has no such runtime" look like "the runtime is
-    # empty" — the pair the whole capability layer exists to keep apart.
-    assert any("analyze-run-metrics.py" in str(d.get("file", "")) for d in caps), caps
-    assert any("sessions" in str(d.get("file", "")) for d in caps), caps
-    tool = REPO / "abilities" / "shipcheck-asis" / "tools" / "analyze-run-metrics.py"
-    src = pathlib.Path.home() / ".kiro/skills/ship-check/scripts/analyze-run-metrics.py"
-    assert tool.is_file()
-    if src.is_file():
-        assert tool.read_bytes() == src.read_bytes(), "the copy has drifted from its source"
-    # And the step that reads it declares BOTH a claim and the honest alternative, so the
-    # exit from the claim is in the spec rather than only in a refusal message.
+    paths = [str(d.get("file", "")) for d in caps]
+    # One of the two is an executable the provider RUNS; the other is the data it reads. Told apart
+    # by asking the filesystem, not by matching a name — a name check would pass on a file that
+    # happens to be called something plausible.
+    owner_dir = _fl.ability_dir(name.split(".")[0])
+    resolved = [(owner_dir / _f.expand_env(x)).resolve() for x in paths]
+    assert any(r.is_file() for r in resolved), (paths, resolved)
+    assert any(r.is_dir() for r in resolved), (
+        f"the provider declares no DATA location, so 'cannot look' and 'looked and found nothing' "
+        f"would be the same answer: {paths}")
+
+    tool = next(r for r in resolved if r.is_file())
+    body = tool.read_text(encoding="utf-8")
+    # PURE COMPUTE, asserted structurally rather than by reading the docstring's promise. A tool the
+    # engine calls during evaluation must not write, move or delete — if it did, evaluating a
+    # criterion twice would give two answers and the second one would look like a regression.
+    for effect in ("shutil.move", "shutil.rmtree", ".unlink(", ".replace(", ".write_text(",
+                   ".mkdir(", "subprocess.run"):
+        assert effect not in body, (
+            f"{tool.name} contains {effect!r}, so it is not pure compute — the engine calls it while "
+            f"a criterion is being evaluated, and a criterion may be evaluated more than once")
+
+    # And the step that reads it declares BOTH a claim and an honest alternative.
     import yaml as _y
-    fl = _y.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
-    e19 = next(x for x in fl["steps"] if x["id"] == "E19")
-    checks = e19["completion"]["checks"]
-    legal = next(c["values"] for c in checks if c.get("kind") == "metrics_source"
-                 and c["type"] == "evidence_in")
-    claims = next(c["claims"] for c in checks if c["type"] == "claim_corroborated")
-    assert set(claims) < set(legal), (claims, legal)
+    raw = _y.safe_load((REPO / "abilities" / f.ability / "flow.yaml").read_text(encoding="utf-8"))
+    strict = []
+    for st in raw["steps"]:
+        checks = (st.get("completion") or {}).get("checks") or []
+        claims = [c["claims"] for c in checks if c["type"] == "claim_corroborated"]
+        legal = [c["values"] for c in checks if c["type"] == "evidence_in"]
+        if claims and legal and set(claims[0]) < set(legal[0]):
+            strict.append(st["id"])
+    assert strict, (
+        "no step declares a claim AND a legal value that is not one, so the only way out of a "
+        "disproved claim would be a refusal message rather than the spec")
 
 
-def test_capability_present_but_no_data_is_its_own_answer(env, monkeypatch):
+def test_capability_present_but_no_data_is_its_own_answer(env, tmp_path, monkeypatch):
     """The second dimension, pinned separately because the flow can absorb either outcome.
 
-    The capability layer answers "is the runtime record present at all" and the provider
-    answers "did it have anything for this run" — two questions the design claims to keep
-    apart. The full-flow driver cannot prove that: it closes the step either way (an
-    uncontradicted claim closes, and a contradicted one closes after recording the honest
-    value), so mutating the provider's honesty flag left the suite green. Asserted here as the
-    pairing it actually is: the flag is true exactly when the tool succeeded.
+    `sample_state` keeps two questions apart on purpose. "Could the tool look AT ALL" is
+    `analysis_ran`; "did it have anything for this run" is `item_found`. They otherwise render
+    identically — an empty read and a failed read both leave the fact snapshot blank — and only
+    one of them is a reason to stop. The full-flow driver cannot prove they are kept apart: the
+    step that reads them closes either way (an uncontradicted claim closes, and a contradicted
+    one closes after recording the honest value), so mutating the provider's honesty flag left
+    the suite green. Asserted here as the pairing it actually is: `analysis_ran` is true exactly
+    when the observing tool succeeded — and when it did not, every other fact is zeroed rather
+    than carried over from a read that never happened.
     """
     import sys as _s
     _s.path.insert(0, str(REPO))
     monkeypatch.setenv("HARNESS_STATE_DIR", env["HARNESS_STATE_DIR"])
-    from engine import facts as _f, flow as _fl, store as _st
-    _fl.load_extensions("shipcheck-asis")
-    assert rc(["open", "shipcheck-asis", "--scope", str(REPO), "--run", "mx"], env) == OK
-    conn = _st.connect(read_only=True)
-    try:
-        opened = _st.get_run(conn, "mx")["opened_at"]
-    finally:
-        conn.close()
-    tool = REPO / "abilities" / "shipcheck-asis" / "tools" / "analyze-run-metrics.py"
-    proc = subprocess.run([sys.executable, str(tool), "--since", str(opened),
-                           "--mode", "plan-doc"], capture_output=True, text=True)
-    got = _f.gather("shipcheck-asis.run_metrics", {"run_id": "mx", "scope": str(REPO),
-                                    "scope_kind": "workspace", "ability": "shipcheck-asis"})
-    assert got["metrics_available"] is (proc.returncode == 0), (proc.returncode, got)
-    if proc.returncode != 0:
-        # Zeroed, not guessed. Numbers carried over from a failed read would be the exact
-        # thing the criterion above exists to refuse.
-        assert (got["run_turns"], got["run_calls"], got["run_peak_ctx_pct"]) == (0, 0, 0), got
-    # A run_id the store does not have is the same honest nothing, by a different route.
-    absent = _f.gather("shipcheck-asis.run_metrics", {"run_id": "no-such-run", "scope": str(REPO),
-                                       "scope_kind": "workspace", "ability": "shipcheck-asis"})
-    assert absent["metrics_available"] is False, absent
+    from engine import facts as _f, flow as _fl
+    _fl.load_extensions("sample-lib")
+    # A run that RECORDED which item it is about: the provider resolves the item from this run's
+    # own `sample_item` evidence, never from a parameter, so there must be a run with that
+    # evidence for the tool to be consulted at all.
+    assert rc(["open", "sample-change", "--scope", str(REPO), "--run", "mx"], env) == OK
+    assert rc(["evidence", "--run", "mx", "--step", "I01", "--kind", "sample_item",
+               "--value", "widget-7"], env) == OK
+    tool = REPO / "abilities" / "sample-lib" / "tools" / "sample-read.py"
+    ctx = {"run_id": "mx", "scope": str(REPO), "scope_kind": "sample_tree",
+           "ability": "sample-lib"}
+
+    # (1) Capability present AND readable: the shipped directory exists but does not hold this
+    # item. The tool CAN look, so it exits 0 and `analysis_ran` is true — paired with the tool's
+    # own exit, not asserted blindly. "Looked and found nothing" is a real answer of its own:
+    # `item_found` is false while `analysis_ran` is true, the distinction this test exists for.
+    readable = tmp_path / "present"
+    (readable / "review").mkdir(parents=True)          # a status folder, but not this item
+    monkeypatch.setenv("HARNESS_SAMPLE_DIR", str(readable))
+    ok = subprocess.run([sys.executable, str(tool), "--dir", str(readable), "--item", "widget-7"],
+                        capture_output=True, text=True)
+    got = _f.gather("sample-lib.sample_state", ctx)
+    assert got["analysis_ran"] is (ok.returncode == 0), (ok.returncode, got)
+    assert got["item_found"] is False, got
+
+    # (2) Capability present but the record CANNOT be read: the declared path exists (so the
+    # capability probe passes) yet is not a usable directory, so the tool exits 2. `analysis_ran`
+    # is false — again paired with the tool's exit — and every other fact is zeroed, not guessed.
+    # Numbers carried over from a failed read would be the exact thing the design refuses.
+    unreadable = tmp_path / "afile"
+    unreadable.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_SAMPLE_DIR", str(unreadable))
+    bad = subprocess.run([sys.executable, str(tool), "--dir", str(unreadable), "--item", "widget-7"],
+                         capture_output=True, text=True)
+    assert bad.returncode != 0, bad.returncode          # the branch this case exists to exercise
+    got = _f.gather("sample-lib.sample_state", ctx)
+    assert got["analysis_ran"] is (bad.returncode == 0), (bad.returncode, got)
+    assert (got["item_found"], got["item_dir"], got["assertions_failed"],
+            got["failed_assertions"], got["item_settled"]) == (False, "", 0, [], False), got
+
+    # (3) A run the store never recorded an item for is the same honest nothing by a different
+    # route: no reading happens at all, so the flag is false without the tool ever being run.
+    absent = _f.gather("sample-lib.sample_state", {**ctx, "run_id": "no-such-run"})
+    assert absent["analysis_ran"] is False, absent
 
 
 def test_a_net_dependent_provider_declares_the_host_and_touches_no_credentials(env):
@@ -3621,43 +3822,128 @@ def test_every_legal_value_of_the_state_claim_can_be_contradicted(env, tmp_path,
 
 
 
-def test_a_coordinator_that_answers_but_not_about_this_task_is_not_reachable(env):
-    """"Could not look" must not read as "looked and it was fine".
+_LK_BODY = """
+requires: [sample-lib]
+uses: [ability_deps, facts]
+facts:
+  providers: [sample-lib.sample_lookup]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    completion:
+      type: evidence
+      kind: sample_item
+  - id: B
+    phase: p
+    deps: [A]
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence_in
+          kind: sample_report
+          values: [reachable, unreachable]
+        - type: claim_corroborated
+          kind: sample_report
+          claims: [unreachable]
+          disproved_when:
+            fact: lookup_reachable
+            equals: true
+"""
 
-    An endpoint that responds while knowing nothing about this task is a third state, and the
-    copied tool names it `indeterminate` with the comment "we could not look -> NO-OP is NOT
-    granted". Mapping it to reachable would let a run claim `unreachable` be refused while
-    nothing had in fact been verified — so it maps to NOT reachable, and this pins it with a
-    local server that answers 404 rather than depending on any network.
+
+@pytest.mark.parametrize("path_suffix,answers,expect_claim_survives", [
+    # THE THIRD STATE. It answered, and what it said was "never heard of this item". Read as
+    # reachable, a run claiming it could NOT verify would be refused — at the exact moment nothing
+    # had been verified. So the claim of unreachability must SURVIVE here.
+    ("unknown-thing", 404, True),
+    # Answered, and about the item. Now the claim of unreachability is false and must be refused.
+    ("known", 200, False),
+])
+def test_an_endpoint_that_answers_without_knowing_the_item_is_not_reachable(
+        env, tmp_path, path_suffix, answers, expect_claim_survives):
+    """"Could not look" and "looked, and it knows nothing" are different, and neither is "fine".
+
+    Two states cannot express this. An endpoint that responds while knowing nothing about the thing
+    you asked for has ANSWERED and has told you nothing — and the two-state reading of that is "it
+    replied, so it is reachable", which turns an honest claim of "I could not verify this" into a
+    refusal. The provider therefore reports three flags and derives the verdict itself, rather than
+    leaving each consumer to decide that two out of three is close enough.
+
+    Pinned with a local server rather than a network, so the case is reproducible and the test does
+    not depend on what the internet happens to be doing.
     """
     import http.server
     import threading
 
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):                      # noqa: N802 — http.server names this
-            self.send_response(404)
+            self.send_response(200 if self.path.endswith("/known") else 404)
             self.end_headers()
-            self.wfile.write(b"nope")
+            self.wfile.write(b"x")
 
         def log_message(self, *a):             # keep the test output clean
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    d = _fleet_fixture()
-    e = {**env, "FLEET_CENTRAL_URL": f"http://127.0.0.1:{srv.server_port}"}
+    port = srv.server_port
+    # BOTH overrides, because the engine probes the capability before the provider runs: pointing the
+    # provider at a local server while the capability still named an unreachable host would refuse
+    # before anything was asked, and the three states would be unobservable.
+    e = {**env,
+         "HARNESS_SAMPLE_ENDPOINT": f"http://127.0.0.1:{port}",
+         "HARNESS_SAMPLE_ENDPOINT_HOST": f"127.0.0.1:{port}"}
+    d = _spec(env, "__lk__", _LK_BODY)
     try:
-        assert rc(["open", "__fleet_test__", "--scope", str(REPO), "--run", "fli"], env) == OK
-        assert rc(["evidence", "--run", "fli", "--step", "S1",
-                   "--kind", "fleet_task", "--value", "T-1"], env) == OK
-        assert rc(["close-step", "--run", "fli", "--step", "S1"], env) == OK
-        assert rc(["evidence", "--run", "fli", "--step", "S2",
-                   "--kind", "fleet_report", "--value", "unreachable"], env) == OK
-        # The server ANSWERED — so if 404 were read as reachable, this claim would be refused.
-        assert rc(["close-step", "--run", "fli", "--step", "S2"], e) == OK
+        assert rc(["open", "__lk__", "--scope", "lks", "--run", "lk1"], e) == OK
+        assert rc(["evidence", "--run", "lk1", "--step", "A", "--kind", "sample_item",
+                   "--value", path_suffix], e) == OK
+        assert rc(["close-step", "--run", "lk1", "--step", "A"], e) == OK
+        assert rc(["evidence", "--run", "lk1", "--step", "B", "--kind", "sample_report",
+                   "--value", "unreachable"], e) == OK
+        # THE THREE FLAGS, ASSERTED DIRECTLY. Driving the criterion alone was not enough: a mutation
+        # that deleted the third-state branch left this test green, because the provider's default for
+        # `lookup_reachable` is already False and the fallthrough happened to be safe. What the test
+        # must pin is the SHAPE — answered and knows-the-item are separate answers — not the fact that
+        # one code path currently gets it right.
+        import sys as _s
+        _s.path.insert(0, str(REPO))
+        from engine import facts as _f, flow as _fl
+        for k, v in e.items():
+            os.environ[k] = v
+        _f._PROBE_CACHE.clear()
+        _fl.load("sample-lib")
+        got = _f.gather("sample-lib.sample_lookup", {"run_id": "lk1", "scope": "lks"})
+        assert got["lookup_probed"] is True, got
+        assert got["lookup_answered"] is True, (
+            f"the local server answered {answers}; a provider that reports otherwise is not "
+            f"describing this world: {got}")
+        assert got["lookup_knows_item"] is (answers == 200), got
+        assert got["lookup_reachable"] is (answers == 200), (
+            f"answered={got['lookup_answered']} and knows_item={got['lookup_knows_item']} must not "
+            f"collapse into one verdict — that collapse is what this test exists to prevent: {got}")
+        # AND WHICH of the three it was, by name. Without this the flags alone leave "not reachable
+        # because nothing answered" and "not reachable because it answered about nothing" reading
+        # identically to whoever later reads the run — and the second one is the interesting case.
+        want = "answered_knows_item" if answers == 200 else "answered_unknown_item"
+        assert got["lookup_verdict"] == want, (
+            f"the verdict must name WHICH state this was, not merely that it was not reachable: {got}")
+
+        out = run(["close-step", "--run", "lk1", "--step", "B"], e)
+        if expect_claim_survives:
+            assert out.returncode == OK, (
+                f"the server answered {answers} about an item it does not know, so a claim of "
+                f"unreachability is TRUE and must close:\n{out.stdout}{out.stderr}")
+        else:
+            assert out.returncode == REFUSED, (
+                f"the server answered {answers} ABOUT this item, so the claim is false and the "
+                f"criterion must refuse:\n{out.stdout}{out.stderr}")
+            assert "lookup_reachable" in out.stdout + out.stderr, out.stdout + out.stderr
     finally:
         srv.shutdown()
-        _cap_cleanup(d)
+        _rm(d)
 
 
 
@@ -3712,38 +3998,59 @@ def test_a_linked_worktree_is_told_apart_from_a_source_checkout(env, tmp_path, m
 
 
 
-def test_the_resident_lesson_snapshot_is_not_mistaken_for_the_authority(env):
-    """The snapshot ships in context; the store decides. Both halves pinned.
+def test_a_corroborating_fact_comes_from_a_provider_and_not_from_the_run(env):
+    """What refutes a claim must be OWNED elsewhere, or the check is the claim agreeing with itself.
 
-    Adding the rendered lesson file back as a resource closed a real regression — the criterion
-    could prove the store had been consulted, but the lessons themselves were no longer in front
-    of the agent. It also creates a trap: a file in version control next to a machine-local
-    store that is deliberately NOT, so on a machine whose store was rebuilt the file can be
-    older. Whoever reads the file as the count is then reporting a stale number as a live one.
+    A `claim_corroborated` criterion is only worth more than `evidence_in` if the fact that can
+    disprove it comes from somewhere the run does not control. Two things make that true, and this
+    pins both:
 
-    So the map has to say which one wins, and the criterion has to keep reading the store.
+    * the fact is produced by a PROVIDER — python in the engine's registry, reading the world — and
+      not by anything recorded during the run;
+    * the provider is owned by a DIFFERENT ability, reached through `requires:`. Self-owned would
+      still be a provider, but "the flow that makes the claim also supplies the refutation" is a much
+      weaker sentence, and the namespaced ownership is what lets a reader tell the two apart.
+
+    Split from a version that also pinned one ability set's own wording about which of a checked-in
+    snapshot and a machine-local store decides. That is a fact about somebody's document, not about
+    this seam, and it lives in that set's own suite now.
     """
-    from engine import flow as flowmod
-    cap = (REPO / "integrations" / "CAPABILITIES.md").read_text(encoding="utf-8")
-    flat = cap.replace("**", "").replace("`", "")
-    assert "它是快照，不是权威源" in flat, "the map must say which of the two decides"
-    assert "冲突时库赢" in flat, "and it must say which way the conflict resolves"
-
-    # The criterion must still consult the STORE, not the file: the corroborating facts come
-    # from a provider, and a provider reading a checked-in snapshot would defeat the point.
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
     import yaml as _y
-    fl = _y.safe_load((REPO / "abilities" / "shipcheck-asis" / "flow.yaml").read_text())
-    c00 = next(x for x in fl["steps"] if x["id"] == "C00")
-    claims = [c for c in c00["completion"]["checks"]
-              if c["type"] == "claim_corroborated" and c.get("kind") == "hot_set_state"]
-    assert len(claims) == 3, claims
-    facts_used = {c["disproved_when"]["fact"] for c in claims}
-    assert facts_used == {"hot_set_count", "hot_banner_readable"} or len(facts_used) >= 2, (
-        facts_used
-    )
-    owner = flowmod.load("shipcheck-asis").facts_owner
-    for f in facts_used:
-        assert owner.get(f) == "memory.hot_set", (f, owner.get(f))
+
+    corroborated = []
+    for name in _fl.available_abilities():
+        f = _fl.load(name)
+        if f.role != _fl.ROLE_PRODUCTION:
+            continue
+        raw = _y.safe_load((_fl.ability_dir(name) / "flow.yaml").read_text(encoding="utf-8"))
+        for st in raw["steps"]:
+            for c in ((st.get("completion") or {}).get("checks") or []):
+                if c["type"] == "claim_corroborated":
+                    corroborated.append((name, f, st["id"], c["disproved_when"]["fact"]))
+    assert len(corroborated) >= 2, (
+        f"fewer than two corroborated claims are installed, so this cannot show the pattern rather "
+        f"than one instance of it: {corroborated}")
+
+    borrowed_seen = False
+    for name, f, sid, fact in corroborated:
+        owner = f.facts_owner.get(fact)
+        assert owner, (
+            f"{name}/{sid} can be disproved by {fact!r}, which no provider owns — so nothing outside "
+            f"the run produces it and the check cannot contradict anything")
+        assert "." in owner, (name, sid, fact, owner)
+        if not owner.startswith(f.ability + "."):
+            borrowed_seen = True
+            # BORROWING IS DECLARED, not implicit. A provider reachable without `requires:` would let
+            # a flow depend on another ability's machinery while the spec said nothing.
+            assert owner.split(".")[0] in f.requires, (
+                f"{name}/{sid} is disproved by {fact!r} from {owner}, which it does not "
+                f"`requires:` — the dependency would be real and undeclared")
+    assert borrowed_seen, (
+        "every corroborating fact is self-owned; the stronger form — refuted by an ability the "
+        "claiming flow had to declare a dependency on — is unexercised")
 
 
 
@@ -3911,21 +4218,26 @@ def test_a_fixture_is_kept_out_of_the_routing_roster_and_the_strength_report(env
 
 
 def test_a_review_publish_is_guarded(env, tmp_path):
-    """Publishing a comment onto someone else's review is the one irreversible act here.
+    """Publishing a note about something that already happened is the one irreversible act here.
 
     In the source this is a prose MUST ("never auto-publish without user confirmation"); here it
-    is a gate plus a match rule, so the runtime refuses the call rather than relying on the
-    agent having read the sentence.
+    is a gate (N02) plus a match rule (`publish_note`), so the runtime refuses the call rather than
+    relying on the agent having read the sentence. The scope is an identifier, not a location, so
+    the action is attributed to this run only by that key appearing in the payload.
     """
     import json as _json
-    assert rc(["open", "cr-reviewer", "--scope", "CR-12345678", "--run", "rv"], env) == OK
-    blocked = rc(["guard-tool", "--tool", "CRAddComment",
-                  "--input-json", _json.dumps({"cr": "CR-12345678", "publish": True}),
+    assert rc(["open", "sample-note", "--scope", "NOTE-42", "--run", "rv"], env) == OK
+    # Names this run's note (→ this run owns it) AND is a `publish-note` command at command
+    # position: guarded until N02 is recorded, so it is refused at the tool call. The payload key
+    # is the one the guard declares (`field: command`); no odd shaping is needed to make it fire.
+    blocked = rc(["guard-tool", "--tool", "shell",
+                  "--input-json", _json.dumps({"command": "publish-note NOTE-42", "ref": "NOTE-42"}),
                   "--cwd", str(tmp_path)], env)
     assert blocked == BLOCKED
-    # A DRAFT is not the guarded action — drafting freely is the whole point of drafting.
-    assert rc(["guard-tool", "--tool", "CRAddComment",
-               "--input-json", _json.dumps({"cr": "CR-12345678", "publish": False}),
+    # A DRAFT is not the guarded action — it names the same note (still attributed to this run) but
+    # is not a `publish-note` call, so drafting freely is the whole point of drafting.
+    assert rc(["guard-tool", "--tool", "shell",
+               "--input-json", _json.dumps({"command": "draft-note NOTE-42", "ref": "NOTE-42"}),
                "--cwd", str(tmp_path)], env) == OK
 
 
@@ -6072,7 +6384,7 @@ def test_next_states_its_requirements_as_data(env):
     `predicates.requirements()` already returns a machine-readable list; the text form flattens
     it into lines. The JSON form carries it unflattened, which is the point of the whole flag.
     """
-    assert rc(["open", "shipcheck-asis", "--scope", "/repo/K", "--run", "K1"], env) == OK
+    assert rc(["open", "sample-change", "--scope", "/repo/K", "--run", "K1"], env) == OK
     out = run(["next", "--run", "K1", "--json"], env)
     assert out.returncode == OK, out.stderr
     d = json.loads(out.stdout)
@@ -7092,16 +7404,37 @@ def test_a_guard_a_hook_cannot_fire_is_reported_not_hidden(env, tmp_path):
     none, so it was invisible in the contract — and a reader would conclude the hook covers
     everything guarded. `abilities` had the same gap.
     """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
+
     d = json.loads(run(["abilities", "--json"], env).stdout)
     reach = {a["ability"]: a.get("guard_reach") or {} for a in d["abilities"]}
-    assert reach["delivery"] == {"close_task": "ask_only", "commit": "ask_only",
-                                 "publish": "ask_only"}, reach["delivery"]
-    assert set(reach["shipcheck-asis"].values()) == {"hook"}, reach["shipcheck-asis"]
+
+    # BOTH VERDICTS MUST BE PRESENT SOMEWHERE, or this test is asserting against a set where only
+    # one of them can occur. Derived from the installed flows rather than written down: a table of
+    # ability names here would go stale the moment a guard gains a matcher — which is exactly what
+    # happened to the version of this test that named `delivery commit` as its ask-only example,
+    # the day that guard got one.
+    verdicts = {v for m in reach.values() for v in m.values()}
+    assert verdicts == {"hook", "ask_only"}, (
+        f"the installed set must contain both kinds for this to mean anything: {reach}")
+
+    # And the ask-only ones are all on UNROUTABLE flows. That is the invariant this reporting exists
+    # to protect — a production flow relying on a guard only an explicit caller can consult is
+    # protection that depends on the protected party's cooperation, and it has its own test.
+    ask_only = {(n, a) for n, m in reach.items() for a, v in m.items() if v == "ask_only"}
+    assert ask_only, "nothing exercises the ask-only form; it would be an untested spec shape"
+    for name, action in ask_only:
+        assert _fl.load(name).role in _fl.ROLES_UNROUTABLE, (name, action)
 
     body = run(["brief"], env).stdout
     assert "Not every guarded action is in that list" in body
-    assert "delivery  commit" in body
     assert "depend on the driver choosing to ask" in body
+    # Every ask-only action is NAMED in the contract, not merely counted. A count would leave the
+    # reader knowing something is uncovered without knowing what.
+    for name, action in ask_only:
+        assert f"{name}  {action}" in body, (name, action, body)
 
     # And the TEXT form of `abilities` marks it, which only shows for a non-fixture — so this
     # builds one, because the shipped flows deliberately have none.
@@ -7672,8 +8005,8 @@ def test_every_write_command_answers_in_json_and_only_in_json(env, tmp_path):
     assert d["command"] == "close-run" and d["closed"] is True
 
     # skip lives on a flow that declares an optional step.
-    run(["open", "plan", "--scope", "slug-j", "--run", "pj"], env)
-    d = _one_json(run(["skip", "--run", "pj", "--step", "D03",
+    run(["open", "sample-change", "--scope", "slug-j", "--run", "pj"], env)
+    d = _one_json(run(["skip", "--run", "pj", "--step", "D01",
                        "--reason", "not needed", "--json"], env))
     assert d["command"] == "skip" and d["skipped"] is True and d["reason"] == "not needed"
 
@@ -9552,34 +9885,67 @@ steps:
 """
 
 
-def test_a_claimed_plan_filing_is_checked_against_the_corpus(env, monkeypatch, tmp_path):
-    """The upgrade this extraction bought: a file move stops being self-reported.
+_SL_BODY = """
+requires: [sample-lib]
+uses: [ability_deps, facts]
+facts:
+  providers: [sample-lib.sample_state]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    completion:
+      type: all_checks
+      checks:
+        - type: evidence
+          kind: sample_item
+        - type: claim_corroborated
+          kind: sample_status
+          claims: [review]
+          disproved_when:
+            fact: item_dir
+            matches_none: [review]
+"""
 
-    `plan` S03, `push` C04 and `push` Z02 each recorded a status and the engine believed it, because
-    locating the document lived in a provider only the ship could borrow. Here the same criterion is
-    driven both ways — the claim survives when the document is really there, and is refused when it
-    sits somewhere else.
+
+def test_a_claimed_filing_is_checked_against_where_the_item_really_is(env, tmp_path):
+    """A move stops being self-reported, and the refusal NAMES the folder it actually found.
+
+    This is the whole difference a borrowed locating provider buys. Without it the criterion is "a row
+    of this kind exists", which accepts a status nobody produced; with it the status is a CLAIM and an
+    independent reader of the filesystem can contradict it.
+
+    Driven BOTH ways on purpose. A test that only showed the refusal would leave "is this criterion
+    satisfiable at all" unanswered — and a criterion that can never be met is a worse defect than one
+    that never refuses, because the way out of it is to delete the check.
     """
-    slug = "2026-09-15T00-00-a-plan"
-    base = _corpus(tmp_path, slug, "done", status="pending")   # says pending, sits in done
-    monkeypatch.setenv("HARNESS_PLAN_DATA_DIR", str(base))
-    e = {**env, "HARNESS_PLAN_DATA_DIR": str(base)}
-    d = _spec(env, "__pc__", _PC_BODY)
+    data = tmp_path / "sample"
+    for folder in ("intake", "review", "settled"):
+        (data / folder).mkdir(parents=True)
+    item = "widget-9"
+    # It SAYS review, and it SITS in settled.
+    (data / "settled" / f"{item}.json").write_text(
+        json.dumps({"status": "review", "failed": 0}), encoding="utf-8")
+
+    e = {**env, "HARNESS_SAMPLE_DIR": str(data)}
+    d = _spec(env, "__sl__", _SL_BODY)
     try:
-        assert rc(["open", "__pc__", "--scope", "pcs", "--run", "r1"], e) == OK
-        assert rc(["evidence", "--run", "r1", "--step", "A", "--kind", "plan_doc",
-                   "--value", f"{base}/pending/{slug}.md"], e) == OK
-        assert rc(["evidence", "--run", "r1", "--step", "A", "--kind", "plan_status",
-                   "--value", "pending"], e) == OK
+        assert rc(["open", "__sl__", "--scope", "sls", "--run", "r1"], e) == OK
+        assert rc(["evidence", "--run", "r1", "--step", "A", "--kind", "sample_item",
+                   "--value", item], e) == OK
+        assert rc(["evidence", "--run", "r1", "--step", "A", "--kind", "sample_status",
+                   "--value", "review"], e) == OK
         out = run(["close-step", "--run", "r1", "--step", "A"], e)
         assert out.returncode == REFUSED, (out.returncode, out.stdout, out.stderr)
-        # The refusal must NAME the folder it actually found. A nested check's trace used to be
-        # dropped, so this ended on "an independent fact says otherwise:" and nothing after it.
         both = out.stdout + out.stderr
-        assert "plan_doc_dir" in both and "'done'" in both, both
+        # The refusal must name the FACT and the value it actually read. A nested check's trace used
+        # to be dropped, so this ended on "an independent fact says otherwise:" and nothing after it.
+        assert "item_dir" in both, both
+        assert "'settled'" in both, both
 
         # Now really file it where the claim says, and the same claim closes.
-        (base / "done" / f"{slug}.md").rename(base / "pending" / f"{slug}.md")
+        (data / "settled" / f"{item}.json").rename(data / "review" / f"{item}.json")
         assert rc(["close-step", "--run", "r1", "--step", "A"], e) == OK
     finally:
         _rm(d)
@@ -10194,3 +10560,230 @@ def test_a_portable_brief_refuses_to_carry_one_persons_bindings(env):
     r = run(["brief", "--agent", "sample-agent", "--portable"], e)
     assert r.returncode == USAGE, r.stdout + r.stderr
     assert "different audiences" in r.stderr, r.stderr
+
+
+_PROD_BODY = """
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: tools/does-not-exist.sh
+    completion:
+      type: evidence
+      kind: k
+  - id: B
+    phase: p
+    deps: [A]
+    produced_by: ../../../../etc/hosts
+    completion:
+      type: evidence
+      kind: k
+"""
+
+
+def test_a_producer_pointer_is_resolved_for_the_caller_not_left_to_be_searched(env):
+    """A relative pointer the caller has to resolve is a pointer the caller will resolve WRONG.
+
+    The field is written relative to the declaring ability, which is right — a spec naming its own
+    absolute location would be true on one machine only. But then the ENGINE is the only party that
+    knows what it is relative to, and a caller handed `tools/x.sh` has no basis for resolving it.
+
+    What a caller does instead is search, and that is the failure this pins. Measured on a real run: a
+    driver looked for the file under the engine's own `abilities/` and under a skills tree, found
+    neither the current copy (it lives under a different root, beside a personal ability set) nor
+    nothing at all — it found a month-old file of the same name from a previous layout and used it.
+    That copy hard-coded a state directory the current one derives, so the run provisioned its working
+    tree in the wrong place and every check downstream still passed.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
+
+    producers = []
+    for name in _fl.available_abilities():
+        f = _fl.load(name)
+        for sid, st in f.steps.items():
+            if st.produced_by:
+                producers.append((name, f, sid, st.produced_by))
+    assert producers, "nothing installed declares a producer; this test asserted nothing"
+
+    for name, f, sid, declared in producers:
+        got = _fl.resolve_producer(f, sid)
+        assert got is not None, (name, sid)
+        assert got["declared"] == declared, got
+        # ABSOLUTE, and normalised — a caller cannot compare two answers that are not.
+        assert Path(got["path"]).is_absolute(), got
+        assert ".." not in Path(got["path"]).parts, got
+        # It resolves INTO an installed ability, and the owner is named. A `../<sibling>/…` pointer is
+        # legal; landing outside every root is not ordinary and must be reported, not hidden.
+        assert got["owner"], (
+            f"{name}/{sid} declares {declared!r}, which resolves outside every installed root "
+            f"({got['path']}) — the caller is being handed a path out of the tree with nothing said")
+        assert got["exists"] is True, (
+            f"{name}/{sid} points at {got['path']}, which is not there. Declared-but-absent is not "
+            f"the same as no producer, and a caller that searches for the name will find whatever "
+            f"else on this machine happens to have it")
+
+    # And a step with NO producer says so, rather than returning a path that resolves to the ability
+    # directory itself — which would read as "the whole ability produces this".
+    bare = [(f, sid) for _n, f, sid, _d in producers][0][0]
+    no_prod = [sid for sid, st in bare.steps.items() if not st.produced_by]
+    if no_prod:
+        assert _fl.resolve_producer(bare, no_prod[0]) is None
+
+
+def test_a_producer_that_is_absent_or_out_of_tree_is_reported_not_smoothed(env, tmp_path):
+    """Both dishonest answers are refused: silence about a missing file, silence about an escape.
+
+    `exists` is reported rather than enforced, because a pointer to a tool not yet written is a
+    legitimate state while authoring. What is not legitimate is handing the path back as though
+    something were there — that is how "I ran it" becomes untrue with nothing in the log to show it.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
+
+    d = _spec(env, "__prod__", _PROD_BODY)
+    try:
+        f = _fl.load("__prod__")
+        absent = _fl.resolve_producer(f, "A")
+        assert absent["exists"] is False, absent
+        assert absent["owner"] == "__prod__", absent
+        assert Path(absent["path"]).is_absolute()
+
+        escaped = _fl.resolve_producer(f, "B")
+        assert escaped["owner"] is None, (
+            f"a pointer that climbs out of every abilities root must be reported as such: {escaped}")
+        assert ".." not in Path(escaped["path"]).parts, escaped
+    finally:
+        _rm(d)
+
+
+def test_next_hands_over_the_resolved_producer_in_both_forms(env, tmp_path):
+    """The text form and `--json` must agree, and the JSON form must carry it AT ALL.
+
+    It did not: the envelope omitted the field entirely, so an adapter driving this engine through
+    JSON could not learn that a step had a producer — only somebody reading the prose could. A
+    mechanism reachable from one of two documented interfaces is a mechanism half the callers cannot
+    use.
+
+    Driven on a purpose-built spec whose FIRST step declares the producer, so neither form is checked
+    by accident: relying on `next` happening to land on the right step would make this pass on a flow
+    where it never looked.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
+
+    body = """
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: tools/present.sh
+    completion:
+      type: evidence
+      kind: k
+"""
+    d = _spec(env, "__prodnext__", body)
+    (d / "tools").mkdir(exist_ok=True)
+    (d / "tools" / "present.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    try:
+        want = _fl.resolve_producer(_fl.load("__prodnext__"), "A")
+        assert want["exists"] is True and want["owner"] == "__prodnext__", want
+
+        assert rc(["open", "__prodnext__", "--scope", "pn", "--run", "pn1"], env) == OK
+
+        j = json.loads(run(["next", "--run", "pn1", "--json"], env).stdout)
+        assert j["step"] == "A", j["step"]
+        assert "produced_by" in j, (
+            "the field must be present even when null, or every consumer writes the same "
+            "`.get(...)` and one of them reads absent as 'no producer'")
+        assert j["produced_by"]["path"] == want["path"], j["produced_by"]
+        assert j["produced_by"]["declared"] == "tools/present.sh", j["produced_by"]
+        assert j["produced_by"]["exists"] is True, j["produced_by"]
+
+        text = run(["next", "--run", "pn1"], env).stdout
+        # THE RESOLVED PATH IS IN THE PROSE, not only the pointer. That is the whole change: a reader
+        # who gets `tools/present.sh` goes searching, and a search finds same-named files elsewhere.
+        assert want["path"] in text, text
+    finally:
+        # CLEANED BY THIS TEST, because `_rm` only rmdir's the ability directory itself — it cannot
+        # remove the `tools/` this test had to create. A leftover directory under an abilities root is
+        # not inert: it becomes an installed ability for every later test in the session.
+        (d / "tools" / "present.sh").unlink(missing_ok=True)
+        (d / "tools").rmdir()
+        _rm(d)
+
+
+def test_a_missing_producer_is_called_out_in_the_prose_form(env):
+    """Declared-but-absent has to be LOUD, because the alternative reads as a working pointer.
+
+    A caller handed a path that is not there does one of two things: notices, or searches for the
+    name and uses whatever it finds. The second is what happened on a real run, so the prose form says
+    so in words rather than leaving the reader to stat the file.
+    """
+    body = """
+uses: [producers]
+phases:
+  - id: p
+steps:
+  - id: A
+    phase: p
+    produced_by: tools/not-written-yet.sh
+    completion:
+      type: evidence
+      kind: k
+"""
+    d = _spec(env, "__prodmiss__", body)
+    try:
+        assert rc(["open", "__prodmiss__", "--scope", "pm", "--run", "pm1"], env) == OK
+        text = run(["next", "--run", "pm1"], env).stdout
+        assert "NOTHING IS THERE" in text, text
+        assert "do not substitute another file of the same name" in text, text
+        j = json.loads(run(["next", "--run", "pm1", "--json"], env).stdout)
+        assert j["produced_by"]["exists"] is False, j["produced_by"]
+    finally:
+        _rm(d)
+
+
+def test_where_an_ability_lives_is_answerable_not_guessable(env):
+    """`abilities/` is no longer one directory, so "where is it" stopped being derivable by a caller.
+
+    The engine has its own root and each person's set sits under another. A caller that searched "under
+    abilities/" therefore missed every ability in the second root — and, on a real run, found a stale
+    same-named file from a previous layout instead. So the root is published per ability.
+
+    Reported on the INVALID branch too: a caller that cannot load a spec still needs to know where the
+    thing it could not load lives, and omitting the path exactly when something is wrong omits it when
+    it is most needed.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow as _fl
+
+    d = json.loads(run(["abilities", "--json"], env).stdout)
+    assert d["abilities"], d
+    for a in d["abilities"]:
+        assert a.get("root"), a
+        root = Path(a["root"])
+        assert root.is_absolute(), a
+        assert (root / "flow.yaml").is_file(), (
+            f"{a['ability']} reports a root with no spec in it: {root}")
+        assert root == _fl.ability_dir(a["ability"]), (a["ability"], a["root"])
+
+    # A spec that does not LOAD still reports where it is.
+    bad = _spec(env, "__broken__", "phases:\n  - id: p\nsteps:\n  - id: A\n    phase: nope\n")
+    try:
+        d2 = json.loads(run(["abilities", "--json"], env).stdout)
+        row = next(a for a in d2["abilities"] if a["ability"] == "__broken__")
+        assert row["valid"] is False, row
+        assert row.get("root"), (
+            "the invalid branch drops the root, which is the branch a reader most needs it on")
+        assert Path(row["root"]).name == "__broken__", row
+    finally:
+        _rm(bad)

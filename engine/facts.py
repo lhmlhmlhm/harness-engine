@@ -139,7 +139,13 @@ def _probe(kind: str, arg: str, base: Path) -> bool:
     # expansion is that VAR can differ between callers, that cache would serve a stale answer
     # precisely when the override mattered. Found by the suite: which tests failed moved with
     # execution order, because a test that set the variable poisoned the entry for the next one.
-    expanded = expand_env(arg) if kind == "file" else arg
+    # EVERY KIND IS EXPANDED, not just `file`. The asymmetry was arbitrary and it had a consequence:
+    # a `net` capability could only ever name the host its author typed, so a provider that declared
+    # one was undrivable in a test — the probe refused before the provider ran, and no amount of
+    # arranging a local server could change that. The engine then shipped a capability kind nothing
+    # could exercise. Same reasoning for `cmd` and `env`: the reason `file` needed it (a caller must
+    # be able to point it somewhere else) does not depend on what is being pointed at.
+    expanded = expand_env(arg)
     key = (kind, expanded, str(base))
     if key in _PROBE_CACHE:
         return _PROBE_CACHE[key]
@@ -148,11 +154,11 @@ def _probe(kind: str, arg: str, base: Path) -> bool:
         pth = Path(expanded).expanduser()
         ok = (pth if pth.is_absolute() else base / pth).exists()
     elif kind == "cmd":
-        ok = shutil.which(arg) is not None
+        ok = shutil.which(expanded) is not None
     elif kind == "env":
-        ok = bool(os.environ.get(arg, "").strip())
+        ok = bool(os.environ.get(expanded, "").strip())
     elif kind == "net":
-        host, _, port = arg.partition(":")
+        host, _, port = expanded.partition(":")
         try:
             with socket.create_connection((host, int(port or 443)), NET_TIMEOUT):
                 ok = True
@@ -205,7 +211,12 @@ def probe_capabilities(name: str) -> list:
     for desc in entry["requires"]:
         kind, arg = next(iter(desc.items()))
         if not _probe(kind, str(arg), entry["base"]):
-            out.append((kind, str(arg)))
+            # REPORTED AS EXPANDED, not as written. The spec may be `${VAR:-default}`, and a message
+            # naming the variable tells the reader about a knob when what they need is the value it
+            # resolved to — the host that did not answer, the path that was not there. Measured on
+            # the shipped sample: "needs net '${HARNESS_SAMPLE_ENDPOINT_HOST:-sample.invalid:443}'"
+            # sends somebody to look up an environment variable to find out what was probed.
+            out.append((kind, expand_env(str(arg))))
     return out
 
 

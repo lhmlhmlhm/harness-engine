@@ -729,6 +729,57 @@ def spec_path(ability: str) -> Path:
     return ability_dir(ability) / "flow.yaml"
 
 
+def resolve_producer(f: "Flow", step_id: str) -> dict | None:
+    """Turn a step's `produced_by` pointer into a path the caller can actually run.
+
+    WHY THE ENGINE HAS TO DO THIS, and why leaving it to the caller was measured as a defect. The
+    field is written relative to the ability that declares it — which is the right way to write it,
+    because a spec that hard-coded its own absolute location would only be true on one machine. But
+    the ENGINE is the only party that knows what it is relative to: the caller sees a bare
+    `tools/x.sh` and has no basis for resolving it.
+
+    What a caller does instead is SEARCH, and the search is what goes wrong. Observed on a real run:
+    a driver looked for the file under the engine's own `abilities/` and under the skills tree, found
+    neither the current copy (it lives beside a personal ability set, under a different root) nor
+    nothing at all — it found a month-old file of the same name left behind by an earlier layout, and
+    used it. That copy hard-coded a state directory the current one derives, so the run's working
+    tree was provisioned in the wrong place, and every check downstream still passed.
+
+    Returns None when the step declares no producer. Otherwise a dict with:
+
+        declared  the pointer as written, so a reader can see what the spec said
+        path      absolute, resolved against the DECLARING ability's directory
+        exists    whether anything is there — reported rather than enforced, because a pointer to a
+                  tool that has not been written yet is a legitimate state while a spec is still
+                  being drafted, while silently handing back a path that is not there is how
+                  "I ran it" becomes untrue
+        owner     which ability's directory it resolved into, or None when it escapes every root.
+                  A `../<other>/…` pointer is legal (an ability may name a sibling's tool), but one
+                  that lands outside every installed root is reaching out of the tree, and the
+                  caller should be told rather than handed the path as if it were ordinary.
+    """
+    st = f.steps.get(step_id)
+    if st is None or not st.produced_by:
+        return None
+    declared = st.produced_by
+    base = ability_dir(f.ability)
+    # `resolve()` and not `absolute()`: the pointer may contain `..`, and a caller that gets an
+    # unnormalised path back cannot tell whether two answers name the same file.
+    target = (base / declared).resolve()
+
+    owner = None
+    for root in abilities_roots():
+        try:
+            rel = target.relative_to(root.resolve())
+        except (ValueError, OSError):
+            continue
+        owner = rel.parts[0] if rel.parts else None
+        break
+    return {"declared": declared, "path": str(target),
+            "exists": target.exists(), "owner": owner}
+
+
+
 _EXTENSIONS_LOADED: set[str] = set()
 
 

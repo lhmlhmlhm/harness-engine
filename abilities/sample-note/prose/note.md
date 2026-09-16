@@ -21,6 +21,16 @@ something not yet done is a different flow.
 Ask, then end the turn. Recording your own confirmation in the same turn is refused by the witness,
 and that refusal is the mechanism rather than an obstacle in front of it.
 
+## Step: N02brief Brief note — one line, and nothing else
+
+> - **Applies under**: variant `brief` (the default).
+> - **Complete**: one `sample_brief` row.
+
+This step is what makes the two variants a real FORK: each value owns something the other does not.
+A `full` that only added a step would be an `optional: true` wearing a variant's name — the engine
+already has optional steps, and a construct that duplicates an existing one teaches the reader the
+wrong thing about both of them.
+
 ## Step: N02full Full note — say what it changes
 
 > - **Applies under**: variant `full`, passed with `--variant`.

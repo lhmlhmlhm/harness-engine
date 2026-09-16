@@ -110,6 +110,12 @@ POINTERS to a longer guide and to named topics. Fetch those on demand.
 Some steps may legitimately never run. Record that decision rather than leaving them
 open, or the run cannot be closed.
 
+## Repeatable steps
+
+Some steps may run more than once — a fix-and-recheck cycle. Some carry a budget; when
+it is exhausted the engine records that fact rather than letting the loop continue
+silently.
+
 ## Mutually exclusive steps
 
 Some steps come in groups where exactly one member ever runs. Closing one satisfies the
