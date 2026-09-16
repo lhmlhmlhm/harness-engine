@@ -50,9 +50,24 @@ END = "<!-- END GENERATED -->"
 # duplicated: WIRING.md got these two guards first and README.md then drifted in 7 places while
 # WIRING.md drifted in 0 — so the guards are the asset, and a third generated doc should inherit
 # them by adding one line here, not by someone remembering to copy two tests.
+# Each entry carries ITS OWN marker pair. It used to rely on the `BEGIN` prefix above finding the
+# one block in the file — true until README grew a second generated block (the flow.yaml field
+# reference). With a prefix, `text.index(BEGIN)` returns whichever block comes first, so the two
+# renderers would both be compared against the same block and one of them would fail for a reason
+# that has nothing to do with it. A third block is now one line here, which is what the note above
+# meant: inherit the guards, do not copy them.
+# Each entry carries ITS OWN marker pair, and each pair must be EXACT rather than a prefix. The
+# prefix form (`BEGIN` above) worked while every file had one block; once README grew a second one,
+# `<!-- BEGIN GENERATED` matched both, `text.index` returned whichever came first, and each renderer
+# was compared against the wrong block. The failure named the renderer, which is the least useful
+# place to look — the fault was in the locator.
 GENERATED = (
-    ("integrations/WIRING.md", "integrations/render-wiring.py"),
-    ("README.md", "integrations/render-readme.py"),
+    ("integrations/WIRING.md", "integrations/render-wiring.py",
+     "<!-- BEGIN GENERATED —", "<!-- END GENERATED -->"),
+    ("README.md", "integrations/render-readme.py",
+     "<!-- BEGIN GENERATED — python3 integrations/render-readme.py", "<!-- END GENERATED -->"),
+    ("README.md", "integrations/render-spec-fields.py",
+     "<!-- BEGIN GENERATED FIELDS", "<!-- END GENERATED FIELDS -->"),
 )
 
 # References a doc names that are NOT this project's, with the reason. Declared rather than
@@ -92,8 +107,8 @@ def _cli(*args, cwd=None, env_extra=None):
 
 # ------------------------------------------------------------------ derivable → generated
 
-@pytest.mark.parametrize("doc,renderer", GENERATED)
-def test_the_generated_block_matches_what_re_rendering_produces(doc, renderer):
+@pytest.mark.parametrize("doc,renderer,begin,end", GENERATED)
+def test_the_generated_block_matches_what_re_rendering_produces(doc, renderer, begin, end):
     """The facts that drifted are now generated, and this is what makes that mean something.
 
     Without it, "generated" would only describe how the text got there the first time.
@@ -104,9 +119,9 @@ def test_the_generated_block_matches_what_re_rendering_produces(doc, renderer):
     rendered = proc.stdout.strip()
 
     text = (REPO / doc).read_text(encoding="utf-8")
-    assert BEGIN in text and END in text, f"{doc}'s generated block markers are gone"
-    start = text.index(BEGIN)
-    in_file = text[start:text.index(END, start) + len(END)].strip()
+    assert begin in text and end in text, f"{doc}'s generated block markers are gone"
+    start = text.index(begin)
+    in_file = text[start:text.index(end, start) + len(end)].strip()
 
     assert in_file == rendered, (
         f"{doc}'s generated block is not what the renderer produces.\n"
@@ -114,8 +129,8 @@ def test_the_generated_block_matches_what_re_rendering_produces(doc, renderer):
     )
 
 
-@pytest.mark.parametrize("doc,renderer", GENERATED)
-def test_re_rendering_is_idempotent(doc, renderer):
+@pytest.mark.parametrize("doc,renderer,begin,end", GENERATED)
+def test_re_rendering_is_idempotent(doc, renderer, begin, end):
     """A generator that changes the file every run makes the guard above unusable — it would fail
     on a clean tree, and a guard that cries wolf is turned off."""
     path = REPO / doc
@@ -442,3 +457,64 @@ def test_every_env_var_the_engine_reads_is_named_in_some_doc():
         f"the engine reads these and no doc names them: {missing}\n"
         f"  A variable nobody wrote down is found only by whoever needed it, after failing to.\n"
         f"  Name it in one of: {', '.join((*DOCS, 'integrations/DRIVING.md'))}")
+
+
+# ── the flow.yaml field reference ──────────────────────────────────────────────────────────────────
+
+_FIELDS_RENDERER = REPO / "integrations" / "render-spec-fields.py"
+
+def test_the_readme_documents_every_key_the_engine_accepts():
+    """Every declared key appears in the README's field table, named as a key.
+
+    Measured before the table existed: of 37 declared keys, 7 appeared NOWHERE in the README and 9
+    appeared exactly once — listed in passing rather than explained. The prose is organised by design
+    argument, so a key with no story behind it never got written down; `config` was the sharpest case,
+    a top-level key that changes runtime behaviour with no documentation at all.
+
+    Asserted against the engine's own closed sets, so a key added later fails here rather than being
+    discovered by whoever writes a spec using it.
+    """
+    import sys as _s
+    _s.path.insert(0, str(REPO))
+    from engine import flow
+    doc = (REPO / "README.md").read_text(encoding="utf-8")
+    for keys, label in ((flow.TOP_KEYS, "top-level"), (flow.STEP_KEYS, "step")):
+        missing = [k for k in sorted(keys) if f"| `{k}` |" not in doc]
+        assert not missing, f"{label} key(s) with no row in the README field table: {missing}"
+
+
+def test_the_renderer_refuses_a_reference_that_has_drifted_from_the_engine():
+    """The refusal IS the anti-drift mechanism, so it is exercised rather than trusted.
+
+    Names are derivable from the engine; meanings are not, so the descriptions are hand-written beside
+    the generator. What keeps them honest is that the render FAILS when the two sets disagree — in
+    both directions. A key the engine accepts but nothing describes would render as an absent row,
+    and a reader cannot tell an undocumented key from a nonexistent one. A description for a key the
+    engine no longer accepts documents a spec that would exit 2.
+    """
+    src = _FIELDS_RENDERER.read_text(encoding="utf-8")
+    original = src
+
+    def render_with(text: str):
+        _FIELDS_RENDERER.write_text(text, encoding="utf-8")
+        try:
+            return subprocess.run([sys.executable, str(_FIELDS_RENDERER)],
+                                  capture_output=True, text=True, cwd=str(REPO))
+        finally:
+            _FIELDS_RENDERER.write_text(original, encoding="utf-8")
+
+    # ① a described key removed → the engine accepts a key nothing explains
+    i = src.index('    "config": (')
+    j = src.index('\n    "facts"', i)
+    proc = render_with(src[:i] + src[j + 1:])
+    assert proc.returncode != 0, "a missing description rendered anyway"
+    assert "config" in proc.stderr, proc.stderr
+
+    # ② a key the engine does not accept → documents a spec that would be refused
+    proc = render_with(src.replace('    "version": (',
+                                   '    "retired_key": ("x", "y"),\n    "version": (', 1))
+    assert proc.returncode != 0, "an unknown key rendered anyway"
+    assert "retired_key" in proc.stderr, proc.stderr
+
+    # And the file is back, or every later test reads a mutated renderer.
+    assert _FIELDS_RENDERER.read_text(encoding="utf-8") == original
